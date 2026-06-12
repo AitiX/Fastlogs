@@ -1,0 +1,13 @@
+{
+  "$GMScript":"v1",
+  "%Name":"scr_fastlogs_core",
+  "isCompatibility":false,
+  "isDnD":false,
+  "name":"scr_fastlogs_core",
+  "parent":{
+    "name":"FastLogs",
+    "path":"folders/FastLogs.yy",
+  },
+  "resourceType":"GMScript",
+  "resourceVersion":"2.0",
+}

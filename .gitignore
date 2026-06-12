@@ -1,0 +1,50 @@
+# ── Секреты (НИКОГДА не коммитить) ───────────────────────────────
+*.pem
+*.key
+*.ppk
+id_rsa*
+id_ed25519*
+dossh
+**/secrets/**
+.env
+.env.*
+!.env.example
+config/sinks.local.json
+
+# ── Node (server/) ───────────────────────────────────────────────
+node_modules/
+npm-debug.log*
+*.tgz
+coverage/
+# Данные сервера (локальные прогоны)
+*.db
+*.db-wal
+*.db-shm
+server/data/
+server/blobs/
+
+# ── Unity (unity/) ───────────────────────────────────────────────
+[Ll]ibrary/
+[Tt]emp/
+[Oo]bj/
+[Bb]uild/
+[Bb]uilds/
+[Ll]ogs/
+[Uu]serSettings/
+*.csproj
+*.sln
+*.user
+*.unityproj
+.vsconfig
+
+# ── GameMaker (gamemaker/) ───────────────────────────────────────
+*.yyz
+**/cache/**
+**/.gm/**
+*.resource_order.bak
+
+# ── Прочее ───────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

@@ -1,0 +1,20 @@
+[Unit]
+Description=FastLogs retention sweeper (oneshot)
+After=network.target
+
+[Service]
+Type=oneshot
+User=fastlogs
+Group=fastlogs
+EnvironmentFile=/etc/fastlogs/fastlogs.env
+WorkingDirectory=/var/lib/fastlogs/app/server
+ExecStart=/usr/bin/node scripts/sweep.js
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=fastlogs-sweeper
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/fastlogs/data /var/lib/fastlogs/blobs
+PrivateTmp=yes

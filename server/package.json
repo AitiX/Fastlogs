@@ -1,0 +1,23 @@
+{
+  "name": "fastlogs-server",
+  "version": "0.1.0",
+  "description": "FastLogs server: ingest, viewer, catalog, sinks, retention sweeper.",
+  "license": "MIT",
+  "private": true,
+  "type": "commonjs",
+  "main": "src/server.js",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node test/run.js",
+    "sweep": "node scripts/sweep.js",
+    "add-app": "node scripts/add-app.js",
+    "list-apps": "node scripts/list-apps.js",
+    "migrate": "node scripts/migrate.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.8.1"
+  }
+}

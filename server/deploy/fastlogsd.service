@@ -1,0 +1,35 @@
+[Unit]
+Description=FastLogs server
+After=network.target
+
+[Service]
+Type=simple
+User=fastlogs
+Group=fastlogs
+
+# Secrets and tunable config live in /etc/fastlogs/fastlogs.env (mode 640, root:fastlogs).
+# Copy .env.example, fill in tokens, then: systemctl restart fastlogsd.
+EnvironmentFile=/etc/fastlogs/fastlogs.env
+
+WorkingDirectory=/var/lib/fastlogs/app/server
+ExecStart=/usr/bin/node src/server.js
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=fastlogsd
+
+# Hardening.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+# Let fastlogs write only to its own data dirs.
+ReadWritePaths=/var/lib/fastlogs/data /var/lib/fastlogs/blobs
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+
+[Install]
+WantedBy=multi-user.target

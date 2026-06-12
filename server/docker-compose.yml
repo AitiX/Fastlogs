@@ -1,0 +1,25 @@
+# FastLogs - one-command local/VPS deploy.
+#
+#   cp .env.example .env   # set BASE_URL, ADMIN_TOKEN, VIEWER_TOKEN, IP_SALT
+#   docker compose up -d   # builds the image and starts the server on :8787
+#
+# Register an app inside the running container:
+#   docker compose exec fastlogs node scripts/add-app.js mygame "My Game" 30
+
+services:
+  fastlogs:
+    build: .
+    image: fastlogs-server
+    container_name: fastlogs
+    restart: unless-stopped
+    # Configuration comes from .env (gitignored). PORT/DATA_DIR/BLOB_DIR are set
+    # in the image; override anything here via the env file.
+    env_file:
+      - .env
+    ports:
+      # host:container - put nginx in front of this in production.
+      - "8787:8787"
+    volumes:
+      # Persist the SQLite DB and blob storage across container restarts.
+      - ./data:/app/data
+      - ./blobs:/app/blobs

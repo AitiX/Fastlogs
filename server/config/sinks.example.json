@@ -1,0 +1,64 @@
+{
+  "_comment": "Example global sinks config for FastLogs. Copy to config/sinks.json and edit. The file may be a bare array or this { sinks: [...] } wrapper. Each sink: { type, name?, enabled?, filter?, ...typeFields }. Per-app sinks (apps.sinks_json) are appended to this list. Replace all placeholder URLs/tokens. No real secrets in the repo.",
+
+  "sinks": [
+    {
+      "type": "slack",
+      "name": "qa-channel",
+      "enabled": true,
+      "filter": { "errorOnly": true },
+      "url": "https://hooks.slack.com/services/REPLACE/WITH/REAL",
+      "username": "FastLogs",
+      "iconEmoji": ":rotating_light:",
+      "mentionOnError": "<!here>"
+    },
+
+    {
+      "type": "discord",
+      "name": "dev-alerts",
+      "enabled": false,
+      "filter": { "minError": 1, "platforms": ["WebGL", "Android", "iOS"] },
+      "url": "https://discord.com/api/webhooks/REPLACE/WITH-REAL-TOKEN",
+      "username": "FastLogs",
+      "mentionOnError": "@here"
+    },
+
+    {
+      "type": "webhook",
+      "name": "generic-json",
+      "enabled": false,
+      "filter": { "minWarn": 5, "excludePlatforms": ["Windows", "macOS", "Linux"] },
+      "url": "https://example.com/ingest",
+      "method": "POST",
+      "headers": {
+        "X-Api-Key": "REPLACE_ME",
+        "X-Project": "{{project}}"
+      },
+      "bodyTemplate": {
+        "text": "{{projectName}} {{version}} [{{platform}}] {{counts.summary}}",
+        "link": "{{url}}",
+        "errors": "{{counts.error}}",
+        "raw": "{{json}}"
+      },
+      "retries": 3,
+      "timeoutMs": 10000
+    },
+
+    {
+      "type": "googlesheet",
+      "name": "qa-spreadsheet",
+      "enabled": false,
+      "url": "https://script.google.com/macros/s/REPLACE_DEPLOY_ID/exec",
+      "secret": "shared-secret-checked-by-apps-script"
+    },
+
+    {
+      "type": "confluence",
+      "name": "release-notes",
+      "enabled": false,
+      "mode": "webhook",
+      "filter": { "apps": ["lfa"] },
+      "url": "https://automation.atlassian.com/pro/hooks/REPLACE_WITH_WEBHOOK_ID"
+    }
+  ]
+}

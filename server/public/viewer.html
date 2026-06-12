@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="robots" content="noindex, nofollow">
+  <title>FastLogs</title>
+  <link rel="stylesheet" href="/viewer.css">
+</head>
+<body>
+<div class="page">
+
+  <div class="topbar">
+    <span class="topbar-logo">Fast<span>Logs</span></span>
+    <span class="topbar-sep">/</span>
+    <span class="topbar-title" id="page-title">Loading...</span>
+    <div class="topbar-actions">
+      <a class="btn btn-ghost" id="raw-link" href="#">Raw</a>
+      <button class="btn btn-ghost" id="copy-link-btn" type="button">Copy link</button>
+      <button class="btn btn-pin" id="pin-btn" type="button">Pin</button>
+    </div>
+  </div>
+
+  <div class="counts-bar" id="counts-bar">
+    <span class="count-item count-error">
+      <span class="count-dot count-dot-e"></span>
+      <span id="cnt-error">0</span>&nbsp;errors
+    </span>
+    <span class="count-item count-warn">
+      <span class="count-dot count-dot-w"></span>
+      <span id="cnt-warn">0</span>&nbsp;warnings
+    </span>
+    <span class="count-item count-log">
+      <span class="count-dot count-dot-l"></span>
+      <span id="cnt-log">0</span>&nbsp;logs
+    </span>
+    <span class="counts-meta" id="counts-meta"></span>
+  </div>
+
+  <div class="device-panel" id="device-panel">
+    <div class="device-panel-header" id="device-panel-header">
+      <h3>Device Info</h3>
+      <span class="device-arrow">&#9658;</span>
+    </div>
+    <div class="device-groups" id="device-groups"></div>
+  </div>
+
+  <div class="screenshot-wrap" id="screenshot-wrap" style="display:none">
+    <div class="screenshot-header" id="screenshot-header">
+      <span id="screenshot-arrow">&#9658;</span>&nbsp;Screenshot
+    </div>
+    <div class="screenshot-body">
+      <img id="screenshot-img" src="" alt="Screenshot">
+    </div>
+  </div>
+
+  <div class="log-controls">
+    <input class="search-input" id="search-input" type="search" placeholder="Search logs...">
+    <div class="level-filters">
+      <button class="level-btn level-btn-all active" data-level="all" type="button">All</button>
+      <button class="level-btn level-btn-e" data-level="error" type="button">E</button>
+      <button class="level-btn level-btn-w" data-level="warn" type="button">W</button>
+      <button class="level-btn level-btn-l" data-level="log" type="button">L</button>
+    </div>
+    <div class="view-toggle">
+      <button class="view-btn active" data-view="pretty" type="button">Pretty</button>
+      <button class="view-btn" data-view="raw" type="button">Raw</button>
+    </div>
+  </div>
+
+  <div class="log-wrap">
+    <div class="log-stats">
+      <span id="log-line-count">0 lines</span>
+      <span id="log-visible-count"></span>
+      <button class="log-copy-btn" id="log-copy-btn" type="button">Copy log</button>
+    </div>
+    <div class="log-body log-pretty active" id="log-pretty"></div>
+    <pre class="log-raw" id="log-raw"></pre>
+  </div>
+
+</div>
+
+<div class="toast" id="toast"></div>
+
+<!--
+  The server replaces the sentinel below with a JSON object literal.
+  Shape: { id, appId, appVersion, platform, title, timestampUtc, pinned,
+           counts: { error, warn, log },
+           hasScreenshot,
+           logText: string (decompressed),
+           device: { system:{}, graphics:{}, display:{}, application:{},
+                     runtime:{}, memory:{}, network:{}, build:{}, web:{} } }
+  See viewer.js for the full contract.
+-->
+<script>var __LD = /*__FASTLOGS_DATA__*/ null;</script>
+<script src="/viewer.js"></script>
+</body>
+</html>
