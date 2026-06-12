@@ -184,12 +184,33 @@ async function handleIngest(req, res) {
   const screenshotPng = body.screenshotPng || null;
 
   // 4. Auth: validate app + token.
-  const { ok, app, code } = validateIngest(appId, req.headers['authorization']);
+  let { ok, app, code } = validateIngest(appId, req.headers['authorization']);
   if (!ok) {
     if (code === 'unauthorized') {
       return sendError(res, 401, 'unauthorized', 'Authorization token required');
     }
     return sendError(res, 403, 'forbidden', 'Unknown or disabled app, or invalid token');
+  }
+
+  // Auto-register: a new app authenticated with the shared team token. Create it
+  // (tokenless) on first ingest so new games self-onboard without an admin step.
+  if (code === 'auto_register') {
+    try {
+      db.upsertApp({
+        app_id: appId,
+        name: appId,
+        token_hash: null,
+        retention_days: config.defaultRetentionDays,
+        max_retention_days: config.maxRetentionDays,
+        sinks_json: null,
+        enabled: 1,
+        created_at: nowUtcIso(),
+      });
+      app = db.getApp(appId);
+    } catch (err) {
+      console.error('[ingest] auto-register failed:', err);
+      return sendError(res, 500, 'internal_error', 'Failed to auto-register app');
+    }
   }
 
   // 5. Rate-limit: per-IP and per-app.
