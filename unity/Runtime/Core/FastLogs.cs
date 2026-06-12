@@ -92,7 +92,7 @@ namespace PlayJoy.FastLogs
                     return;
                 }
 
-                _runtime = FastLogsRuntime.Create(resolved, _servicesProvider);
+                _runtime = FastLogsRuntime.Create(resolved, _servicesProvider ?? new FastLogsDefaultServices());
 
                 if (!_uploadedHooked)
                 {
