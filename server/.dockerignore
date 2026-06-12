@@ -1,0 +1,13 @@
+# Never copy host-built native modules (better-sqlite3 is platform-specific) or
+# local runtime data/secrets into the image build context.
+node_modules
+data
+blobs
+.env
+.env.*
+!.env.example
+npm-debug.log*
+*.tgz
+coverage
+Dockerfile
+.dockerignore

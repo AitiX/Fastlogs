@@ -1,0 +1,20 @@
+{
+    "name": "PlayJoy.FastLogs",
+    "rootNamespace": "PlayJoy.FastLogs",
+    "references": [],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [
+        {
+            "name": "com.stompyrobot.srdebugger",
+            "expression": "",
+            "define": "SRDEBUGGER"
+        }
+    ],
+    "noEngineReferences": false
+}

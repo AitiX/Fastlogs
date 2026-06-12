@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="robots" content="noindex, nofollow">
+  <title>FastLogs - Catalog</title>
+  <link rel="stylesheet" href="/browse.css">
+</head>
+<body>
+<div class="page">
+
+  <div class="topbar">
+    <a class="topbar-logo" href="/browse">Fast<span>Logs</span></a>
+    <span class="topbar-sep">/</span>
+    <div class="topbar-crumbs" id="breadcrumbs">
+      <!-- Filled by browse.js -->
+    </div>
+  </div>
+
+  <div class="filter-bar" id="filter-bar">
+    <input class="filter-input" id="filter-input" type="search" placeholder="Filter...">
+    <select class="filter-select" id="platform-select" style="display:none">
+      <option value="">All platforms</option>
+    </select>
+    <select class="filter-select" id="level-select" style="display:none">
+      <option value="">Any level</option>
+      <option value="error">Has errors</option>
+      <option value="warn">Has warnings</option>
+    </select>
+  </div>
+
+  <div id="content">
+    <div class="empty-state"><span class="spinner"></span>Loading...</div>
+  </div>
+
+</div>
+<script src="/browse.js"></script>
+</body>
+</html>
