@@ -41,33 +41,52 @@ function parseBearer(headerValue) {
 //
 // Returns { ok, app, code } where:
 //   - ok:   true if the request may proceed;
-//   - app:  the app row when found (even on failure, for diagnostics);
-//   - code: one of 'ok' | 'forbidden' | 'unauthorized' (matches CONTRACT codes).
+//   - app:  the app row when found (null on auto-register / unknown app);
+//   - code: 'ok' | 'forbidden' | 'unauthorized' | 'auto_register'.
 //
-// Rules (per CONTRACT section 1):
-//   - unknown or disabled appId            -> forbidden;
-//   - app has a token but none provided    -> unauthorized;
-//   - app has a token and it mismatches    -> forbidden;
-//   - app has no token                     -> ok (open ingest for that app).
+// Rules:
+//   - the shared team token (config.teamToken) is a master ingest key valid for
+//     ANY app; with ALLOW_AUTO_REGISTER it also self-onboards an unknown appId;
+//   - known app, no team token: per-app rules (own token required, or open);
+//   - disabled app                          -> forbidden;
+//   - unknown app + team token + auto-reg   -> auto_register (caller creates it);
+//   - unknown app otherwise                 -> unauthorized (no token) / forbidden.
 function validateIngest(appId, bearer) {
-  const app = db.getApp(appId);
-  if (!app || app.enabled !== 1) {
-    return { ok: false, app: app || null, code: 'forbidden' };
-  }
-
   const token = parseBearer(bearer);
+  const teamOk = !!config.teamToken && !!token && safeEqual(token, config.teamToken);
 
-  // App requires a token.
-  if (app.token_hash) {
-    if (!token) return { ok: false, app, code: 'unauthorized' };
-    if (!safeEqual(sha256(token), app.token_hash)) {
+  const app = db.getApp(appId);
+
+  if (app) {
+    if (app.enabled !== 1) {
       return { ok: false, app, code: 'forbidden' };
     }
+    // The shared team token is a master ingest key, valid for any app.
+    if (teamOk) {
+      return { ok: true, app, code: 'ok' };
+    }
+    // Otherwise fall back to the per-app token rules.
+    if (app.token_hash) {
+      if (!token) return { ok: false, app, code: 'unauthorized' };
+      if (!safeEqual(sha256(token), app.token_hash)) {
+        return { ok: false, app, code: 'forbidden' };
+      }
+      return { ok: true, app, code: 'ok' };
+    }
+    // App has no token: ingest is open for it.
     return { ok: true, app, code: 'ok' };
   }
 
-  // App has no token: ingest is open for it.
-  return { ok: true, app, code: 'ok' };
+  // Unknown app: optionally self-onboard when presented with the team token.
+  if (config.allowAutoRegister && config.teamToken) {
+    if (teamOk) {
+      return { ok: true, app: null, code: 'auto_register' };
+    }
+    return { ok: false, app: null, code: token ? 'forbidden' : 'unauthorized' };
+  }
+
+  // Unknown app and no auto-register: reject.
+  return { ok: false, app: null, code: 'forbidden' };
 }
 
 // True if the provided raw token matches the configured admin token.

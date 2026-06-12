@@ -95,6 +95,16 @@ const config = Object.freeze({
   adminToken: envStr('ADMIN_TOKEN', ''),
   viewerToken: envStr('VIEWER_TOKEN', ''),
 
+  // Shared "team" ingest token: a single master token valid for ANY app, so all
+  // games can share one secret (e.g. from 1Password) instead of per-app tokens.
+  // Empty disables it.
+  teamToken: envStr('TEAM_INGEST_TOKEN', ''),
+
+  // When true, an unknown appId presented WITH a valid team token is auto-created
+  // (tokenless) on first ingest, so new games self-onboard without an admin
+  // running add-app.js. Requires TEAM_INGEST_TOKEN to be set.
+  allowAutoRegister: envBool('ALLOW_AUTO_REGISTER', false),
+
   // Salt for hashing client IPs before storage.
   ipSalt: envStr('IP_SALT', ''),
 
