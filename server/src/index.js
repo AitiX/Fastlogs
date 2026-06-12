@@ -129,11 +129,15 @@ function onRequest(req, res) {
 
 const server = http.createServer(onRequest);
 
-// Bind to loopback only: nginx is the public entry point and proxies here.
+// Bind address. Default 127.0.0.1 so a bare-metal deploy is private behind
+// nginx. Inside a container set HOST=0.0.0.0: Docker maps only host 127.0.0.1
+// to the container, so the service stays private while remaining reachable
+// through the container network interface (binding container-loopback would
+// make it unreachable via the published port).
 function start() {
   return new Promise((resolve) => {
-    server.listen(config.port, '127.0.0.1', () => {
-      console.log(`[server] FastLogs listening on http://127.0.0.1:${config.port}`);
+    server.listen(config.port, config.host, () => {
+      console.log(`[server] FastLogs listening on http://${config.host}:${config.port}`);
       resolve(server);
     });
   });
