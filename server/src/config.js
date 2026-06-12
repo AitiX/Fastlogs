@@ -67,6 +67,11 @@ const config = Object.freeze({
   // Server.
   port: envInt('PORT', 8787),
 
+  // Bind address. Default 127.0.0.1 (private, behind nginx on bare metal).
+  // In Docker set HOST=0.0.0.0 (the published port is mapped only to the
+  // host loopback, so it stays private).
+  host: envStr('HOST', '127.0.0.1'),
+
   // Storage locations (absolute).
   serverRoot: SERVER_ROOT,
   dataDir: resolveDir(envStr('DATA_DIR', './data')),
