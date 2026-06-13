@@ -29,7 +29,7 @@ const { raw } = require('./routes/raw');
 const { screenshot } = require('./routes/screenshot');
 const { viewer } = require('./routes/viewer');
 const { pin } = require('./routes/pin');
-const { browseRoot, browseApp, browseVersion } = require('./routes/browse');
+const { browseRoot, browseApp, browseVersion, browseCrashes } = require('./routes/browse');
 const staticRoutes = require('./routes/static');
 
 // ---------------------------------------------------------------------------
@@ -44,9 +44,13 @@ router.post('/api/logs', handleIngest);
 router.post('/api/logs/:id/pin', pin);
 router.get('/api/logs/:id', meta);
 
-// Catalog (viewer-token gated).
+// Catalog (viewer-token gated). The literal "crashes" route MUST precede the
+// "/:version" catch-all: both are 3-segment GET patterns and the router is
+// first-fit by segment count, so "/browse/:appId/:version" would otherwise
+// swallow "crashes" as a version (locked by crashes-route-order.test.js).
 router.get('/browse', browseRoot);
 router.get('/browse/:appId', browseApp);
+router.get('/browse/:appId/crashes', browseCrashes);
 router.get('/browse/:appId/:version', browseVersion);
 
 // Static viewer + catalog assets (explicit allowlist; handled by the static

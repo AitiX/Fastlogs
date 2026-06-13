@@ -164,6 +164,25 @@ const stmts = {
     ORDER BY created_at DESC
   `),
 
+  // Raw crash rows for one app (grouping + first/last-seen done in JS so the
+  // version compare is authoritative). Liveness mirrors getLiveLog (pinned OR
+  // not-yet-expired) so the crashes view never counts logs the sweeper drops.
+  // crash_sig '' is the "computed, not a crash" sentinel and is excluded.
+  listCrashRows: db.prepare(`
+    SELECT id, crash_sig, app_version, title, platform, tester, created_at, cnt_error
+    FROM logs
+    WHERE app_id = @app_id AND crash_sig IS NOT NULL AND crash_sig != ''
+          AND (pinned = 1 OR expires_at IS NULL OR expires_at > @now)
+  `),
+
+  // Ids of this app's logs whose crash_sig was never computed (pre-feature
+  // logs), for the lazy backfill in the crashes route.
+  listLogsMissingSig: db.prepare(`
+    SELECT id FROM logs WHERE app_id = @app_id AND crash_sig IS NULL LIMIT @limit
+  `),
+
+  updateCrashSig: db.prepare(`UPDATE logs SET crash_sig = @crash_sig WHERE id = @id`),
+
   rateGet: db.prepare(`SELECT window_start, count FROM rate_counters WHERE key = ?`),
 
   rateUpsert: db.prepare(`
@@ -235,6 +254,22 @@ function listLogs(appId, version) {
   return stmts.listLogs.all({ app_id: appId, version });
 }
 
+// Live crash rows for an app (`now` is an ISO-8601 UTC string for the liveness
+// filter). Returns raw rows; the route groups them by crash_sig.
+function listCrashRows(appId, now) {
+  return stmts.listCrashRows.all({ app_id: appId, now });
+}
+
+// Ids of up to `limit` logs of an app whose crash_sig is NULL (never computed).
+function listLogsMissingSig(appId, limit) {
+  return stmts.listLogsMissingSig.all({ app_id: appId, limit });
+}
+
+// Set a log's crash_sig. `sig` is the signature, or '' for "not a crash".
+function updateCrashSig(id, sig) {
+  return stmts.updateCrashSig.run({ id, crash_sig: sig });
+}
+
 // Increment a rate-limit counter for `key` within the window starting at
 // `windowStart` (an integer, e.g. epoch-seconds aligned to the window). If the
 // stored window is older it is reset to 1. Returns the current count in-window.
@@ -260,5 +295,8 @@ module.exports = {
   upsertApp,
   listVersions,
   listLogs,
+  listCrashRows,
+  listLogsMissingSig,
+  updateCrashSig,
   bumpRate,
 };

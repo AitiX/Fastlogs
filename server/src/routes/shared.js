@@ -118,6 +118,9 @@ function publicLogObject(row) {
     pinned: row.pinned === 1,
     counts: { error: row.cnt_error, warn: row.cnt_warn, log: row.cnt_log },
     logBytes: row.log_bytes,
+    // Crash signature for grouping; null for non-crash logs (the '' sentinel is
+    // falsy, so both NULL and '' surface as null in the public shape).
+    crashSig: row.crash_sig || null,
     hasScreenshot: row.has_shot === 1,
     device: parseDevice(row),
     // Structured context (key->value object) and breadcrumbs (array of
