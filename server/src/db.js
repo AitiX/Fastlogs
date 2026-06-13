@@ -79,10 +79,18 @@ function migrate() {
   // ADD COLUMN is the safe, idempotent way to evolve the schema; guarding with
   // table_info keeps a re-run a no-op.
   const logCols = db.prepare('PRAGMA table_info(logs)').all();
-  for (const col of ['comment', 'tester', 'context_json', 'breadcrumbs_json', 'crash_sig']) {
+  for (const col of ['comment', 'tester', 'context_json', 'breadcrumbs_json', 'crash_sig', 'tags']) {
     if (!logCols.some((c) => c.name === col)) {
       db.exec(`ALTER TABLE logs ADD COLUMN ${col} TEXT`);
     }
+  }
+
+  // Triage status. Kept OUT of the bare-TEXT loop because it is NOT NULL with a
+  // DEFAULT: SQLite requires a constant DEFAULT to ADD a NOT NULL column to a
+  // non-empty table, and 'new' backfills every existing row. logCols snapshot
+  // is still valid (the loop above does not touch status).
+  if (!logCols.some((c) => c.name === 'status')) {
+    db.exec(`ALTER TABLE logs ADD COLUMN status TEXT NOT NULL DEFAULT 'new'`);
   }
 
   // Partial index backing the per-app crash grouping scan. Created AFTER the
@@ -189,11 +197,16 @@ const stmts = {
 
   listLogs: db.prepare(`
     SELECT id, title, ts_utc, platform, cnt_error, cnt_warn, cnt_log,
-           log_bytes, has_shot, pinned, created_at, expires_at
+           log_bytes, has_shot, pinned, status, tags, crash_sig,
+           created_at, expires_at
     FROM logs
     WHERE app_id = @app_id AND app_version = @version
     ORDER BY created_at DESC
   `),
+
+  setStatus: db.prepare(`UPDATE logs SET status = @status WHERE id = @id`),
+
+  setTags: db.prepare(`UPDATE logs SET tags = @tags WHERE id = @id`),
 
   // Raw crash rows for one app (grouping + first/last-seen done in JS so the
   // version compare is authoritative). Liveness mirrors getLiveLog (pinned OR
@@ -258,6 +271,17 @@ function listExpired(now, limit) {
 // `pinned` is 0|1, `expiresAt` is an ISO string or null (null => never expires).
 function setPin(id, pinned, expiresAt) {
   return stmts.setPin.run({ id, pinned: pinned ? 1 : 0, expires_at: expiresAt });
+}
+
+// Set a log's triage status (one of the allowed enum values, validated by the
+// route).
+function setStatus(id, status) {
+  return stmts.setStatus.run({ id, status });
+}
+
+// Set a log's tags. `tagsJson` is a JSON-array string, or null for "no tags".
+function setTags(id, tagsJson) {
+  return stmts.setTags.run({ id, tags: tagsJson });
 }
 
 // List all registered apps.
@@ -336,6 +360,8 @@ module.exports = {
   deleteLog,
   listExpired,
   setPin,
+  setStatus,
+  setTags,
   listApps,
   getApp,
   upsertApp,

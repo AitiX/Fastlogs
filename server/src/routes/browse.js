@@ -26,6 +26,7 @@ const storage = require('../storage');
 const crashsig = require('../crashsig');
 const version = require('../util/version');
 const { sendJson, sendError, sendText, nowUtcIso } = require('../util/http');
+const { parseJsonColumn } = require('./shared');
 
 // Load the catalog HTML shell once at first use. browse.js (loaded by the
 // shell) reads window.location.pathname to decide which view to render and
@@ -152,6 +153,8 @@ function browseVersion(req, res, params, query) {
     logBytes: r.log_bytes,
     hasScreenshot: r.has_shot === 1,
     pinned: r.pinned === 1,
+    status: r.status || 'new',
+    tags: parseJsonColumn(r.tags, true, []),
     expiresAt: r.expires_at || null,
   }));
   sendJson(res, 200, {

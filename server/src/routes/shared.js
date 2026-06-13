@@ -121,6 +121,10 @@ function publicLogObject(row) {
     // Crash signature for grouping; null for non-crash logs (the '' sentinel is
     // falsy, so both NULL and '' surface as null in the public shape).
     crashSig: row.crash_sig || null,
+    // Triage: status enum (defaults to 'new' for pre-triage rows) and free-form
+    // tags (empty [] when none).
+    status: row.status || 'new',
+    tags: parseJsonColumn(row.tags, true, []),
     hasScreenshot: row.has_shot === 1,
     device: parseDevice(row),
     // Structured context (key->value object) and breadcrumbs (array of

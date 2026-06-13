@@ -29,6 +29,7 @@ const { raw } = require('./routes/raw');
 const { screenshot } = require('./routes/screenshot');
 const { viewer } = require('./routes/viewer');
 const { pin } = require('./routes/pin');
+const { setStatus, setTags } = require('./routes/triage');
 const { browseRoot, browseApp, browseVersion, browseCrashes } = require('./routes/browse');
 const staticRoutes = require('./routes/static');
 
@@ -42,6 +43,8 @@ const router = new Router();
 router.get('/api/health', health);
 router.post('/api/logs', handleIngest);
 router.post('/api/logs/:id/pin', pin);
+router.post('/api/logs/:id/status', setStatus);
+router.post('/api/logs/:id/tags', setTags);
 router.get('/api/logs/:id', meta);
 
 // Catalog (viewer-token gated). The literal "crashes" route MUST precede the

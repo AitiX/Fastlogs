@@ -110,6 +110,14 @@ const config = Object.freeze({
   // requires the admin token, so only some people (admin-token holders) can unpin.
   unpinRequiresAdmin: envBool('UNPIN_REQUIRES_ADMIN', false),
 
+  // Triage (status/tags) policy. When false (default) triage is OPEN by link:
+  // anyone with the log link may set status/tags, mirroring pin. When true, it
+  // requires the admin token. triageTagMaxLen/Count bound tag input (longer
+  // tags are truncated, extra tags dropped - never rejected).
+  triageRequiresAdmin: envBool('TRIAGE_REQUIRES_ADMIN', false),
+  triageTagMaxLen: envInt('TRIAGE_TAG_MAX_LEN', 32),
+  triageTagMaxCount: envInt('TRIAGE_TAG_MAX_COUNT', 20),
+
   // Storage dashboard: how many of the largest logs to list per app.
   statsTopN: envInt('STATS_TOP_N', 5),
 
