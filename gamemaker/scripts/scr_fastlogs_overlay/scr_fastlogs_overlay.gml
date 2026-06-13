@@ -577,7 +577,9 @@ function fastlogs_ui_action(id, ui) {
 
         case "toast_retry":
             // Клик по тосту "Ошибка" -> повторить отправку с тем же телом (фича STATUS, B).
-            //   fastlogs_send соберёт свежий payload; если идёт отправка - сам отобьётся.
+            //   Этот тост с кнопкой "Повторить" показывается только при ТЕРМИНАЛЬНОЙ ошибке
+            //   (pending отложенного повтора нет) - значит fastlogs_send тут не заблокируется
+            //   и соберёт свежий payload. Если в этот момент идёт отправка/pending - отобьётся.
             if (script_exists(asset_get_index("fastlogs_send"))) {
                 fastlogs_send({ title: "Retry send" });
             }

@@ -260,9 +260,13 @@ namespace PlayJoy.FastLogs
         {
             try
             {
-                if (_isBusy)
+                if (_isBusy || _retryCoroutine != null)
                 {
-                    ShowToast(ToastKind.Info, "FastLogs: a send is already in progress", null, 2.5f, false);
+                    ShowToast(ToastKind.Info,
+                        _retryCoroutine != null
+                            ? "FastLogs: waiting to retry the current send"
+                            : "FastLogs: a send is already in progress",
+                        null, 2.5f, false);
                     return;
                 }
 
@@ -352,8 +356,10 @@ namespace PlayJoy.FastLogs
                 return;
             }
 
-            // Don't pile a second auto-send on top of an in-flight send.
-            if (_isBusy)
+            // Don't pile a second auto-send on top of an in-flight send OR while a retry
+            // of the current report is pending/counting down (blocked, same as any other
+            // external send). The internal retry loop keeps running its own report.
+            if (_isBusy || _retryCoroutine != null)
             {
                 return;
             }
@@ -500,28 +506,33 @@ namespace PlayJoy.FastLogs
         /// </summary>
         public FlogTask<UploadResultDto> BeginSend(bool includeScreenshot, string title, string comment)
         {
+            var task = FlogTask.Create<UploadResultDto>();
+
+            // Block a new EXTERNAL send while one is already in flight OR a retry is
+            // pending/counting down: "until the current log is sent, a new one cannot be
+            // sent" (including the wait window between retry attempts). The retry loop
+            // continuing itself is NOT blocked here: RetryRoutine clears _retryCoroutine
+            // to null BEFORE it calls back into BeginSend, so a non-null coroutine always
+            // means an external caller (manual Send / toast Retry / quick-send / auto-send),
+            // never the retry loop. We do NOT cancel the pending retry and do NOT start a
+            // fresh attempt; we surface a status toast and return the current result.
+            if (_isBusy || _retryCoroutine != null)
+            {
+                ShowToast(ToastKind.Info,
+                    _retryCoroutine != null
+                        ? "FastLogs: waiting to retry the current send"
+                        : "FastLogs: a send is already in progress",
+                    null, 2.5f, false);
+                // Surface the last known result rather than stomping the in-progress/
+                // counting-down toast or completing with a fabricated busy failure.
+                task.SetResult(_lastResult);
+                return task;
+            }
+
             // Remember the parameters so a Retry toast can re-run exactly this send.
             _lastSendIncludeScreenshot = includeScreenshot;
             _lastSendTitle = title;
             _lastSendComment = comment;
-
-            // One pending send at a time: if a retry is currently counting down, this
-            // call (manual Send / toast Retry / quick-send / auto-send) replaces it with
-            // a fresh attempt instead of stacking a parallel retry. Cancelling here also
-            // resets the attempt counter, because RetryRoutine clears _retryCoroutine to
-            // null BEFORE it calls back into BeginSend - so a non-null coroutine always
-            // means an external caller, never the retry loop continuing itself.
-            CancelPendingRetry(resetAttempts: true);
-
-            var task = FlogTask.Create<UploadResultDto>();
-
-            if (_isBusy)
-            {
-                var busy = UploadResultDto.Fail("A FastLogs upload is already in progress.");
-                // Do not stomp the in-progress toast; just complete the task as busy.
-                task.SetResult(busy);
-                return task;
-            }
 
             if (_uploader == null)
             {
@@ -703,8 +714,9 @@ namespace PlayJoy.FastLogs
         /// Schedule a re-send of the same report after Retry.RetryIntervalSeconds if
         /// retrying is enabled and the attempt cap has not been reached. Returns true
         /// when a retry was scheduled (so the caller suppresses the error toast).
-        /// Guarantees a single pending retry: any existing one was already cancelled by
-        /// the BeginSend that produced this result.
+        /// Guarantees a single pending retry: this only runs when no retry was pending
+        /// (external sends are blocked while one is, and the internal retry loop nulls
+        /// _retryCoroutine before re-entering BeginSend), so there is nothing to stack on.
         /// </summary>
         private bool TryScheduleRetry()
         {
