@@ -27,6 +27,15 @@ namespace PlayJoy.FastLogs
         /// <summary>HTTP status code, when a response was received (0 otherwise).</summary>
         public long StatusCode;
 
+        /// <summary>
+        /// Whether the failure is transient and worth re-sending the SAME report.
+        /// Set by the uploader's own classification (network/transport or 5xx = true;
+        /// 4xx and other client/permanent rejections = false). Always false on success.
+        /// Lets the outer retry-until-success loop tell transient from permanent
+        /// without re-deriving from <see cref="StatusCode"/>.
+        /// </summary>
+        public bool Retryable;
+
         /// <summary>Error description when <see cref="Success"/> is false.</summary>
         public string Error;
 
@@ -44,7 +53,7 @@ namespace PlayJoy.FastLogs
             };
         }
 
-        public static UploadResultDto Fail(string error, long statusCode = 0)
+        public static UploadResultDto Fail(string error, long statusCode = 0, bool retryable = false)
         {
             return new UploadResultDto
             {
@@ -54,6 +63,7 @@ namespace PlayJoy.FastLogs
                 RawUrl = string.Empty,
                 ExpiresAt = string.Empty,
                 StatusCode = statusCode,
+                Retryable = retryable,
                 Error = error ?? "Unknown error"
             };
         }

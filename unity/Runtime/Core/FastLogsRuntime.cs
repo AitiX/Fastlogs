@@ -49,6 +49,11 @@ namespace PlayJoy.FastLogs
         private string _lastSendTitle;
         private string _lastSendComment;
 
+        // ---- Retry-until-success state (outer loop, on top of the uploader's own
+        //      immediate retries). At most ONE pending retry exists at a time. ----
+        private Coroutine _retryCoroutine; // non-null while a retry is scheduled/counting down; null = none pending
+        private int _retryAttempt;         // number of outer retries already performed for the current report
+
         // ---- Auto-send-on-exception state (dedup + throttle + per-session cap) ----
         private bool _autoSendHooked;
         private int _autoSendCountThisSession;
@@ -141,6 +146,10 @@ namespace PlayJoy.FastLogs
 
         private void OnDestroy()
         {
+            // Stop any pending retry countdown (Unity also kills coroutines on Destroy,
+            // but clearing the handle keeps our state consistent).
+            CancelPendingRetry(resetAttempts: true);
+
             UnhookAutoSend();
 
             if (_overlay != null)
@@ -496,6 +505,14 @@ namespace PlayJoy.FastLogs
             _lastSendTitle = title;
             _lastSendComment = comment;
 
+            // One pending send at a time: if a retry is currently counting down, this
+            // call (manual Send / toast Retry / quick-send / auto-send) replaces it with
+            // a fresh attempt instead of stacking a parallel retry. Cancelling here also
+            // resets the attempt counter, because RetryRoutine clears _retryCoroutine to
+            // null BEFORE it calls back into BeginSend - so a non-null coroutine always
+            // means an external caller, never the retry loop continuing itself.
+            CancelPendingRetry(resetAttempts: true);
+
             var task = FlogTask.Create<UploadResultDto>();
 
             if (_isBusy)
@@ -624,20 +641,155 @@ namespace PlayJoy.FastLogs
             // failure, Retry.
             if (result.Success)
             {
+                // Success reached (possibly after one or more outer retries): make sure
+                // no stale retry stays pending and the attempt counter is cleared, then
+                // show the existing success toast.
+                CancelPendingRetry(resetAttempts: true);
+                _retryAttempt = 0;
+
                 bool copied = _config != null && _config.UI.CopyLinkOnSend
                               && !string.IsNullOrEmpty(result.Url);
                 string msg = copied ? "FastLogs: done (link copied)" : "FastLogs: done";
                 ShowToast(ToastKind.Success, msg, result.Url, 6f, false);
             }
+            else if (IsRetryable(result) && TryScheduleRetry())
+            {
+                // A transient failure was rescheduled; the countdown toast ("Retrying in
+                // Ns...") is shown by the retry coroutine. Do not show the sticky error
+                // toast here.
+            }
             else
             {
-                // Sticky error with a Retry affordance.
+                // Permanent failure (4xx/415/413/local) or retries exhausted/disabled:
+                // sticky error with a manual Retry affordance.
                 ShowToast(ToastKind.Error, "FastLogs error: " + result.Error, null, 0f, true);
             }
 
             task.SetResult(result);
             try { Uploaded?.Invoke(result); }
             catch (Exception e) { FlogLog.Exception(e); }
+        }
+
+        // ---- Retry-until-success (outer loop) ----
+
+        /// <summary>
+        /// Whether a failed upload is transient and worth re-sending the SAME report.
+        /// Permanent client rejections (4xx: 400 bad_request, 401/403 wrong token or
+        /// unregistered appId, 413 payload_too_large, 415) must NOT be retried - otherwise
+        /// an unlimited (MaxRetryAttempts=0) loop would re-send a doomed request forever.
+        /// Mirrors GameMaker's deferred-retry gate (net_error || http_status &gt;= 500).
+        /// Primary source is the uploader's own classification (<see cref="UploadResultDto.Retryable"/>),
+        /// which already flags network/transport blips and 5xx as transient. The StatusCode
+        /// fallback only adds server 5xx (a result built outside the uploader's per-attempt
+        /// path): we deliberately do NOT treat statusCode == 0 as retryable here, because the
+        /// core's own pre-upload failures (build report / serialize / no uploader) carry
+        /// status 0 and are deterministic - re-sending them would loop forever with no chance
+        /// of success. Genuine network blips already arrive with Retryable == true.
+        /// </summary>
+        private static bool IsRetryable(UploadResultDto result)
+        {
+            if (result.Success)
+            {
+                return false;
+            }
+            if (result.Retryable)
+            {
+                return true;
+            }
+            return result.StatusCode >= 500;
+        }
+
+        /// <summary>
+        /// Schedule a re-send of the same report after Retry.RetryIntervalSeconds if
+        /// retrying is enabled and the attempt cap has not been reached. Returns true
+        /// when a retry was scheduled (so the caller suppresses the error toast).
+        /// Guarantees a single pending retry: any existing one was already cancelled by
+        /// the BeginSend that produced this result.
+        /// </summary>
+        private bool TryScheduleRetry()
+        {
+            if (this == null || !isActiveAndEnabled)
+            {
+                return false; // host is being torn down; nothing to schedule on
+            }
+
+            var retry = _config != null ? _config.Retry : null;
+            if (retry == null)
+            {
+                return false;
+            }
+
+            float interval = retry.RetryIntervalSeconds;
+            if (interval <= 0f)
+            {
+                return false; // 0 = outer retry disabled
+            }
+
+            int maxAttempts = retry.MaxRetryAttempts; // 0 = unlimited
+            if (maxAttempts > 0 && _retryAttempt >= maxAttempts)
+            {
+                return false; // attempt cap reached; give up and surface the error
+            }
+
+            _retryAttempt++;
+            _retryCoroutine = StartCoroutine(RetryRoutine(interval));
+            return true;
+        }
+
+        // Waits on a real-time (unscaled) timer, updating a "Retrying in Ns..." status once
+        // per second, then re-runs the last send. The countdown is driven by an unscaled
+        // deadline (Time.realtimeSinceStartup), mirroring the uploader's backoff and the
+        // toast deadline, so it keeps ticking when the tester pauses the game
+        // (Time.timeScale == 0) and never allocates per frame or per tick.
+        private IEnumerator RetryRoutine(float intervalSeconds)
+        {
+            // Whole seconds remaining for the visible countdown.
+            int remaining = Mathf.Max(1, Mathf.CeilToInt(intervalSeconds));
+
+            while (remaining > 0)
+            {
+                ShowToast(ToastKind.Progress, "FastLogs: retrying in " + remaining + "s...", null, 0f, false);
+
+                // Unscaled 1s wait: poll the frame loop until the real-time deadline. This
+                // is a per-frame yield, but it does no work and allocates nothing per frame
+                // (no new WaitForSeconds), and is immune to Time.timeScale.
+                float until = Time.realtimeSinceStartup + 1f;
+                while (Time.realtimeSinceStartup < until)
+                {
+                    yield return null;
+                }
+
+                remaining--;
+            }
+
+            // Hand off to a fresh send of the SAME report. Clear the handle FIRST so the
+            // BeginSend below is recognised as the retry loop continuing (it must NOT
+            // reset the attempt counter), not an external replacement.
+            _retryCoroutine = null;
+            BeginSend(_lastSendIncludeScreenshot, _lastSendTitle, _lastSendComment);
+        }
+
+        /// <summary>
+        /// Cancel any pending/counting-down retry. When resetAttempts is true the
+        /// attempt counter is reset ONLY if there actually was a pending retry to
+        /// cancel - so the retry loop calling BeginSend on itself (after it has already
+        /// nulled _retryCoroutine) does not wipe its own progress toward the cap.
+        /// </summary>
+        private void CancelPendingRetry(bool resetAttempts)
+        {
+            if (_retryCoroutine == null)
+            {
+                return; // nothing pending: leave the attempt counter untouched
+            }
+
+            try { StopCoroutine(_retryCoroutine); }
+            catch (Exception e) { FlogLog.Exception(e); }
+            _retryCoroutine = null;
+
+            if (resetAttempts)
+            {
+                _retryAttempt = 0;
+            }
         }
 
         private void TryCopyLinkOnSend(UploadResultDto result)

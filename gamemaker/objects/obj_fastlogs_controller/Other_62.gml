@@ -33,6 +33,13 @@ var ok       = is_real(http_status) && (http_status >= 200 && http_status < 300)
 var net_error = is_real(status) && (status < 0);
 
 if (ok && !net_error) {
+    // RETRY-UNTIL-SUCCESS (фича RETRY): успех - финал. Гасим любой pending отложенный повтор
+    //   и его alarm (этот успех мог прийти как раз от отложенной попытки). Существующий
+    //   success-тост ниже уведомит тестера об итоговом успехе.
+    if (script_exists(asset_get_index("fastlogs_retry_cancel"))) {
+        fastlogs_retry_cancel();
+    }
+
     // Тело ответа: { "id", "url", "rawUrl", "expiresAt" }.
     var url = "";
     var log_id = "";
@@ -88,26 +95,56 @@ if (ok && !net_error) {
     // Ошибка: 4xx/5xx или сетевой обрыв.
     show_debug_message("[FastLogs] ingest FAILED status=" + string(status) + " http_status=" + string(http_status) + " result=" + string(result));
 
-    // Ретраим только сетевые ошибки и 5xx (4xx - проблема в теле, ретрай не поможет).
+    // Ретраим только сетевые ошибки и 5xx (4xx - проблема в теле, ретрай не поможет
+    //   ни немедленно, ни отложенно -> такие сразу терминальный тост-ошибка).
     var retryable = net_error || (is_real(http_status) && http_status >= 500);
+
+    // 1) Сначала - НЕМЕДЛЕННЫЕ ретраи аплоадера (мгновенные, до FASTLOGS_HTTP_MAX_RETRIES).
     var retried = false;
     if (retryable) {
         retried = fastlogs_http_retry();        // ставит новый запрос, переустанавливает is_sending
     }
+
     if (retried) {
-        // Авто-ретрай поставлен - держим статус "Отправка..." (повтор N/2).
+        // Авто-ретрай (немедленный) поставлен - держим статус "Отправка..." (повтор N/2).
         if (script_exists(asset_get_index("fastlogs_status_toast"))) {
             fastlogs_status_toast("sending", "Отправка... (повтор)");
         }
     } else {
-        hs.state = "error";
-        // STATUS (B): тост "Ошибка: <причина>" + кликабельная зона "Повторить" поверх игры.
-        if (script_exists(asset_get_index("fastlogs_status_toast"))) {
-            var reason;
-            if (net_error)                                  reason = "сеть недоступна";
-            else if (is_real(http_status) && http_status > 0) reason = "HTTP " + string(http_status);
-            else                                            reason = "неизвестно";
-            fastlogs_status_toast("error", "Ошибка: " + reason, { retry: true });
+        // 2) Немедленные ретраи исчерпаны/неуместны. RETRY-UNTIL-SUCCESS (фича RETRY):
+        //   для транзиентных ошибок (сеть/5xx) ставим ОТЛОЖЕННЫЙ повтор на таймере, пока
+        //   не пройдёт успешно (или пока не упрёмся в предел FASTLOGS_RETRY_MAX). Один
+        //   pending за раз обеспечивается самим планировщиком (заменяет тело/отсчёт).
+        //   4xx сюда не попадает (retryable=false) -> сразу терминальный тост-ошибка.
+        var scheduled = false;
+        if (retryable && script_exists(asset_get_index("fastlogs_retry_schedule"))) {
+            // Предел отложенных повторов: 0 = без предела; >0 = после стольких сдаёмся.
+            var under_limit = (!is_real(FASTLOGS_RETRY_MAX) || FASTLOGS_RETRY_MAX <= 0)
+                            || (hs.dretry_count < FASTLOGS_RETRY_MAX);
+            if (under_limit) {
+                scheduled = fastlogs_retry_schedule(hs.pending_body);
+            }
+        }
+
+        if (scheduled) {
+            // Отложенный повтор поставлен - НЕ ошибка для тестера: показываем отсчёт
+            //   "Повтор через Ns..." (его поднимает сам fastlogs_retry_schedule).
+            //   Дальнейший отсчёт ведёт Alarm[0] (fastlogs_retry_tick), без работы в кадре.
+        } else {
+            // Отложенный повтор выключен/неуместен/предел исчерпан - терминальная ошибка.
+            //   Гасим любой остаточный pending, чтобы состояние было чистым.
+            if (script_exists(asset_get_index("fastlogs_retry_cancel"))) {
+                fastlogs_retry_cancel();
+            }
+            hs.state = "error";
+            // STATUS (B): тост "Ошибка: <причина>" + кликабельная зона "Повторить" поверх игры.
+            if (script_exists(asset_get_index("fastlogs_status_toast"))) {
+                var reason;
+                if (net_error)                                  reason = "сеть недоступна";
+                else if (is_real(http_status) && http_status > 0) reason = "HTTP " + string(http_status);
+                else                                            reason = "неизвестно";
+                fastlogs_status_toast("error", "Ошибка: " + reason, { retry: true });
+            }
         }
     }
 }

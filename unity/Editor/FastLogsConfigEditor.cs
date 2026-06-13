@@ -19,6 +19,7 @@ namespace PlayJoy.FastLogs.Editor
         private bool _diagFoldout     = false;
         private bool _triggerFoldout  = true;
         private bool _netFoldout      = false;
+        private bool _retryFoldout    = false;
         private bool _uiFoldout       = false;
         private bool _enableFoldout   = true;
 
@@ -30,6 +31,7 @@ namespace PlayJoy.FastLogs.Editor
         private SerializedProperty _diagnostics;
         private SerializedProperty _trigger;
         private SerializedProperty _net;
+        private SerializedProperty _retry;
         private SerializedProperty _ui;
         private SerializedProperty _enable;
 
@@ -43,6 +45,7 @@ namespace PlayJoy.FastLogs.Editor
             _diagnostics = serializedObject.FindProperty("_diagnostics");
             _trigger     = serializedObject.FindProperty("_trigger");
             _net         = serializedObject.FindProperty("_net");
+            _retry       = serializedObject.FindProperty("_retry");
             _ui          = serializedObject.FindProperty("_ui");
             _enable      = serializedObject.FindProperty("_enable");
         }
@@ -65,6 +68,7 @@ namespace PlayJoy.FastLogs.Editor
             _diagFoldout    = DrawGroup("Diagnostics", _diagnostics, _diagFoldout);
             _triggerFoldout = DrawGroup("Trigger",     _trigger,     _triggerFoldout);
             _netFoldout     = DrawGroup("Net",         _net,         _netFoldout);
+            _retryFoldout   = DrawGroup("Retry",       _retry,       _retryFoldout);
             _uiFoldout      = DrawGroup("UI",          _ui,          _uiFoldout);
             _enableFoldout  = DrawGroup("Enable",      _enable,      _enableFoldout);
 

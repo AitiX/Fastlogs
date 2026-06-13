@@ -94,10 +94,22 @@
   (`Other_62.gml`), при `201` заполняется `last_url`. Возврат: `true` если запрос
   поставлен в отправку, `false` если no-op (выключено / нет endpoint / уже идёт отправка
   при запрете параллельных - на усмотрение билдера http).
+- RETRY-UNTIL-SUCCESS (фича RETRY): если отправка финально провалилась по ТРАНЗИЕНТНОЙ
+  причине (сеть/5xx) даже после немедленных ретраев аплоадера, отчёт ставится на
+  ОТЛОЖЕННЫЙ повтор каждые `FASTLOGS_RETRY_INTERVAL_SEC` секунд (деф. 30; 0 = выкл) и
+  повторяется, пока не пройдёт успешно или пока не упрётся в `FASTLOGS_RETRY_MAX` (деф. 0
+  = без предела). Pending всегда ОДИН: повторный `fastlogs_send` заменяет текущий pending
+  свежим (дубликаты не копятся). Во время ожидания показывается статус "Повтор через Ns...".
+  4xx считается невосстановимым -> отложенный повтор не ставится (терминальный тост-ошибка).
 - При `!FASTLOGS_ENABLED` -> `false` (no-op), `http_request` НЕ вызывается.
 
 ### `fastlogs_is_sending()` -> bool
-`true`, пока есть незавершённый запрос. При `!FASTLOGS_ENABLED` -> `false`.
+`true`, пока есть незавершённый запрос (включая идущую отложенную попытку повтора).
+Между отложенными попытками (ожидание по таймеру) -> `false`. При `!FASTLOGS_ENABLED` -> `false`.
+
+### `fastlogs_retry_is_pending()` -> bool  (фича RETRY)
+`true`, если есть отчёт, ожидающий отложенного повтора (идёт обратный отсчёт по таймеру).
+При `!FASTLOGS_ENABLED` -> `false`.
 
 ### `fastlogs_last_url()` -> string
 URL последнего успешно созданного лога (из ответа сервера). `""` если ещё нет.
@@ -137,7 +149,7 @@ no-op при `!FASTLOGS_ENABLED`.
 | `scr_fastlogs_recorder`     | `fastlogs_record_start`/`stop`/`set`/`is_recording`, персист на диск + загрузка прошлых сессий, ротация |
 | `scr_fastlogs_device`       | сбор `device{}` по контракту (внутр.: `fastlogs_collect_device()`), маппинг `os_type`->platform |
 | `scr_fastlogs_payload`      | сборка JSON-тела (внутр.: `fastlogs_build_payload(...)`), `timestampUtc`, усечение `logText`, опускание пустых полей |
-| `scr_fastlogs_http`         | `fastlogs_send`, `fastlogs_is_sending`, `fastlogs_last_url`, отправка/разбор ответа (Async HTTP) |
+| `scr_fastlogs_http`         | `fastlogs_send`, `fastlogs_is_sending`, `fastlogs_last_url`, `fastlogs_retry_is_pending`, retry-until-success (отложенный повтор на Alarm[0]), отправка/разбор ответа (Async HTTP) |
 | `scr_fastlogs_overlay`      | `fastlogs_open`/`close`/`toggle`, отрисовка примитивами, обработка тап-зон |
 | `scr_fastlogs_input`        | опрос hotkey/мыши/тача/геймпада -> вызовы overlay/copy |
 | `scr_fastlogs_clipboard`    | `fastlogs_set_screenshot` тут НЕ реализуется; реализует copy-обёртку `clipboard_set_text` (last_url) |
@@ -152,6 +164,7 @@ no-op при `!FASTLOGS_ENABLED`.
 |----------------------|--------------------|---------------|
 | `Create_0.gml`       | Create (0/0)       | init состояния, подгрузка персиста, exception handler |
 | `Step_0.gml`         | Step (3/0)         | опрос ввода, отложенные задачи |
+| `Alarm_0.gml`        | Alarm[0] (2/0)     | тик retry-until-success (отложенный повтор отправки, фича RETRY) |
 | `Draw_64.gml`        | Draw GUI (8/64)    | отрисовка оверлея примитивами |
 | `Other_62.gml`       | Async HTTP (7/62)  | разбор ответа ingest |
 | `Other_63.gml`       | Async Save/Load (7/63) | завершение async-файловых операций (если используются) |
