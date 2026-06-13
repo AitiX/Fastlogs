@@ -40,6 +40,11 @@ to `com.playjoy.fastlogs`. Unity detects it automatically.
 
 **Supported Unity versions:** 6000.1 (Unity 6) and 2022.3 LTS.
 
+> **Wiring it into your game.** Add `PlayJoy.FastLogs` to the assembly definition
+> references of the assembly that calls `FastLogs.Init()` (in Terraformers that is
+> `_GameAssembly.asmdef`). Out of the box `Init()` uses the bundled
+> `FastLogsDefaultServices`, so no service provider has to be registered by hand.
+
 ---
 
 ## Creating a Config Asset
@@ -68,7 +73,7 @@ Open the config asset in the Inspector. All sections are shown with foldouts.
 |-------|-------------|
 | `EndpointUrl` | Full ingest URL, e.g. `https://logs.example.com/api/logs`. Required for uploads. |
 | `AppId` | Project identifier `[a-z0-9_-]{2,32}` - groups logs in the catalog. |
-| `Token` | Optional Bearer token for the ingest endpoint. |
+| `Token` | Bearer token for the ingest endpoint. Leave empty for an app registered with open ingest. |
 | `RetentionDaysOverride` | Per-request retention in days. 0 = server default. |
 
 > On iOS the endpoint must be `https://` (App Transport Security). The Inspector
@@ -112,10 +117,18 @@ Configures the gesture that opens/closes the overlay.
 | `EnableKeyboard` | true | Allow a keyboard shortcut to toggle the overlay. |
 | `ToggleKey` | F8 | The keyboard key. |
 | `Modifier` | None | Optional modifier: None, Ctrl, Alt, Shift, Cmd. |
-| `MultiTouchFingerCount` | 0 | Number of simultaneous fingers to trigger on mobile. 0 = disabled. |
+| `MultiTouchFingerCount` | 0 | With the default corner-tap trigger this is the **number of taps** in the corner that opens the overlay. 0 = keep the trigger's own default (3). |
 | `EnableShake` | false | Shake-to-open on mobile. |
 | `ShakeThreshold` | 2.5 | Acceleration magnitude that counts as a shake. |
 | `ShakeCooldownSeconds` | 1.0 | Minimum seconds between shake triggers. |
+
+> **Default gesture (works out of the box).** `FastLogs.Init()` wires a default
+> trigger with no extra setup: **tap the top-right screen corner 3 times quickly**
+> (under ~0.6 s between taps) to toggle the overlay, or press the keyboard
+> `ToggleKey` (default F8). The corner hot zone is safe-area aware and sized for
+> touch. `MultiTouchFingerCount` (if > 0) sets the required tap count. To move the
+> zone to another corner or swap the gesture, register a custom `IFastLogsServices`
+> via `FastLogs.SetServicesProvider(...)` before `Init()`.
 
 ### Net
 
@@ -130,6 +143,8 @@ Configures the gesture that opens/closes the overlay.
 | Field | Default | Description |
 |-------|---------|-------------|
 | `EnableUI` | true | Enable the in-game share overlay. |
+| `TesterName` | "" | Tester name attached to every report's `tester` field. Editable at runtime in the overlay's Settings tab. Empty is omitted. |
+| `CopyLinkOnSend` | true | After a successful send, automatically copy the short link to the device clipboard. On WebGL this may be blocked outside a user gesture; the overlay's **Copy** button remains as a fallback. |
 
 ### Enable
 
@@ -140,6 +155,25 @@ Controls which build flavours activate FastLogs at runtime.
 | `EnableInEditor` | true | Active in the Unity Editor. |
 | `EnableInDevelopment` | true | Active in Development Builds. |
 | `EnableInRelease` | false | Active in release builds (requires `LOGSHARE_FORCE_ENABLED` and a non-console target). |
+
+---
+
+## Server: registering an app
+
+Logs are accepted only for an `AppId` the FastLogs server already knows (or one that
+self-onboards). Pick one model:
+
+- **Open ingest (no token)** - register the app without a token and leave
+  `Config > Server > Token` empty. Simplest for internal QA. On the server / inside
+  the container: `node scripts/add-app.js <appId> "<Display Name>" --no-token`.
+- **Per-app token** - register the app with a token and put it in
+  `Config > Server > Token`.
+- **Shared team token + auto-register** - set one `TEAM_INGEST_TOKEN` on the server
+  with `ALLOW_AUTO_REGISTER=1`, and put that token in `Config > Server > Token`. An
+  unknown `AppId` then self-onboards on its first upload, so new projects need no
+  manual registration.
+
+See the FastLogs server repository for the admin CLI and environment variables.
 
 ---
 
@@ -202,17 +236,31 @@ FastLogs.OnUploaded += r => Debug.Log("Uploaded: " + r.Url);
 FastLogs.SendAsync(includeScreenshot: true, title: "Crash on level load");
 
 // Or await (works on every Unity version and on WebGL):
-var result = await FastLogs.SendAsync(includeScreenshot: true, title: "My report");
+var result = await FastLogs.SendAsync(
+    includeScreenshot: true,
+    title: "My report",
+    comment: "Opened level 3, froze on the loading screen."); // optional free-form description
 if (result.Success)
-    GUIUtility.systemCopyBuffer = result.Url; // copy link
+    Debug.Log("Link: " + result.Url); // already on the clipboard if CopyLinkOnSend is on
 else
     Debug.LogWarning("Upload failed: " + result.Error);
 ```
 
+`title` is a short headline (<=120 chars); `comment` is the tester's free-form
+problem description (<=4000 chars). Both are optional and omitted from the request
+when empty. The tester name (`Config > UI > TesterName`) rides along with every
+report's `tester` field automatically. When `Config > UI > CopyLinkOnSend` is on
+(the default), the short link is copied to the clipboard right after a successful
+upload (best-effort on WebGL - see the overlay note below).
+
 ### Overlay
 
-The overlay provides a one-tap send UI with screenshot toggle, title input, and a
-clickable result link. It is opened by the configured gesture (default: F8) or from code:
+The overlay provides a one-tap send UI with a screenshot toggle, a single-line
+**Title** input, a multi-line **Comment** input (the tester's free-form problem
+description), the current tester name (read-only; edit it in the **Settings** tab),
+and a clickable result link. The Settings tab also exposes the **Tester Name** field
+and a **Copy link on send** toggle. The overlay is opened by the default gesture
+(3 taps in the top-right corner, or F8) or from code:
 
 ```csharp
 FastLogs.ShowOverlay();
@@ -222,6 +270,27 @@ FastLogs.ToggleOverlay();
 
 On WebGL, copying the link and opening it in a new tab must happen inside a
 user-gesture handler (button click). The overlay handles this automatically.
+
+---
+
+## For QA: capture and share a report
+
+1. Install a build with FastLogs enabled (a Development build, or a release build
+   made with the `LOGSHARE_FORCE_ENABLED` define - see below).
+2. Reproduce the issue in the app.
+3. Open the overlay: **tap the top-right corner 3 times quickly** (or press F8 on a
+   device with a keyboard).
+4. Optional: toggle the screenshot, type a short **Title** and a longer **Comment**
+   describing the problem. Set your **Tester Name** once in the Settings tab - it is
+   attached to every report you send.
+5. Tap **Send**. A short link (e.g. `https://<server>/abc123`) appears in the panel.
+6. Copy the link and send it to the developer. It opens in any browser with **no
+   token** - showing the console, error/warning/log counts, device snapshot and the
+   screenshot.
+
+Recent-reports dashboard (optional): `https://<server>/browse/<appId>` lists versions
+and then logs. The catalog is gated by a team **viewer token** - append
+`?token=<viewer-token>` to the URL. Individual Send links never need a token.
 
 ---
 
@@ -250,6 +319,25 @@ Use `Tools > PlayJoy > FastLogs > Build Defines Helper` to add the
 
 > This should only be done when you have a deliberate operational reason - HTTP
 > traffic and optional screenshots will run in a production build.
+
+### Passing the define through CI
+
+When a CI step forwards build arguments through a shell (for example a Python or
+bash wrapper that appends `--extradefines` to the Unity command line), a bare `;`
+in the value is read by the shell as a command separator and the build breaks
+(`SOMETHING: command not found`). Quote the whole value so several defines survive
+as one token:
+
+```text
+# wrong - the shell splits on ';' and the second define becomes a "command":
+--extradefines=LOGSHARE_FORCE_ENABLED;ENABLE_SRDEBUG_IN_RELEASE
+
+# right - quoted, reaches Unity intact:
+"--extradefines=LOGSHARE_FORCE_ENABLED;ENABLE_SRDEBUG_IN_RELEASE"
+```
+
+A single define needs no quotes. `--extradefines` is split on `;` inside the build,
+so the `;` separators must arrive at Unity unmangled.
 
 ---
 

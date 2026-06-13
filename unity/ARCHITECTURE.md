@@ -88,7 +88,7 @@ public static class FastLogs
     public static CountsDto Counts { get; }            // default(all-zero) when stripped
 
     // --- Send (value-returning, awaitable on all Unity versions) ---
-    public static FlogTask<UploadResultDto> SendAsync(bool includeScreenshot = false, string title = null);
+    public static FlogTask<UploadResultDto> SendAsync(bool includeScreenshot = false, string title = null, string comment = null);
     // stripped build returns FlogTask.FromResult(UploadResultDto.Disabled)
 }
 ```
@@ -209,7 +209,7 @@ public interface ILogShareOverlay : IDisposable
     void Hide();
     void Toggle();
     void Refresh(CountsDto counts, bool isBusy, UploadResultDto lastResult); // called each frame while visible
-    event Action<bool, string> SendRequested;   // (includeScreenshot, title)
+    event Action<bool, string, string> SendRequested;   // (includeScreenshot, title, comment)
 }
 
 // Web-only (WebGL) browser info filler. May be null elsewhere.

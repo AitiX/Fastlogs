@@ -29,6 +29,16 @@
 // Ретеншн (per-request override; сервер clamp(1, app.maxRetentionDays)). -1 = не слать поле.
 #macro FASTLOGS_RETENTION_DAYS -1
 
+// Имя тестера - уходит в поле "tester" КАЖДОГО отчёта (контракт: <=120 символов).
+// Пустая строка -> поле не отправляется (контракт: пустые опускать). Интегратор задаёт
+// своё значение в проекте (или через runtime-override fastlogs_init({ tester: "..." })).
+#macro FASTLOGS_TESTER        ""
+
+// Авто-копирование короткой ссылки (url) в буфер обмена устройства после УСПЕШНОЙ отправки.
+// По умолчанию ВКЛ. На WebGL копирование требует user-gesture - там это может не сработать
+// (не падаем; в оверлее остаётся кнопка "Копировать" как fallback по клику).
+#macro FASTLOGS_COPY_ON_SEND  true
+
 // HTTP timeout на установку соединения, мс. // TODO verify применимость http_set_connect_timeout.
 #macro FASTLOGS_HTTP_TIMEOUT_MS 15000
 

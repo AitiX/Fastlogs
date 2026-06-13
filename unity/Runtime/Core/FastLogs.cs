@@ -284,18 +284,19 @@ namespace PlayJoy.FastLogs
 
         /// <summary>
         /// Build and upload a report, returning the result. Awaitable on all Unity
-        /// versions (FlogTask, coroutine-driven). In stripped builds returns a
-        /// completed "disabled" result immediately. Value-returning: compiles
-        /// everywhere.
+        /// versions (FlogTask, coroutine-driven). Optional title and comment are
+        /// attached to the report (comment is the tester's free-form problem
+        /// description). In stripped builds returns a completed "disabled" result
+        /// immediately. Value-returning: compiles everywhere.
         /// </summary>
-        public static FlogTask<UploadResultDto> SendAsync(bool includeScreenshot = false, string title = null)
+        public static FlogTask<UploadResultDto> SendAsync(bool includeScreenshot = false, string title = null, string comment = null)
         {
 #if FASTLOGS_ENABLED
             if (_runtime == null)
             {
                 return FlogTask.FromResult(UploadResultDto.Fail("FastLogs is not initialized."));
             }
-            return _runtime.BeginSend(includeScreenshot, title);
+            return _runtime.BeginSend(includeScreenshot, title, comment);
 #else
             return FlogTask.FromResult(UploadResultDto.Disabled);
 #endif

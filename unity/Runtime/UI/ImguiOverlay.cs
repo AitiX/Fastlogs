@@ -10,7 +10,7 @@
 //   - DPI scaling (Screen.dpi) and safe-area insets so it is usable on phones.
 //
 // The overlay does NOT call FastLogs.SendAsync itself. It raises SendRequested
-// (includeScreenshot, title); the FastLogsRuntime host subscribes to that and
+// (includeScreenshot, title, comment); the FastLogsRuntime host subscribes to that and
 // runs the send pipeline (screenshot -> report -> upload -> OnUploaded), then
 // pushes results back via Refresh(counts, isBusy, lastResult). This matches how
 // the core wires overlays (see FastLogsRuntime.OnOverlaySendRequested / Update).
@@ -41,9 +41,11 @@ namespace PlayJoy.FastLogs
         private const float MinTouch = 44f;
         private const float BasePadding = 8f;
         private const float QrLogicalSize = 160f;
+        private const float CommentLogicalHeight = 72f; // multi-line comment input height (~3 lines)
 
         private readonly IClipboard _clipboard;
         private readonly SettingsPanel _settings; // optional embedded settings tab
+        private readonly FastLogsConfig _config;  // read-only access (tester name, etc.); may be null
 
         // Hidden MonoBehaviour that routes Unity's OnGUI callback into this object,
         // so the overlay is fully self-contained (the runtime host does not pump GUI).
@@ -51,6 +53,10 @@ namespace PlayJoy.FastLogs
 
         private bool _visible;
         private bool _includeScreenshot;
+
+        // User-entered fields attached to the next report.
+        private string _titleInput = string.Empty;    // single-line title (<=120 on the server side)
+        private string _comment = string.Empty;       // multi-line free-form problem description
 
         private CountsDto _counts;
         private bool _isBusy;
@@ -67,23 +73,27 @@ namespace PlayJoy.FastLogs
         private GUIStyle _toggle;
         private GUIStyle _link;
         private GUIStyle _title;
+        private GUIStyle _field;     // single-line input
+        private GUIStyle _textArea;  // multi-line input (wraps)
         private Texture2D _panelTex;
         private Texture2D _accentTex;
 
         // Settings tab toggle.
         private bool _showSettings;
 
-        public event Action<bool, string> SendRequested;
+        public event Action<bool, string, string> SendRequested; // (includeScreenshot, title, comment)
 
         public bool IsVisible { get { return _visible; } }
 
         /// <param name="clipboard">Clipboard abstraction (may be null).</param>
         /// <param name="settings">Optional settings panel rendered under a tab (may be null).</param>
+        /// <param name="config">Live config for read-only display (tester name); may be null.</param>
         /// <param name="captureScreenshotByDefault">Initial state of the screenshot toggle.</param>
-        public ImguiOverlay(IClipboard clipboard, SettingsPanel settings, bool captureScreenshotByDefault)
+        public ImguiOverlay(IClipboard clipboard, SettingsPanel settings, FastLogsConfig config, bool captureScreenshotByDefault)
         {
             _clipboard = clipboard;
             _settings = settings;
+            _config = config;
             _includeScreenshot = captureScreenshotByDefault;
             _driver = GuiDriver.Create(this);
         }
@@ -150,7 +160,18 @@ namespace PlayJoy.FastLogs
             // Build the panel rect; height grows when a result/QR is shown.
             bool hasResult = _lastResult.Success && !string.IsNullOrEmpty(_lastResult.Url);
             float lineH = Mathf.Max(MinTouch * scale, 28f * scale);
-            float panelHeight = pad * 2f + lineH * 2f + pad;
+            float commentH = CommentLogicalHeight * scale;
+            bool hasTester = _config != null && !string.IsNullOrEmpty(_config.UI.TesterName);
+
+            // header + (title label+field) + (comment label+area) + [tester] + action
+            float panelHeight = pad * 2f + lineH;                 // header
+            panelHeight += lineH * 2f + pad;                      // title: label + field
+            panelHeight += lineH + commentH + pad;               // comment: label + text area
+            if (hasTester)
+            {
+                panelHeight += lineH;                            // tester (read-only) row
+            }
+            panelHeight += lineH + pad;                          // action row
             if (hasResult)
             {
                 panelHeight += lineH + (QrLogicalSize * scale) + pad * 2f;
@@ -166,6 +187,7 @@ namespace PlayJoy.FastLogs
             GUILayout.BeginArea(new Rect(panel.x + pad, panel.y + pad, panel.width - pad * 2f, panel.height - pad * 2f));
 
             DrawHeaderRow(scale, lineH);
+            DrawInputRows(scale, lineH, commentH, hasTester);
             DrawActionRow(scale, lineH);
 
             if (hasResult)
@@ -204,6 +226,27 @@ namespace PlayJoy.FastLogs
             }
 
             GUILayout.EndHorizontal();
+        }
+
+        private void DrawInputRows(float scale, float lineH, float commentH, bool hasTester)
+        {
+            GUI.enabled = !_isBusy;
+
+            // Title (single line).
+            GUILayout.Label("Title", _label);
+            _titleInput = GUILayout.TextField(_titleInput ?? string.Empty, _field, GUILayout.Height(lineH));
+
+            // Comment (multi-line, free-form problem description).
+            GUILayout.Label("Comment", _label);
+            _comment = GUILayout.TextArea(_comment ?? string.Empty, _textArea, GUILayout.Height(commentH));
+
+            GUI.enabled = true;
+
+            // Tester name (read-only here; edited in Settings).
+            if (hasTester)
+            {
+                GUILayout.Label("Tester: " + _config.UI.TesterName, _label, GUILayout.Height(lineH));
+            }
         }
 
         private void DrawActionRow(float scale, float lineH)
@@ -283,7 +326,10 @@ namespace PlayJoy.FastLogs
             var handler = SendRequested;
             if (handler != null)
             {
-                try { handler(_includeScreenshot, null); }
+                // Pass empty inputs as null so optional fields are omitted downstream.
+                string title = string.IsNullOrEmpty(_titleInput) ? null : _titleInput;
+                string comment = string.IsNullOrEmpty(_comment) ? null : _comment;
+                try { handler(_includeScreenshot, title, comment); }
                 catch (Exception e) { FlogLog.Exception(e); }
             }
         }
@@ -435,6 +481,12 @@ namespace PlayJoy.FastLogs
 
             _link = new GUIStyle(GUI.skin.textField) { fontSize = fontSize };
             _link.normal.textColor = new Color(0.6f, 0.8f, 1f, 1f);
+
+            _field = new GUIStyle(GUI.skin.textField) { fontSize = fontSize };
+            _field.normal.textColor = Color.white;
+
+            _textArea = new GUIStyle(GUI.skin.textArea) { fontSize = fontSize, wordWrap = true };
+            _textArea.normal.textColor = Color.white;
         }
 
         private static Texture2D SolidTexture(Color color)

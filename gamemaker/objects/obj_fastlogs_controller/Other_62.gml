@@ -55,13 +55,25 @@ if (ok && !net_error) {
         hs.last_url = url;
         show_debug_message("[FastLogs] ingest OK (" + string(http_status) + ") id=" + log_id + " url=" + url);
 
-        // Скопировать ссылку в буфер обмена (best-effort; clipboard-скрипт сам гейтит платформу).
-        if (script_exists(asset_get_index("fastlogs_copy_url"))) {
-            fastlogs_copy_url();
+        // COPY-ON-SEND: при включённом флаге авто-копируем короткую ссылку в буфер устройства.
+        //   best-effort; clipboard-скрипт сам гейтит платформу (консоли -> no-op).
+        //   На WebGL копирование требует user-gesture и тут может не сработать - НЕ падаем
+        //   (исключение проглатываем), кнопка "Копировать" в оверлее остаётся как fallback.
+        var copied = false;
+        if (FASTLOGS_COPY_ON_SEND && script_exists(asset_get_index("fastlogs_copy_url"))) {
+            try {
+                copied = fastlogs_copy_url();
+            } catch (_ce) {
+                copied = false;                 // WebGL без жеста / платформенный отказ - не падаем
+            }
         }
-        // Тост в оверлее, если он доступен.
+        // Тост в оверлее, если он доступен. Если ссылку скопировали - отметим это.
         if (script_exists(asset_get_index("fastlogs_ui_toast"))) {
-            fastlogs_ui_toast("лог отправлен");
+            fastlogs_ui_toast(copied ? "лог отправлен, ссылка скопирована" : "лог отправлен");
+        }
+        // Комментарий ушёл с отчётом -> очищаем поле, чтобы он не уходил повторно (фича COMMENT).
+        if (script_exists(asset_get_index("fastlogs_comment_clear"))) {
+            fastlogs_comment_clear();
         }
     } else {
         show_debug_message("[FastLogs] ingest OK (" + string(http_status) + ") but no url in response: " + string(result));

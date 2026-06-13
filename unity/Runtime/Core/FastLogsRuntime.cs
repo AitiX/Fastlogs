@@ -215,16 +215,16 @@ namespace PlayJoy.FastLogs
 
         // ---- Send pipeline ----
 
-        private void OnOverlaySendRequested(bool includeScreenshot, string title)
+        private void OnOverlaySendRequested(bool includeScreenshot, string title, string comment)
         {
-            BeginSend(includeScreenshot, title);
+            BeginSend(includeScreenshot, title, comment);
         }
 
         /// <summary>
         /// Kick off a send and return an awaitable result. Never throws; failures
         /// surface through the returned task and OnUploaded.
         /// </summary>
-        public FlogTask<UploadResultDto> BeginSend(bool includeScreenshot, string title)
+        public FlogTask<UploadResultDto> BeginSend(bool includeScreenshot, string title, string comment)
         {
             var task = FlogTask.Create<UploadResultDto>();
 
@@ -244,7 +244,7 @@ namespace PlayJoy.FastLogs
 
             try
             {
-                StartCoroutine(SendRoutine(includeScreenshot, title, task));
+                StartCoroutine(SendRoutine(includeScreenshot, title, comment, task));
             }
             catch (Exception e)
             {
@@ -255,7 +255,7 @@ namespace PlayJoy.FastLogs
             return task;
         }
 
-        private IEnumerator SendRoutine(bool includeScreenshot, string title, FlogTask<UploadResultDto> task)
+        private IEnumerator SendRoutine(bool includeScreenshot, string title, string comment, FlogTask<UploadResultDto> task)
         {
             _isBusy = true;
             UploadResultDto result;
@@ -286,7 +286,7 @@ namespace PlayJoy.FastLogs
             LogReportDto report = null;
             try
             {
-                report = BuildReport(title, screenshotBase64);
+                report = BuildReport(title, comment, screenshotBase64);
             }
             catch (Exception e)
             {
@@ -334,8 +334,35 @@ namespace PlayJoy.FastLogs
         {
             _isBusy = false;
             _lastResult = result;
+
+            // Copy-on-send: after a successful upload, best-effort copy the short
+            // link to the device clipboard via the same clipboard service the
+            // overlay uses. On WebGL this runs from a coroutine continuation (not a
+            // user gesture), so the browser may reject it - that is fine, we never
+            // throw and the overlay's Copy button stays as the fallback.
+            TryCopyLinkOnSend(result);
+
             task.SetResult(result);
             try { Uploaded?.Invoke(result); }
+            catch (Exception e) { FlogLog.Exception(e); }
+        }
+
+        private void TryCopyLinkOnSend(UploadResultDto result)
+        {
+            if (_clipboard == null)
+            {
+                return;
+            }
+            if (_config == null || !_config.UI.CopyLinkOnSend)
+            {
+                return;
+            }
+            if (!result.Success || string.IsNullOrEmpty(result.Url))
+            {
+                return;
+            }
+
+            try { _clipboard.CopyToClipboard(result.Url); }
             catch (Exception e) { FlogLog.Exception(e); }
         }
 
@@ -346,7 +373,7 @@ namespace PlayJoy.FastLogs
 
         // ---- Report assembly ----
 
-        private LogReportDto BuildReport(string title, string screenshotBase64)
+        private LogReportDto BuildReport(string title, string comment, string screenshotBase64)
         {
             bool includeSensitive = _config != null && _config.Diagnostics.IncludeSensitive;
 
@@ -373,6 +400,10 @@ namespace PlayJoy.FastLogs
                 retention = _config.Server.RetentionDaysOverride;
             }
 
+            // Tester name comes from settings/config and rides along with every
+            // report. Empty stays null so the optional field is omitted.
+            string tester = _config != null ? _config.UI.TesterName : null;
+
             var report = new LogReportDto
             {
                 AppId = _config != null ? _config.Server.AppId : string.Empty,
@@ -385,7 +416,9 @@ namespace PlayJoy.FastLogs
                 Device = device,
                 ScreenshotPngBase64 = string.IsNullOrEmpty(screenshotBase64) ? null : screenshotBase64,
                 RetentionDays = retention,
-                Title = string.IsNullOrEmpty(title) ? null : Truncate(title, 120)
+                Title = string.IsNullOrEmpty(title) ? null : Truncate(title, 120),
+                Comment = string.IsNullOrEmpty(comment) ? null : Truncate(comment, 4000),
+                Tester = string.IsNullOrEmpty(tester) ? null : Truncate(tester, 120)
             };
 
             return report;

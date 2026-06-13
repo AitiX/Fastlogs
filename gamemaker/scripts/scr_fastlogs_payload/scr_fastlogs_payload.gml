@@ -92,6 +92,25 @@ function fastlogs_build_payload(opts = undefined) {
         }
     }
 
+    // --- comment (ОПЦ., <=4000): свободное описание проблемы тестером, из opts отправки ---
+    // Контракт: пустые поля опускать (не слать null/""). Поэтому кладём только непустое.
+    if (variable_struct_exists(opts, "comment")) {
+        var cm = opts.comment;
+        if (is_string(cm) && string_length(cm) > 0) {
+            if (string_length(cm) > 4000) { cm = string_copy(cm, 1, 4000); }
+            body.comment = cm;
+        }
+    }
+
+    // --- tester (ОПЦ., <=120): имя тестера из конфига; уходит с КАЖДЫМ отчётом ---
+    // Источник: runtime-override fastlogs_init({ tester }) -> иначе макрос FASTLOGS_TESTER.
+    // Пустое не отправляем (контракт: опускать пустые).
+    var tester = __fastlogs_cfg("tester", FASTLOGS_TESTER);
+    if (is_string(tester) && string_length(tester) > 0) {
+        if (string_length(tester) > 120) { tester = string_copy(tester, 1, 120); }
+        body.tester = tester;
+    }
+
     return body;
 }
 
