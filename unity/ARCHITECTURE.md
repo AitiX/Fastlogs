@@ -74,6 +74,11 @@ public static class FastLogs
     public static void Warn(string message);
     public static void Error(string message);
 
+    // --- Context & breadcrumbs (void, [Conditional]) ---
+    public static void SetContext(string key, string value);   // null value removes the key
+    public static void ClearContext();
+    public static void Breadcrumb(string message, FastLogLevel level = FastLogLevel.Log);
+
     // --- Recording (void, [Conditional]) ---
     public static void StartRecording();
     public static void StopRecording();
@@ -87,7 +92,8 @@ public static class FastLogs
     // --- Counts (value-returning) ---
     public static CountsDto Counts { get; }            // default(all-zero) when stripped
 
-    // --- Send (value-returning, awaitable on all Unity versions) ---
+    // --- Send ---
+    public static void Send();   // void, [Conditional] - quick fire-and-forget send (no overlay, config defaults)
     public static FlogTask<UploadResultDto> SendAsync(bool includeScreenshot = false, string title = null, string comment = null);
     // stripped build returns FlogTask.FromResult(UploadResultDto.Disabled)
 }
@@ -268,10 +274,12 @@ public sealed class FastLogsConfig : ScriptableObject
     public ServerSection      Server      { get; }
     public CaptureSection     Capture     { get; }
     public RecordingSection   Recording   { get; }
+    public AutoSendSection    AutoSend    { get; }
     public ScreenshotSection  Screenshot  { get; }
     public DiagnosticsSection Diagnostics { get; }
     public TriggerConfig      Trigger     { get; }
     public NetSection         Net         { get; }
+    public RetrySection       Retry       { get; }
     public UiSection          UI          { get; }
     public EnableSection      Enable      { get; }
 
@@ -299,20 +307,33 @@ public sealed class FastLogsConfig : ScriptableObject
         public bool PersistAcrossSessions = true;
         public int MaxStoreBytes = 2097152;      // 2 MB; 0 = unlimited
     }
+    [Serializable] public sealed class AutoSendSection {
+        public bool AutoSendOnException = true;          // auto-upload on unhandled exception (dev)
+        public float MinSecondsBetweenAutoSends = 30f;   // throttles upload tempo, not capture
+        public int MaxAutoSendsPerSession = 10;          // 0 = unlimited
+        public bool IncludeScreenshot = false;           // crash frame rarely useful + costly
+    }
     [Serializable] public sealed class ScreenshotSection {
         public bool CaptureByDefault = false;
         public int MaxDimension = 1280;
     }
     [Serializable] public sealed class DiagnosticsSection {
         public bool IncludeSensitive = false;    // deviceModel/identifier/url/referrer
+        public bool ScrubPii = true;             // redact email/IP/token/long-digits in text+context+crumbs
     }
     [Serializable] public sealed class NetSection {
         public int TimeoutSeconds = 20;
         public int MaxRetries = 2;
         public bool GzipBody = true;             // ignored on WebGL
     }
+    [Serializable] public sealed class RetrySection {
+        public float RetryIntervalSeconds = 30f; // outer loop re-attempting the SAME failed report; 0 = disabled
+        public int MaxRetryAttempts = 0;         // 0 = unlimited (one pending retry at a time)
+    }
     [Serializable] public sealed class UiSection {
         public bool EnableUI = true;
+        public string TesterName = "";           // rides on every report's 'tester' field; empty omitted
+        public bool CopyLinkOnSend = true;       // copy short link to clipboard after a successful send
     }
     [Serializable] public sealed class EnableSection {
         public bool EnableInEditor = true;
@@ -391,6 +412,8 @@ public struct UploadResultDto
     public string Id, Url, RawUrl, ExpiresAt;
     public long StatusCode;
     public string Error;
+    public bool Retryable;   // true = transient (network/0/5xx) -> outer retry + crash-outbox keep;
+                             // false = permanent 4xx (poison pill) -> drop from outbox
     public static UploadResultDto Ok(string id, string url, string rawUrl, string expiresAt, long statusCode);
     public static UploadResultDto Fail(string error, long statusCode = 0);
     public static UploadResultDto Disabled { get; }
@@ -410,6 +433,18 @@ public sealed class LogReportDto
     public string ScreenshotPngBase64;   // optional - omitted when empty (NO "data:" prefix)
     public int? RetentionDays;           // optional - omitted when null
     public string Title;                 // optional - omitted when empty (<=120 chars)
+    public string Comment;               // optional - tester free-form description (<=4000 chars)
+    public string Tester;                // optional - tester name (<=120 chars)
+    public Dictionary<string,string> Context;   // optional - omitted when null/empty; server caps ~4KB / key<=64 / value<=512
+    public List<BreadcrumbDto> Breadcrumbs;     // optional - oldest first; server caps 100 items / ~16KB
+}
+
+// BreadcrumbDto.cs (in LogReportDto.cs) - one crumb -> contract object { t, m, lvl }
+public struct BreadcrumbDto
+{
+    public string TimeUtc;   // t   - ISO-8601 UTC
+    public string Message;   // m   - short human message
+    public string Level;     // lvl - "info" | "warn" | "error" (omitted when empty)
 }
 
 // DeviceInfoDto.cs - grouped; null fields/empty groups OMITTED by MiniJson
@@ -509,6 +544,52 @@ Fills system/graphics/display/application/runtime/memory/network/build from
 
 ---
 
+## 6a. Context / breadcrumbs / privacy / crash outbox (internal, gated)
+
+These back the v0.3 features. All are gated and removed in retail/console.
+
+### `FastLogsCrumbStore` - `Runtime/Capture/FastLogsCrumbStore.cs`
+
+In-memory backing for `FastLogs.SetContext`/`ClearContext`/`Breadcrumb`. Holds a
+`string->string` context map and a fixed-capacity breadcrumb ring (default cap 100,
+preallocated structs - no per-add heap allocation beyond the message string).
+Client-side caps mirror the server: context key <= 64, value <= 512, up to 64
+entries (a brand-new key past the cap is dropped, never evicting an existing one);
+breadcrumb message <= 512. `SnapshotContext()` / `SnapshotBreadcrumbs()` materialize
+the report fields once per send (oldest-first crumbs; level -> `info|warn|error`).
+The runtime owns one instance and snapshots it during BuildReport.
+
+### `PiiScrubber` - `Runtime/Net/PiiScrubber.cs`
+
+Best-effort one-shot redaction (`internal static`). Applied to `logText`, every
+context value and every breadcrumb message right before serialize/persist when
+`Diagnostics.ScrubPii` is on (default). Built-in patterns: Bearer/`Authorization`
+token values, email, IPv6, IPv4, 9+ digit runs -> `[redacted]`. Pure BCL regex
+(interpreted, WebGL-safe), compiled lazily once. `public static void AddPattern(string)`
+appends a custom pattern (after the built-ins). Fails safe: a bad/throwing pattern
+never throws out of the send path. May over-redact (long digit runs) - a deliberate
+privacy bias.
+
+### `PendingCrashQueue` - `Runtime/Net/PendingCrashQueue.cs`
+
+Durable disk outbox for auto-sent crashes (`internal sealed`). On an unhandled
+exception the runtime writes the (scrubbed, screenshot-less, `logEncoding="plain"`)
+report to `persistentDataPath/FastLogs/pending/<id>.json` **synchronously, before**
+any throttle/in-flight guard, so a hard crash cannot lose it. Atomic-ish write (tmp
++ move); newest files kept up to a cap (default 5), older trimmed. `Persist(report)`
+on the crash path; `Remove(path)` after a success; `ResendAll(uploader, config)`
+called from Init AND on every idle Complete (re-entrancy guarded) drains oldest-first
+via a coroutine on `FlogCoroutineHost`. Poison-pill: a non-`Retryable` 4xx is dropped;
+transient failures (faulted/network/0/5xx) are kept for a future attempt. Crash
+de-dup prevents a crash loop from flooding the outbox.
+
+> Capture vs tempo: capture (the disk write) always happens; `AutoSend.MinSeconds...`,
+> `MaxAutoSendsPerSession`, and the single-in-flight lock bound only the *upload*
+> attempt rate. The whole tool is stripped in retail/console - crashes are not sent
+> from shipped/console builds by design.
+
+---
+
 ## 7. Files created
 
 ```
@@ -528,8 +609,12 @@ unity/Runtime/Core/FlogTask.cs                  awaitable future (no Task/Awaita
 unity/Runtime/Core/Interfaces.cs                ILogSource/ITriggerSource/ILogUploader/
                                                 IScreenshotCapturer/IClipboard/ILogShareOverlay/
                                                 IWebDeviceInfoProvider/IFastLogsServices + LogEntry/FastLogLevel
-unity/Runtime/Model/CountsDto.cs  UploadResultDto.cs  LogReportDto.cs  DeviceInfoDto.cs  MiniJson.cs
+unity/Runtime/Model/CountsDto.cs  UploadResultDto.cs  LogReportDto.cs (+ BreadcrumbDto)  DeviceInfoDto.cs  MiniJson.cs
 unity/Runtime/Device/DiagnosticsCollector.cs    (gated)
+unity/Runtime/Capture/FastLogsCrumbStore.cs     context map + breadcrumb ring (gated)
+unity/Runtime/Net/PiiScrubber.cs                best-effort PII redaction (gated)
+unity/Runtime/Net/PendingCrashQueue.cs          durable crash outbox + resend (gated)
+unity/Runtime/UI/SettingsPanel.cs               runtime settings tab (gated; PlayerPrefs)
 unity/Samples~/BasicUsage/FastLogsBasicUsage.cs sample MonoBehaviour
 ```
 

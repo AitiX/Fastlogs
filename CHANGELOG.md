@@ -6,6 +6,29 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-06-13
+
+### Added
+- **Context** (key->value snapshot of what the player was doing / app state):
+  the contract gains an optional `context` object (string->string) that travels
+  with every report. The server clamps it on ingest (~4KB total, key <= 64 chars,
+  value <= 512 chars) and the viewer renders a dedicated **Context** section.
+- **Breadcrumbs** (a rolling trail of the last events leading up to a report):
+  the contract gains an optional `breadcrumbs` array of `{ t, m, lvl }` items.
+  The server clamps it on ingest (100 items / ~16KB total; `lvl` must be one of
+  `info` / `warn` / `error`, otherwise dropped; `m` is required and truncated to
+  512 chars) and the viewer renders a **Breadcrumbs** event timeline.
+- PII scrubbing on the client is privacy-by-default; on the server side the
+  ingest no longer stores a raw client IP. The submitting IP is only one-time
+  salted and SHA-256 hashed (`config.ipSalt`, first 16 hex chars) for rate
+  limiting, so the original address is not retained or reversible.
+
+### Changed
+- Ingest persists the new structured fields as `context_json` and
+  `breadcrumbs_json`; both are optional and omitted when absent.
+
+## [0.2.0] - 2026-06-13
+
 ### Added
 - MIT `LICENSE` and this `CHANGELOG`.
 - `server/Dockerfile` and `server/docker-compose.yml` for one-command deploy.
@@ -14,6 +37,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   served via the static allowlist.
 - gzip+base64 ingest now validates the gzip magic bytes and trial-decompresses
   with a `MAX_LOG_BYTES` ceiling (rejects corrupt or oversized logs at ingest).
+- Per-report `comment` and `tester` fields, surfaced in the viewer.
+- Shared team ingest token (master key) with opt-in auto-register so new games
+  can self-onboard.
+- In-process retention sweep (periodic, configurable) that keeps disk bounded
+  alongside the standalone sweeper.
+- Configurable bind `HOST` (default `127.0.0.1`; `0.0.0.0` under Docker), deploy
+  guide and team docs.
+- Server tests (comment / tester / team-token) and a GitHub Actions CI workflow
+  (`npm test`).
 
 ### Changed
 - Rebranded from "PlayJoy LogShare" to **FastLogs**: package name, service/unit

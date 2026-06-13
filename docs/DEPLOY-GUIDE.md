@@ -31,12 +31,12 @@
 
 (Если предпочитаешь путь без DNS - можно повесить на путь существующего домена, напр. `https://lookingforaliens.playjoystudios.com/fl/`. Скажи - переключу.)
 
-## Шаг 2 (можно я, нужен твой вход) - GitHub репозиторий Aitix/fastlogs
+## Шаг 2 (можно я, нужен твой вход) - GitHub репозиторий AitiX/Fastlogs
 
 `gh` установлен, но не авторизован. Два варианта:
 
-- Вариант A (проще): сам создай **пустой private** репозиторий `github.com/Aitix/fastlogs` (без README/gitignore/license). Затем скажи мне - я добавлю remote и запушу (Git Credential Manager должен подхватить твою авторизацию; если всплывёт окно входа - подтверди).
-- Вариант B: выполни в терминале `gh auth login` (GitHub.com -> HTTPS -> Login with a web browser), пройди вход. После этого я сам создам репо и запушу: `gh repo create Aitix/fastlogs --private --source . --push`.
+- Вариант A (проще): сам создай **пустой private** репозиторий `github.com/AitiX/Fastlogs` (без README/gitignore/license). Затем скажи мне - я добавлю remote и запушу (Git Credential Manager должен подхватить твою авторизацию; если всплывёт окно входа - подтверди).
+- Вариант B: выполни в терминале `gh auth login` (GitHub.com -> HTTPS -> Login with a web browser), пройди вход. После этого я сам создам репо и запушу: `gh repo create AitiX/Fastlogs --private --source . --push`.
 
 После пуша в Common (`EditorTools`) добавлю только ссылку (git-dependency для Unity), без копии кода.
 
