@@ -149,11 +149,42 @@ const stmts = {
   `),
 
   listVersions: db.prepare(`
-    SELECT app_version AS version, COUNT(*) AS count, MAX(created_at) AS last_at
+    SELECT app_version AS version, COUNT(*) AS count, MAX(created_at) AS last_at,
+           COALESCE(SUM(log_bytes), 0) AS totalBytes,
+           COALESCE(SUM(pinned), 0) AS pinnedCount
     FROM logs
     WHERE app_id = ?
     GROUP BY app_version
     ORDER BY last_at DESC
+  `),
+
+  // Storage rollup per app (all rows present, incl. expired-not-yet-swept, so
+  // it reflects true on-disk usage). Used by the catalog projects list.
+  statsByApp: db.prepare(`
+    SELECT app_id,
+           COUNT(*) AS logCount,
+           COALESCE(SUM(log_bytes), 0) AS totalBytes,
+           COALESCE(SUM(pinned), 0) AS pinnedCount
+    FROM logs
+    GROUP BY app_id
+  `),
+
+  // Single-row storage rollup for one app.
+  statsForApp: db.prepare(`
+    SELECT COUNT(*) AS logCount,
+           COALESCE(SUM(log_bytes), 0) AS totalBytes,
+           COALESCE(SUM(pinned), 0) AS pinnedCount
+    FROM logs
+    WHERE app_id = @app_id
+  `),
+
+  // The largest logs of an app (for the storage dashboard panel).
+  largestLogs: db.prepare(`
+    SELECT id, title, app_version, platform, log_bytes, created_at
+    FROM logs
+    WHERE app_id = @app_id
+    ORDER BY log_bytes DESC
+    LIMIT @limit
   `),
 
   listLogs: db.prepare(`
@@ -244,9 +275,24 @@ function upsertApp(row) {
   return stmts.upsertApp.run(row);
 }
 
-// List distinct app_version values for an app with per-version counts.
+// List distinct app_version values for an app with per-version counts + sizes.
 function listVersions(appId) {
   return stmts.listVersions.all(appId);
+}
+
+// Storage rollup for all apps (array of { app_id, logCount, totalBytes, pinnedCount }).
+function statsByApp() {
+  return stmts.statsByApp.all();
+}
+
+// Storage rollup for one app ({ logCount, totalBytes, pinnedCount }).
+function statsForApp(appId) {
+  return stmts.statsForApp.get({ app_id: appId });
+}
+
+// The `limit` largest logs of an app, largest first.
+function largestLogs(appId, limit) {
+  return stmts.largestLogs.all({ app_id: appId, limit });
 }
 
 // List logs of a given app and version, newest first.
@@ -294,6 +340,9 @@ module.exports = {
   getApp,
   upsertApp,
   listVersions,
+  statsByApp,
+  statsForApp,
+  largestLogs,
   listLogs,
   listCrashRows,
   listLogsMissingSig,

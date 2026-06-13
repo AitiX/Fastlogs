@@ -110,6 +110,9 @@ const config = Object.freeze({
   // requires the admin token, so only some people (admin-token holders) can unpin.
   unpinRequiresAdmin: envBool('UNPIN_REQUIRES_ADMIN', false),
 
+  // Storage dashboard: how many of the largest logs to list per app.
+  statsTopN: envInt('STATS_TOP_N', 5),
+
   // Crash grouping. crashSigTopK = how many top normalized stack frames are
   // folded into a crash signature (higher = finer grouping). crashRecomputeBatch
   // = max crash_sig-NULL logs the /browse/:appId/crashes route lazily backfills

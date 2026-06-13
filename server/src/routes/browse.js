@@ -80,12 +80,24 @@ function browseRoot(req, res, params, query) {
     return sendError(res, 401, 'unauthorized', 'Viewer token required');
   }
   if (wantsHtml(req, query)) return serveBrowseHtml(res);
-  const apps = db.listApps().map((a) => ({
-    appId: a.app_id,
-    name: a.name,
-    enabled: a.enabled === 1,
-  }));
-  sendJson(res, 200, { projects: apps });
+  // Attach per-project storage totals (size, log count, pinned count).
+  const statsById = new Map(db.statsByApp().map((s) => [s.app_id, s]));
+  const totals = { totalBytes: 0, logCount: 0, pinnedCount: 0 };
+  const apps = db.listApps().map((a) => {
+    const s = statsById.get(a.app_id) || { totalBytes: 0, logCount: 0, pinnedCount: 0 };
+    totals.totalBytes += s.totalBytes;
+    totals.logCount += s.logCount;
+    totals.pinnedCount += s.pinnedCount;
+    return {
+      appId: a.app_id,
+      name: a.name,
+      enabled: a.enabled === 1,
+      totalBytes: s.totalBytes,
+      logCount: s.logCount,
+      pinnedCount: s.pinnedCount,
+    };
+  });
+  sendJson(res, 200, { projects: apps, totals });
 }
 
 // GET /browse/:appId -> versions (JSON) or the catalog UI (HTML for browsers).
@@ -103,9 +115,21 @@ function browseApp(req, res, params, query) {
   const versions = db.listVersions(params.appId).map((v) => ({
     version: v.version,
     count: v.count,
+    logCount: v.count,
+    totalBytes: v.totalBytes,
+    pinnedCount: v.pinnedCount,
     lastAt: v.last_at,
   }));
-  sendJson(res, 200, { appId: app.app_id, name: app.name, versions });
+  const totals = db.statsForApp(params.appId) || { logCount: 0, totalBytes: 0, pinnedCount: 0 };
+  const largestLogs = db.largestLogs(params.appId, config.statsTopN).map((r) => ({
+    id: r.id,
+    title: r.title || null,
+    version: r.app_version,
+    platform: r.platform,
+    logBytes: r.log_bytes,
+    createdAt: r.created_at,
+  }));
+  sendJson(res, 200, { appId: app.app_id, name: app.name, versions, totals, largestLogs });
 }
 
 // GET /browse/:appId/:version -> log records (JSON) or the catalog UI (HTML).
