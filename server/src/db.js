@@ -153,7 +153,7 @@ const stmts = {
 
   listLogs: db.prepare(`
     SELECT id, title, ts_utc, platform, cnt_error, cnt_warn, cnt_log,
-           has_shot, pinned, created_at, expires_at
+           log_bytes, has_shot, pinned, created_at, expires_at
     FROM logs
     WHERE app_id = @app_id AND app_version = @version
     ORDER BY created_at DESC

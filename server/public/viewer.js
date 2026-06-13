@@ -44,6 +44,15 @@
     toastTimer = setTimeout(function () { el.classList.remove('show'); }, durationMs || 2000);
   }
 
+  // ---- Format byte size ----
+
+  function fmtBytes(n) {
+    if (n === null || n === undefined || isNaN(n) || n < 0) return '';
+    if (n < 1024) return n + ' B';
+    if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+    return (n / (1024 * 1024)).toFixed(1) + ' MB';
+  }
+
   // ---- Data ----
 
   var data = (typeof __LD !== 'undefined') ? __LD : null;
@@ -120,6 +129,7 @@
   var metaParts = [];
   if (data.platform) metaParts.push(data.platform);
   if (data.appVersion) metaParts.push(data.appVersion);
+  if (data.logBytes !== null && data.logBytes !== undefined && !isNaN(data.logBytes)) metaParts.push(fmtBytes(data.logBytes));
   if (data.timestampUtc) {
     try { metaParts.push(new Date(data.timestampUtc).toLocaleString()); } catch (e) { metaParts.push(data.timestampUtc); }
   }

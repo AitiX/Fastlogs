@@ -59,6 +59,15 @@
     try { return new Date(isoStr).toLocaleString(); } catch (e) { return isoStr; }
   }
 
+  // ---- Utility: format byte size ----
+
+  function fmtBytes(n) {
+    if (n === null || n === undefined || isNaN(n) || n < 0) return '';
+    if (n < 1024) return n + ' B';
+    if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+    return (n / (1024 * 1024)).toFixed(1) + ' MB';
+  }
+
   // ---- Utility: escape HTML ----
 
   function esc(str) {
@@ -224,6 +233,7 @@
       '<th>Title</th>' +
       '<th>Platform</th>' +
       '<th>E / W / L</th>' +
+      '<th>Size</th>' +
       '<th>Time</th>' +
       '<th>Pin</th>' +
       '</tr></thead>';
@@ -248,6 +258,7 @@
         '<td class="td-title"><span class="td-title-text" title="' + esc(log.title || '') + '">' + esc(log.title || '(no title)') + '</span></td>' +
         '<td class="td-platform">' + esc(log.platform || '') + '</td>' +
         '<td class="td-counts"><span class="count-e">' + cntE + '</span> / <span class="count-w">' + cntW + '</span> / <span class="count-l">' + cntL + '</span></td>' +
+        '<td class="td-size">' + esc(fmtBytes(log.logBytes)) + '</td>' +
         '<td class="td-time">' + esc(fmtDate(log.time || log.createdAt)) + '</td>' +
         '<td class="td-pin">' + (log.pinned ? '<span class="badge-pin">pinned</span>' : '') + '</td>';
 

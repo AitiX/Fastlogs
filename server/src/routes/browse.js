@@ -122,6 +122,7 @@ function browseVersion(req, res, params, query) {
     createdAt: r.created_at,
     platform: r.platform,
     counts: { error: r.cnt_error, warn: r.cnt_warn, log: r.cnt_log },
+    logBytes: r.log_bytes,
     hasScreenshot: r.has_shot === 1,
     pinned: r.pinned === 1,
     expiresAt: r.expires_at || null,
