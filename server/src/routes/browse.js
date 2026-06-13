@@ -202,12 +202,17 @@ async function browseCrashes(req, res, params, query) {
   if (batch > 0) {
     const missing = db.listLogsMissingSig(params.appId, batch);
     for (const r of missing) {
-      let sig = '';
+      let sig;
       try {
         const text = await storage.readLogGz(r.id);
-        if (text) sig = crashsig.computeSignature(text, { topK: config.crashSigTopK }) || '';
+        // readLogGz returns null only for a truly-missing blob (ENOENT); that is
+        // a legitimate "not a crash" so it gets the '' sentinel.
+        sig = text ? (crashsig.computeSignature(text, { topK: config.crashSigTopK }) || '') : '';
       } catch {
-        sig = '';
+        // Transient read/gunzip failure (locked/corrupt blob, EMFILE, ...): leave
+        // crash_sig NULL so a later request retries, instead of permanently
+        // stamping the '' sentinel and dropping a real crash from grouping.
+        continue;
       }
       db.updateCrashSig(r.id, sig);
     }

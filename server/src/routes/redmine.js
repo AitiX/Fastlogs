@@ -17,6 +17,13 @@ const { readBuffer, sendJson, sendError } = require('../util/http');
 const { getLiveLog, notFoundJson, linksFor } = require('./shared');
 const redmine = require('../redmine');
 
+// In-process guard against concurrent creates for the SAME log (double-click,
+// two teammates): logId -> Promise resolving to { issueId, issueUrl } | null.
+// While a create is in flight, other requests await it and return the existing
+// issue instead of creating a duplicate external ticket. Single-process server,
+// so this fully closes the read-then-act window in createRedmineIssue.
+const inFlight = new Map();
+
 // Viewer tier: token from Authorization header or ?token= (admin satisfies it).
 function authorizeViewer(req, query) {
   const headerToken = auth.parseBearer(req.headers['authorization']);
@@ -70,20 +77,52 @@ async function createRedmineIssue(req, res, params, query) {
     return sendError(res, 502, 'redmine_error', 'REDMINE_PROJECT_ID not set');
   }
 
-  const result = await redmine.createIssue({
-    url: config.redmine.url,
-    apiKey: config.redmine.apiKey,
-    projectId,
-    trackerId,
-    subject,
-    description,
-    timeoutMs: config.redmine.timeoutMs,
-  });
+  // Coalesce a concurrent create for the same log: return the issue the other
+  // request is creating rather than creating a second one.
+  if (inFlight.has(row.id)) {
+    const linked = await inFlight.get(row.id);
+    if (linked && linked.issueId != null) {
+      return sendJson(res, 200, { issueId: linked.issueId, issueUrl: linked.issueUrl, created: false });
+    }
+    // The other attempt failed; fall through and try ourselves.
+  }
 
-  if (result.ok) {
+  let resolveLink;
+  inFlight.set(row.id, new Promise((r) => { resolveLink = r; }));
+
+  let result;
+  try {
+    result = await redmine.createIssue({
+      url: config.redmine.url,
+      apiKey: config.redmine.apiKey,
+      projectId,
+      trackerId,
+      subject,
+      description,
+      timeoutMs: config.redmine.timeoutMs,
+    });
+  } catch (err) {
+    resolveLink(null);
+    inFlight.delete(row.id);
+    throw err;
+  }
+
+  if (result.ok && result.issueId != null) {
     const issueUrl = config.redmine.url + '/issues/' + result.issueId;
     db.setRedmine(row.id, result.issueId, issueUrl);
+    resolveLink({ issueId: result.issueId, issueUrl });
+    inFlight.delete(row.id);
     return sendJson(res, 200, { issueId: result.issueId, issueUrl, created: true });
+  }
+
+  // Not linked: release any waiting caller and clear the slot.
+  resolveLink(null);
+  inFlight.delete(row.id);
+
+  if (result.ok) {
+    // 201 with no usable issue id (e.g. a proxy returned a non-JSON body). Do
+    // NOT store a NULL link - it would defeat idempotency and allow a duplicate.
+    return sendError(res, 502, 'redmine_error', 'Redmine returned 201 without an issue id');
   }
   if (result.kind === 'network') {
     return sendError(res, 504, 'redmine_unreachable', 'Could not reach Redmine: ' + (result.detail || ''));

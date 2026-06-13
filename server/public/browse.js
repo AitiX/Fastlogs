@@ -318,13 +318,8 @@
     var errorsOnlyLabel = document.getElementById('errors-only-label');
     var errorsOnlyCb = document.getElementById('errors-only-cb');
 
-    // Reveal all of them and reset the new controls to defaults on entry (the
-    // shell is shared across views, so a value could linger from a back/forward).
-    platformSelect.style.display = '';
-    levelSelect.style.display = '';
-    statusSelect.style.display = '';
-    sortSelect.style.display = '';
-    errorsOnlyLabel.style.display = '';
+    // Reset the new controls to defaults on entry (the shell is shared across
+    // views, so a value could linger from a back/forward).
     statusSelect.value = '';
     sortSelect.value = 'newest';
     errorsOnlyCb.checked = false;
@@ -333,6 +328,13 @@
       showEmpty('No logs found.');
       return;
     }
+
+    // Reveal the filter/sort controls only when there is something to act on.
+    platformSelect.style.display = '';
+    levelSelect.style.display = '';
+    statusSelect.style.display = '';
+    sortSelect.style.display = '';
+    errorsOnlyLabel.style.display = '';
 
     // Collect unique platforms.
     var platforms = {};

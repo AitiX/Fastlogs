@@ -38,6 +38,13 @@ test('loose numeric-dotted fallback', () => {
   gt('2025.1.0f1', '2024.3.11f1');
 });
 
+test('total order holds for a prerelease semver mixed with a 2-part loose version', () => {
+  // Regression: '1.2.0-rc1' must not be misread as the loose triple [1,2,0].
+  lt('1.2.0-rc1', '1.2.0');
+  gt('1.2.0', '1.2');
+  gt('1.2.0-rc1', '1.2');   // order is 1.2 < 1.2.0-rc1 < 1.2.0 (transitive, no ties)
+});
+
 test('opaque labels fall back to created_at then lexicographic', () => {
   lt('nightly', 'qa', '2026-01-01T00:00:00.000Z', '2026-01-02T00:00:00.000Z');
   gt('nightly', 'qa', '2026-01-03T00:00:00.000Z', '2026-01-02T00:00:00.000Z');

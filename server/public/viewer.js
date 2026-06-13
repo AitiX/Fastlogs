@@ -297,8 +297,10 @@
     redmineBtn.textContent = '+ Redmine issue';
     redmineBtn.style.display = '';
     redmineBtn.addEventListener('click', function (e) {
-      e.preventDefault();
+      // Once linked (or mid-request) the element is a real anchor to Redmine -
+      // let the browser navigate; only suppress the no-op click in button mode.
       if (redmineBtn.classList.contains('redmine-linked') || redmineBtn.classList.contains('busy')) return;
+      e.preventDefault();
       createRedmineIssue();
     });
   }

@@ -120,7 +120,10 @@ function compareVersions(a, b, createdAtA, createdAtB) {
     return tieBreak(createdAtA, createdAtB);
   }
 
-  if (isLooseNumeric(sa) && isLooseNumeric(sb)) {
+  // Only treat both as loose numeric-dotted when NEITHER parsed as semver, so a
+  // prerelease like '1.2.0-rc1' (whose part '0-rc1' starts with a digit) is not
+  // misread as the integer triple [1,2,0] - which would break the total order.
+  if (!pa && !pb && isLooseNumeric(sa) && isLooseNumeric(sb)) {
     const c = compareLoose(sa, sb);
     if (c !== 0) return c;
     return tieBreak(createdAtA, createdAtB);

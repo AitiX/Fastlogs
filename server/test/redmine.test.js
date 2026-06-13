@@ -43,6 +43,21 @@ before(async () => {
         }, 400);
         return;
       }
+      if (mockMode === 'bad-201') {
+        // 201 but a non-JSON body (e.g. a proxy/WAF in front of Redmine).
+        mres.writeHead(201, { 'content-type': 'text/html' });
+        mres.end('<html>created</html>');
+        return;
+      }
+      if (mockMode === 'delayok') {
+        // Succeeds, but slowly enough (within the timeout) to overlap a second
+        // concurrent request.
+        setTimeout(() => {
+          mres.writeHead(201, { 'content-type': 'application/json' });
+          mres.end(JSON.stringify({ issue: { id: 777 } }));
+        }, 40);
+        return;
+      }
       mres.writeHead(201, { 'content-type': 'application/json' });
       mres.end(JSON.stringify({ issue: { id: 123 } }));
     });
@@ -124,6 +139,32 @@ test('timeout -> 504 redmine_unreachable, log stays unlinked', async () => {
   assert.equal(r.body.error, 'redmine_unreachable');
   const meta = await req(ctx.baseUrl, '/api/logs/' + id);
   assert.equal(meta.body.redmineIssue, null);
+  mockMode = 'ok';
+});
+
+test('201 without a parseable issue id -> 502, log stays unlinked', async () => {
+  mockMode = 'bad-201';
+  const id = await ingest({ title: 'bad201' });
+  const r = await req(ctx.baseUrl, '/api/logs/' + id + '/redmine', { method: 'POST', body: {}, headers: { authorization: 'Bearer ' + VIEWER } });
+  assert.equal(r.status, 502);
+  assert.equal(r.body.error, 'redmine_error');
+  const meta = await req(ctx.baseUrl, '/api/logs/' + id);
+  assert.equal(meta.body.redmineIssue, null);
+  mockMode = 'ok';
+});
+
+test('concurrent creates coalesce into a single Redmine issue', async () => {
+  mockMode = 'delayok';
+  const id = await ingest({ title: 'race' });
+  const before = mockCalls;
+  const url = '/api/logs/' + id + '/redmine';
+  const opts = { method: 'POST', body: {}, headers: { authorization: 'Bearer ' + VIEWER } };
+  const [a, b] = await Promise.all([req(ctx.baseUrl, url, opts), req(ctx.baseUrl, url, opts)]);
+  assert.equal(mockCalls, before + 1, 'exactly one Redmine call for two concurrent requests');
+  assert.equal(a.status, 200);
+  assert.equal(b.status, 200);
+  const created = [a.body.created, b.body.created];
+  assert.ok(created.includes(true) && created.includes(false), 'one created:true, one coalesced created:false');
   mockMode = 'ok';
 });
 
