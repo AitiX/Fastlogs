@@ -1,6 +1,6 @@
 {
   "name": "com.playjoy.fastlogs",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "displayName": "FastLogs",
   "description": "Lightweight in-game log capture and one-tap sharing for Unity. Records the console ring buffer, collects a rich device snapshot, optionally grabs a screenshot, and uploads a shareable link to a FastLogs server. Reusable across projects: no hardcoded endpoints, no third-party dependencies. All capture, networking, overlay and screenshot code is gated to Editor and Development builds (and stripped on retail/console), while the public FastLogs.* facade always compiles.",
   "unity": "2022.3",
