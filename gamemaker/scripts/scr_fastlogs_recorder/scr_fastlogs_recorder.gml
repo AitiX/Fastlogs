@@ -30,11 +30,21 @@ function __fastlogs_rec_state() {
         st.rec = {
             loaded        : false,   // прошла ли подгрузка персиста на старте
             rec_text      : "",      // накопленный текст лога (прошлые + текущая сессия)
+            // ПЕРФ (D): инкрементальный байтовый размер rec_text. Поддерживается при каждой
+            //   дозаписи (+= string_byte_length(piece)), чтобы НЕ сканировать весь rec_text
+            //   (до ~1 MB) на каждой строке. Полный O(n) скан (__fastlogs_rotate_text) зовётся
+            //   только когда счётчик превысил лимит. После ротации счётчик пересинхронизируется.
+            rec_bytes     : 0,       // байтовый размер rec_text (амортизированный O(1) учёт)
             session_mark  : false,   // записан ли маркер текущей сессии в файл
             session_guid  : "",      // guid текущей сессии (для маркера)
             file_path     : FASTLOGS_PERSIST_DIR + "/" + FASTLOGS_PERSIST_FILE,
             ini_path      : FASTLOGS_PERSIST_DIR + "/settings.ini",
             disk_ok       : true,    // false если файловые операции упали (тогда работаем in-memory)
+            // ПЕРФ (D): БАТЧ записи на диск. Строки копятся тут и сбрасываются пачкой по
+            //   таймеру/лимиту/перед отправкой/при краше - НЕ full-file IO на каждую строку.
+            pending       : "",      // несброшенные на диск строки (уже учтены в rec_text)
+            pending_bytes : 0,       // байтовый размер батча (для лимита FASTLOGS_PERSIST_FLUSH_MAX_BYTES)
+            last_flush_us : -1,      // get_timer() последнего сброса (мкс); -1 = ещё не сбрасывали
         };
     }
     return st.rec;
@@ -127,23 +137,22 @@ function __fastlogs_write_text_file(rel_path, text) {
 }
 
 // =====================================================================================
-// Внутреннее: применить ротацию к rec_text (обрезать старое начало по лимиту, целостно по \n).
-//   Возвращает (возможно укороченный) текст. После обрезки в начале ставится пометка усечения.
+// Внутреннее: применить ротацию к тексту (обрезать старое начало по лимиту, целостно по \n).
+//   Возвращает структуру { text, bytes }: (возможно укороченный) текст и его точный байтовый
+//   размер. Размер считается ЗДЕСЬ (за один проход внутри редкой ротации), чтобы вызывающий
+//   мог пересинхронизировать инкрементальный счётчик rec_bytes без отдельного O(n) скана.
+//   После обрезки в начале ставится пометка усечения. known_bytes (если >=0) - уже известный
+//   байтовый размер text, чтобы не сканировать его повторно на входе.
 // =====================================================================================
-function __fastlogs_rotate_text(text) {
+function __fastlogs_rotate_ex(text, known_bytes = -1) {
     var limit = max(1024, FASTLOGS_PERSIST_MAX_BYTES);
-    var bytes = string_byte_length(text);
-    if (bytes <= limit) return text;
+    var bytes = (known_bytes >= 0) ? known_bytes : string_byte_length(text);
+    if (bytes <= limit) return { text : text, bytes : bytes };
 
     // Оставляем хвост ~половину лимита, чтобы не ротировать на каждой строке.
     var keep_bytes = limit div 2;
-    // Грубо переводим байты в символы для string_copy: для не-ASCII это приблизительно,
-    //   но безопасно (берём заведомо не больше, чем есть символов).
-    var total_chars = string_length(text);
     // Идём с конца, отрезая по строкам, пока укладываемся в keep_bytes.
     var tail = text;
-    var cut_from = 1;
-    // Найдём позицию, начиная с которой хвост <= keep_bytes (по символам, оценка сверху).
     // Простой приём: пока байтовая длина велика - режем по первому \n блоками.
     while (string_byte_length(tail) > keep_bytes) {
         var nl = string_pos("\n", tail);
@@ -156,37 +165,129 @@ function __fastlogs_rotate_text(text) {
         }
         tail = string_delete(tail, 1, nl);   // удалить до и включая первый \n
     }
-    return "... [fastlogs: старые строки усечены при ротации] ...\n" + tail;
+    var prefix    = "... [fastlogs: старые строки усечены при ротации] ...\n";
+    var out_text  = prefix + tail;
+    return { text : out_text, bytes : string_byte_length(out_text) };
+}
+
+// Обёртка прежней сигнатуры (используется на пути подгрузки персиста, где счётчик не важен).
+function __fastlogs_rotate_text(text) {
+    return __fastlogs_rotate_ex(text, -1).text;
 }
 
 // =====================================================================================
-// Внутреннее: дозаписать одну готовую строку лога в rec_text и (синхронно) в файл.
-//   Применяет ротацию. При ошибке диска переключается в in-memory режим (disk_ok=false),
-//   запись продолжает копиться в rec_text.
+// Внутреннее: дозаписать одну готовую строку лога в rec_text и в БАТЧ (pending).
+//   ПЕРФ (D): НЕ трогает диск на каждую строку. Строка копится в rs.pending; фактический
+//   сброс пачкой делает __fastlogs_flush_pending (по таймеру из tick, по лимиту, перед
+//   отправкой/при краше). Ротация rec_text всё ещё применяется в памяти; при ротации помечаем
+//   батч как "нужна полная перезапись" (rewrite), т.к. дозапись хвоста после обрезки невалидна.
+//   immediate=true (краш-путь) -> синхронно сбросить сразу же, не дожидаясь таймера.
 // =====================================================================================
-function __fastlogs_append_line(line) {
+function __fastlogs_append_line(line, immediate = false) {
     var rs = __fastlogs_rec_state();
     var piece = line + "\n";
 
-    rs.rec_text += piece;
-    var before = string_byte_length(rs.rec_text);
-    rs.rec_text = __fastlogs_rotate_text(rs.rec_text);
-    var rotated = (string_byte_length(rs.rec_text) != before);
+    // ПЕРФ (D): дозапись и инкрементальный учёт байтов - O(piece), БЕЗ скана всего rec_text.
+    rs.rec_text  += piece;
+    var piece_bytes = string_byte_length(piece);
+    rs.rec_bytes += piece_bytes;
+
+    // Полную O(n)-ротацию зовём ТОЛЬКО когда инкрементальный счётчик превысил лимит
+    //   (редкое событие). Обычная строка -> дешёвая ветка ниже без скана rec_text.
+    var rotated = false;
+    var limit = max(1024, FASTLOGS_PERSIST_MAX_BYTES);
+    if (rs.rec_bytes > limit) {
+        var rot = __fastlogs_rotate_ex(rs.rec_text, rs.rec_bytes);   // считает точный размер внутри
+        rotated      = (rot.bytes != rs.rec_bytes);
+        rs.rec_text  = rot.text;
+        rs.rec_bytes = rot.bytes;   // пересинхрон счётчика по факту ротации (без отдельного скана)
+    }
 
     if (!FASTLOGS_PERSIST_ENABLED || !rs.disk_ok) return;
 
+    if (rotated) {
+        // Ротация: хвостовая дозапись невалидна (старое начало обрезано). Сбросим батч полной
+        //   перезаписью файла целиком актуальным rec_text. Делаем сразу (ротация редкая).
+        rs.pending       = "";
+        rs.pending_bytes = 0;
+        rs.last_flush_us = get_timer();
+        try {
+            __fastlogs_ensure_dir();
+            __fastlogs_write_text_file(rs.file_path, rs.rec_text);
+        } catch (_e) {
+            rs.disk_ok = false;
+        }
+        return;
+    }
+
+    // Обычный путь: копим строку в батч (НИКАКОГО file IO здесь).
+    rs.pending       += piece;
+    rs.pending_bytes += string_byte_length(piece);
+
+    // Сброс батча: немедленно (краш) либо при превышении лимита размера батча.
+    if (immediate || rs.pending_bytes >= max(1, FASTLOGS_PERSIST_FLUSH_MAX_BYTES)) {
+        __fastlogs_flush_pending();
+    }
+}
+
+// =====================================================================================
+// Внутреннее: сбросить батч (rs.pending) на диск ОДНОЙ дозаписью в хвост файла.
+//   Это и есть единственная точка per-flush file IO (вместо per-log). Безопасно при пустом
+//   батче (no-op). При ошибке диска -> in-memory режим (disk_ok=false), данные остаются в rec_text.
+// =====================================================================================
+function __fastlogs_flush_pending() {
+    var rs = __fastlogs_rec_state();
+    rs.last_flush_us = get_timer();
+    if (string_length(rs.pending) == 0) return;
+    if (!FASTLOGS_PERSIST_ENABLED || !rs.disk_ok) { rs.pending = ""; rs.pending_bytes = 0; return; }
+
+    var batch = rs.pending;
+    rs.pending       = "";
+    rs.pending_bytes = 0;
     try {
         __fastlogs_ensure_dir();
-        if (rotated) {
-            // После ротации перезаписываем файл целиком актуальным rec_text.
-            __fastlogs_write_text_file(rs.file_path, rs.rec_text);
-        } else {
-            // Быстрый путь: дозапись в конец файла без чтения целого.
-            __fastlogs_append_to_file(rs.file_path, piece);
-        }
+        __fastlogs_append_to_file(rs.file_path, batch);   // одна дозапись пачкой в хвост
     } catch (_e) {
-        rs.disk_ok = false;   // дальше работаем только в памяти, отправка всё равно сработает
+        rs.disk_ok = false;   // дальше только память; отправка всё равно сработает (rec_text цел)
     }
+}
+
+// =====================================================================================
+// fastlogs_recorder_tick() - вызывать каждый Step из контроллера. ПЕРФ (D): дешёвая проверка
+//   таймера; сбрасывает батч на диск не чаще раза в FASTLOGS_PERSIST_FLUSH_SECONDS. Без аллокаций
+//   в кадре когда батч пуст (ранний выход). no-op при !FASTLOGS_ENABLED / выключенном персисте.
+// =====================================================================================
+function fastlogs_recorder_tick() {
+    if (!FASTLOGS_ENABLED) return;
+    if (!FASTLOGS_PERSIST_ENABLED) return;
+    // Не создаём состояние, если рекордера ещё нет (тик дешёвый и безопасный).
+    var st = __fastlogs_state();
+    if (!variable_struct_exists(st, "rec") || !is_struct(st.rec)) return;
+    var rs = st.rec;
+    if (string_length(rs.pending) == 0) return;   // нечего сбрасывать -> ноль работы
+
+    var flush_secs = FASTLOGS_PERSIST_FLUSH_SECONDS;
+    if (!is_real(flush_secs) || flush_secs <= 0) {
+        // 0 -> писать сразу (без батча по таймеру).
+        __fastlogs_flush_pending();
+        return;
+    }
+    var now_us = get_timer();
+    if (rs.last_flush_us < 0) { rs.last_flush_us = now_us; }   // первая засечка
+    if ((now_us - rs.last_flush_us) >= flush_secs * 1000000) {
+        __fastlogs_flush_pending();
+    }
+}
+
+// =====================================================================================
+// fastlogs_recorder_flush() - публичный принудительный сброс батча на диск (перед отправкой,
+//   чтобы logText/файл были актуальны). Безопасно при пустом батче.
+// =====================================================================================
+function fastlogs_recorder_flush() {
+    if (!FASTLOGS_ENABLED) return;
+    var st = __fastlogs_state();
+    if (!variable_struct_exists(st, "rec") || !is_struct(st.rec)) return;
+    __fastlogs_flush_pending();
 }
 
 // REPLACEABLE: util. Дозаписать строку в конец файла (читает текущий буфер, пишет в хвост).
@@ -244,10 +345,13 @@ function fastlogs_recorder_load_persisted() {
     if (!FASTLOGS_PERSIST_ENABLED) return;
 
     try {
-        // Подгрузить накопленный лог прошлых сессий.
+        // Подгрузить накопленный лог прошлых сессий. Через _ex, чтобы сразу засинхронить
+        //   инкрементальный счётчик rec_bytes (один скан здесь, дальше учёт амортизированный).
         var prev_text = __fastlogs_read_text_file(rs.file_path);
         if (prev_text != "") {
-            rs.rec_text = __fastlogs_rotate_text(prev_text);
+            var rot = __fastlogs_rotate_ex(prev_text, -1);
+            rs.rec_text  = rot.text;
+            rs.rec_bytes = rot.bytes;
         }
 
         // Восстановить флаг записи из ini.
@@ -315,6 +419,9 @@ function fastlogs_recorder_flush_crash() {
     for (var i = 0; i < array_length(snap); i++) {
         __fastlogs_append_line(__fastlogs_format_record(snap[i]));
     }
+    // Гарантированно сбросить всё накопленное (включая батч из обычной записи) синхронно на диск:
+    //   при краше игра закроется после колбэка, таймерный сброс уже не сработает.
+    __fastlogs_flush_pending();
 }
 
 // =====================================================================================
@@ -363,6 +470,7 @@ function fastlogs_record_clear() {
     if (!FASTLOGS_ENABLED) return;
     var rs = __fastlogs_rec_state();
     rs.rec_text     = "";
+    rs.rec_bytes    = 0;     // синхронно с rec_text сбрасываем инкрементальный счётчик
     rs.session_mark = false;
     if (FASTLOGS_PERSIST_ENABLED && rs.disk_ok) {
         try {

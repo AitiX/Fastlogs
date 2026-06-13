@@ -30,9 +30,23 @@ namespace PlayJoy.FastLogs
     /// </summary>
     public sealed class KeyComboTrigger : ITriggerSource
     {
+        // Which set of TriggerConfig fields this combo reads: the overlay-toggle
+        // shortcut or the separate quick-send shortcut. Lets one implementation
+        // serve both gestures without duplicating the input-backend code.
+        private readonly bool _quickSendBinding;
+
         private bool _enabled;
         private KeyCode _key = KeyCode.F8;
         private TriggerConfig.TriggerModifier _modifier = TriggerConfig.TriggerModifier.None;
+
+        /// <param name="quickSendBinding">
+        /// When true, this trigger reads the quick-send fields (EnableQuickSendKeyboard /
+        /// QuickSendKey / QuickSendModifier); otherwise the overlay-toggle fields.
+        /// </param>
+        public KeyComboTrigger(bool quickSendBinding = false)
+        {
+            _quickSendBinding = quickSendBinding;
+        }
 
         public void Configure(TriggerConfig config)
         {
@@ -42,9 +56,18 @@ namespace PlayJoy.FastLogs
                 return;
             }
 
-            _enabled = config.EnableKeyboard;
-            _key = config.ToggleKey;
-            _modifier = config.Modifier;
+            if (_quickSendBinding)
+            {
+                _enabled = config.EnableQuickSendKeyboard;
+                _key = config.QuickSendKey;
+                _modifier = config.QuickSendModifier;
+            }
+            else
+            {
+                _enabled = config.EnableKeyboard;
+                _key = config.ToggleKey;
+                _modifier = config.Modifier;
+            }
         }
 
         public bool Poll()

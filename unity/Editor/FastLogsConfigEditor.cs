@@ -14,6 +14,7 @@ namespace PlayJoy.FastLogs.Editor
         private bool _serverFoldout   = true;
         private bool _captureFoldout  = true;
         private bool _recordFoldout   = true;
+        private bool _autoSendFoldout = true;
         private bool _screenshotFold  = false;
         private bool _diagFoldout     = false;
         private bool _triggerFoldout  = true;
@@ -24,6 +25,7 @@ namespace PlayJoy.FastLogs.Editor
         private SerializedProperty _server;
         private SerializedProperty _capture;
         private SerializedProperty _recording;
+        private SerializedProperty _autoSend;
         private SerializedProperty _screenshot;
         private SerializedProperty _diagnostics;
         private SerializedProperty _trigger;
@@ -36,6 +38,7 @@ namespace PlayJoy.FastLogs.Editor
             _server      = serializedObject.FindProperty("_server");
             _capture     = serializedObject.FindProperty("_capture");
             _recording   = serializedObject.FindProperty("_recording");
+            _autoSend    = serializedObject.FindProperty("_autoSend");
             _screenshot  = serializedObject.FindProperty("_screenshot");
             _diagnostics = serializedObject.FindProperty("_diagnostics");
             _trigger     = serializedObject.FindProperty("_trigger");
@@ -57,6 +60,7 @@ namespace PlayJoy.FastLogs.Editor
             _serverFoldout  = DrawGroup("Server",      _server,      _serverFoldout);
             _captureFoldout = DrawGroup("Capture",     _capture,     _captureFoldout);
             _recordFoldout  = DrawGroup("Recording",   _recording,   _recordFoldout);
+            _autoSendFoldout = DrawGroup("Auto-send",  _autoSend,    _autoSendFoldout);
             _screenshotFold = DrawGroup("Screenshot",  _screenshot,  _screenshotFold);
             _diagFoldout    = DrawGroup("Diagnostics", _diagnostics, _diagFoldout);
             _triggerFoldout = DrawGroup("Trigger",     _trigger,     _triggerFoldout);

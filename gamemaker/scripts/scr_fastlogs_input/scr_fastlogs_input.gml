@@ -40,10 +40,8 @@ function fastlogs_input_poll() {
             }
         }
         // В режиме ввода обрабатываем только указатель (клики по кнопкам), без хоткея/жестов.
-        var ptr_e = fastlogs_input_pointer();
-        ui.px      = ptr_e.x;
-        ui.py      = ptr_e.y;
-        ui.pressed = ptr_e.pressed;
+        // ПЕРФ (D): пишем прямо в ui.px/py/pressed (без аллокации struct на кадр).
+        fastlogs_input_collect_pointer(ui);
         return;
     }
 
@@ -53,11 +51,24 @@ function fastlogs_input_poll() {
         fastlogs_toggle();
     }
 
+    // --- 1b) ОТДЕЛЬНЫЙ хоткей БЫСТРОЙ ОТПРАВКИ (фича QUICK-SEND, A): шлёт сразу, НЕ открывая
+    //   оверлей. Отличается от тоггла. Защита от совпадения с тогглом (если интегратор задал
+    //   одинаковые клавиши - приоритет у тоггла, quick-send пропускаем, чтобы не делать оба).
+    if (FASTLOGS_HOTKEY_QUICK_SEND != FASTLOGS_HOTKEY_TOGGLE
+        && keyboard_check_pressed(FASTLOGS_HOTKEY_QUICK_SEND)) {
+        fastlogs_quick_send();
+    }
+
     // --- 2) Геймпад (консоли): тоггл оверлея по FASTLOGS_GP_TOGGLE.
     // gamepad_is_connected защищает от опроса несуществующего устройства.
     if (gamepad_is_connected(FASTLOGS_GP_SLOT)) {
         if (gamepad_button_check_pressed(FASTLOGS_GP_SLOT, FASTLOGS_GP_TOGGLE)) {
             fastlogs_toggle();
+        }
+        // --- 2b) Геймпад: быстрая отправка по FASTLOGS_GP_QUICK_SEND (отлична от тоггла).
+        if (FASTLOGS_GP_QUICK_SEND != FASTLOGS_GP_TOGGLE
+            && gamepad_button_check_pressed(FASTLOGS_GP_SLOT, FASTLOGS_GP_QUICK_SEND)) {
+            fastlogs_quick_send();
         }
     }
 
@@ -69,16 +80,17 @@ function fastlogs_input_poll() {
     }
     ui.__prev_touches = active_touches;
 
-    // --- 4) Указатель + pressed для кликов по оверлею.
-    // Собираем в координатах GUI. Приоритет: первый активный тач, иначе мышь.
-    var ptr = fastlogs_input_pointer();
-    ui.px      = ptr.x;
-    ui.py      = ptr.y;
-    ui.pressed = ptr.pressed;
-
-    // Сбрасывать pressed здесь НЕ нужно: overlay потребит его в Draw этого же кадра и
-    // сам сбросит. Но если оверлей закрыт - потребителя нет, поэтому гасим, чтобы не «висел».
-    if (!ui.open) ui.pressed = false;
+    // --- 4) Указатель + pressed для кликов по оверлею/тосту.
+    // ПЕРФ (D): собираем указатель ТОЛЬКО когда есть кликабельный потребитель - открытый
+    //   оверлей ИЛИ активный тост с зонами (повтор/копирование). Иначе ноль работы по вводу:
+    //   гасим pressed и пропускаем опрос тача/мыши.
+    var toast_active = variable_struct_exists(ui, "toast_frames") && (ui.toast_frames != 0);
+    if (ui.open || toast_active) {
+        // Пишем прямо в ui.px/py/pressed (без аллокации struct на кадр).
+        fastlogs_input_collect_pointer(ui);
+    } else {
+        ui.pressed = false;
+    }
 }
 
 /// @returns {real} число активных касаний (нажатых пальцев) в этом кадре
@@ -91,30 +103,28 @@ function fastlogs_input_count_touches() {
     return n;
 }
 
-/// @returns {struct} {x, y, pressed} - позиция указателя в GUI-координатах и факт «нажат в этом кадре»
-function fastlogs_input_pointer() {
+/// Собрать указатель ПРЯМО в ui.px/py/pressed (без аллокации struct на кадр - ПЕРФ D).
+///   GUI-координаты. Приоритет: первый палец, нажатый в этом кадре, иначе мышь.
+/// @param {struct} ui - состояние UI (fastlogs_ui_state)
+function fastlogs_input_collect_pointer(ui) {
     // 1) Тач: ищем первый палец, который ИМЕННО нажат в этом кадре (pressed) - это «клик».
     for (var d = 0; d < FASTLOGS_TOUCH_SLOTS; d++) {
         if (device_mouse_check_button_pressed(d, mb_left)) {
-            return {
-                x: device_mouse_x_to_gui(d),
-                y: device_mouse_y_to_gui(d),
-                pressed: true,
-            };
+            ui.px      = device_mouse_x_to_gui(d);
+            ui.py      = device_mouse_y_to_gui(d);
+            ui.pressed = true;
+            return;
         }
     }
     // 2) Мышь как устройство 0: pressed левой кнопки.
     if (device_mouse_check_button_pressed(0, mb_left) || mouse_check_button_pressed(mb_left)) {
-        return {
-            x: device_mouse_x_to_gui(0),
-            y: device_mouse_y_to_gui(0),
-            pressed: true,
-        };
+        ui.px      = device_mouse_x_to_gui(0);
+        ui.py      = device_mouse_y_to_gui(0);
+        ui.pressed = true;
+        return;
     }
     // 3) Иначе - просто текущая позиция указателя для hover-подсветки, без клика.
-    return {
-        x: device_mouse_x_to_gui(0),
-        y: device_mouse_y_to_gui(0),
-        pressed: false,
-    };
+    ui.px      = device_mouse_x_to_gui(0);
+    ui.py      = device_mouse_y_to_gui(0);
+    ui.pressed = false;
 }

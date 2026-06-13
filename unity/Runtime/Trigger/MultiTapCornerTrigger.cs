@@ -47,6 +47,9 @@ namespace PlayJoy.FastLogs
         private const float FallbackDpi = 160f;
 
         private readonly ScreenCorner _corner;
+        // When true, Configure reads TriggerConfig.QuickSendCornerTaps instead of
+        // MultiTouchFingerCount, so the same gesture type can drive quick-send.
+        private readonly bool _quickSendBinding;
         private int _requiredTaps;
         private float _tapWindowSeconds;
         private float _zonePoints;
@@ -55,18 +58,24 @@ namespace PlayJoy.FastLogs
         private float _lastTapTime;
         private bool _pointerWasDown;
         private bool _fired;
+        // Only the quick-send binding gates itself on its config count being > 0;
+        // the overlay binding stays always-on (preserves prior behaviour).
+        private bool _enabled = true;
 
         /// <param name="corner">Corner that hosts the hot zone.</param>
         /// <param name="requiredTaps">Taps needed to fire (clamped to >= 1).</param>
         /// <param name="tapWindowSeconds">Max seconds allowed between consecutive taps.</param>
         /// <param name="zonePoints">Side of the square hot zone in points (clamped to >= 44).</param>
+        /// <param name="quickSendBinding">When true this corner gesture drives quick-send (reads QuickSendCornerTaps); otherwise it opens the overlay (reads MultiTouchFingerCount).</param>
         public MultiTapCornerTrigger(
             ScreenCorner corner = ScreenCorner.TopLeft,
             int requiredTaps = 3,
             float tapWindowSeconds = 0.6f,
-            float zonePoints = 64f)
+            float zonePoints = 64f,
+            bool quickSendBinding = false)
         {
             _corner = corner;
+            _quickSendBinding = quickSendBinding;
             _requiredTaps = Mathf.Max(1, requiredTaps);
             _tapWindowSeconds = Mathf.Max(0.1f, tapWindowSeconds);
             _zonePoints = Mathf.Max(MinZonePoints, zonePoints);
@@ -85,10 +94,14 @@ namespace PlayJoy.FastLogs
                 return;
             }
 
-            if (config.MultiTouchFingerCount > 0)
+            int taps = _quickSendBinding ? config.QuickSendCornerTaps : config.MultiTouchFingerCount;
+            if (taps > 0)
             {
-                _requiredTaps = config.MultiTouchFingerCount;
+                _requiredTaps = taps;
             }
+            // Quick-send corner gesture is opt-in: inert unless a positive count is set.
+            // The overlay binding keeps its historical always-on behaviour.
+            _enabled = !_quickSendBinding || taps > 0;
 
             // Reset gesture state on (re)configure.
             _tapCount = 0;
@@ -98,6 +111,11 @@ namespace PlayJoy.FastLogs
 
         public bool Poll()
         {
+            if (!_enabled)
+            {
+                return false;
+            }
+
             // Expire a partial tap sequence once the window lapses.
             if (_tapCount > 0 && (Time.unscaledTime - _lastTapTime) > _tapWindowSeconds)
             {

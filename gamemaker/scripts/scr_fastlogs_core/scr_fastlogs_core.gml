@@ -41,6 +41,10 @@ function __fastlogs_state() {
             screenshot   : FASTLOGS_SCREENSHOT_DEFAULT, // включать ли скриншот в след. payload
             // Рантайм-оверрайды из fastlogs_init(config) (перекрывают макросы config).
             cfg          : {},
+            // АВТО-ОТПРАВКА ПРИ КРАШЕ (C): дедуп/троттл/лимит сессии.
+            autosend_seen      : {},   // set сигнатур уже авто-отправленных стеков (дедуп за сессию)
+            autosend_last_us   : -1,   // get_timer() последней авто-отправки (мкс), -1 = не было
+            autosend_count     : 0,    // сколько авто-отправок сделано за сессию (лимит)
             // Поля recorder/http заполняют свои подсостояния лениво в своих модулях.
         };
     }
@@ -117,10 +121,69 @@ function fastlogs_init(config_struct = undefined) {
 }
 
 // =====================================================================================
-// Внутреннее: колбэк необработанного исключения.
-// Пишет ошибку в лог (с гарантированным флашем на диск через recorder), затем best-effort
-//   отправка. Async-отправка может не успеть до закрытия игры -> главное персист на диск,
-//   реальная отправка - на следующем запуске (накопленный logText).
+// Внутреннее: сигнатура исключения для ДЕДУПА (C). Берём script + первые кадры стектрейса
+//   (не само сообщение - оно может содержать переменные значения), хешируем в стабильный ключ.
+//   md5-hex используем как ключ set'а; префикс 's' -> гарантированно валидное имя поля структа.
+// =====================================================================================
+function __fastlogs_exception_signature(ex) {
+    var sig = "";
+    try {
+        if (is_struct(ex)) {
+            if (variable_struct_exists(ex, "script")) sig += string(ex.script);
+            if (variable_struct_exists(ex, "stacktrace") && is_array(ex.stacktrace)) {
+                var stk = ex.stacktrace;
+                var lim = min(array_length(stk), 8);   // первых нескольких кадров достаточно
+                for (var i = 0; i < lim; i++) sig += "|" + string(stk[i]);
+            }
+            // Если ни script, ни stacktrace недоступны - падаём на message (грубее, но что есть).
+            if (sig == "" && variable_struct_exists(ex, "message")) sig += string(ex.message);
+        } else {
+            sig = string(ex);
+        }
+    } catch (_e) {
+        sig = "";
+    }
+    if (sig == "") sig = "unknown";
+    return "s" + md5_string_utf8(sig);
+}
+
+// =====================================================================================
+// Внутреннее: можно ли сейчас авто-отправить этот краш? Применяет лимит сессии, троттл по
+//   времени и дедуп по сигнатуре. Возвращает { allowed, reason }. При allowed=true помечает
+//   сигнатуру как виденную, инкрементит счётчик и обновляет метку времени (фиксация состояния тут).
+// =====================================================================================
+function __fastlogs_autosend_allowed(sig) {
+    var st = __fastlogs_state();
+
+    // Лимит на сессию.
+    if (st.autosend_count >= max(0, FASTLOGS_AUTOSEND_SESSION_LIMIT)) {
+        return { allowed: false, reason: "session limit" };
+    }
+    // Дедуп: тот же стек уже авто-отправляли за эту сессию.
+    if (FASTLOGS_AUTOSEND_DEDUP && is_struct(st.autosend_seen) && variable_struct_exists(st.autosend_seen, sig)) {
+        return { allowed: false, reason: "dedup (same stack)" };
+    }
+    // Троттл по времени (любой стек).
+    var now_us = get_timer();
+    var thr = FASTLOGS_AUTOSEND_THROTTLE_SECONDS;
+    if (is_real(thr) && thr > 0 && st.autosend_last_us >= 0) {
+        if ((now_us - st.autosend_last_us) < thr * 1000000) {
+            return { allowed: false, reason: "throttled" };
+        }
+    }
+    // Разрешено -> зафиксировать состояние.
+    if (FASTLOGS_AUTOSEND_DEDUP) variable_struct_set(st.autosend_seen, sig, true);
+    st.autosend_last_us = now_us;
+    st.autosend_count  += 1;
+    return { allowed: true, reason: "" };
+}
+
+// =====================================================================================
+// Внутреннее: колбэк необработанного исключения (фича AUTO-SEND, C).
+// Пишет ошибку в лог (с гарантированным флашем на диск через recorder), затем АВТО-отправка
+//   с дедупом по стеку + троттлингом + лимитом сессии (повторяющееся исключение не спамит).
+//   Async-отправка может не успеть до закрытия игры -> главное персист на диск, реальная
+//   отправка добьётся на следующем запуске (накопленный logText). Если игра жива - тост.
 // =====================================================================================
 function __fastlogs_on_unhandled_exception(ex) {
     // Не полагаемся на FASTLOGS_ENABLED тут - handler регистрируется только когда включено.
@@ -149,17 +212,40 @@ function __fastlogs_on_unhandled_exception(ex) {
     flog(msg, FASTLOGS_LEVEL_ERROR);
 
     // Принудительный флаш на диск даже если запись была выключена: при краше важно сохранить.
-    // Реализация в recorder - дозаписывает ВСЁ кольцо в персист-файл синхронно.
+    // Реализация в recorder - дозаписывает ВСЁ кольцо в персист-файл синхронно (включая батч).
     try {
         fastlogs_recorder_flush_crash();
     } catch (_e2) { /* проглатываем */ }
 
-    // Best-effort отправка (может не успеть - это нормально).
+    // ДЕДУП + ТРОТТЛ + ЛИМИТ авто-отправки (C): чтобы повторяющийся краш не спамил сервер.
+    var do_send = true;
+    var skip_reason = "";
     try {
-        fastlogs_send({ title: "Unhandled exception" });
-    } catch (_e3) { /* проглатываем */ }
+        var sig  = __fastlogs_exception_signature(ex);
+        var gate = __fastlogs_autosend_allowed(sig);
+        do_send     = gate.allowed;
+        skip_reason = gate.reason;
+    } catch (_eg) {
+        do_send = true;   // не смогли посчитать гейт - не блокируем отправку
+    }
 
-    // Возвращать ничего полезного не нужно - игра закроется.
+    if (do_send) {
+        // Best-effort авто-отправка (может не успеть до закрытия - это нормально).
+        //   fastlogs_send сам поднимет статус-тост "Отправка..." (фича STATUS, B).
+        try {
+            fastlogs_send({ title: "Unhandled exception" });
+        } catch (_e3) { /* проглатываем */ }
+    } else {
+        show_debug_message("[FastLogs] autosend on crash skipped: " + skip_reason);
+        // Игра ещё жива (мы в колбэке) - короткий статус, не падая, если тост доступен.
+        try {
+            if (script_exists(asset_get_index("fastlogs_status_toast"))) {
+                fastlogs_status_toast("info", "Краш записан (" + skip_reason + ")");
+            }
+        } catch (_e4) { /* проглатываем */ }
+    }
+
+    // Возвращать ничего полезного не нужно - игра закроется (если краш фатальный).
 }
 
 // =====================================================================================
@@ -184,9 +270,20 @@ function flog(message, level = FASTLOGS_LEVEL_LOG) {
         default:                   st.cnt_log++;   break;
     }
 
-    // Запись в кольцо.
-    var rec = { time: t, level: lvl, text: txt };
-    st.ring[st.head] = rec;
+    // Запись в кольцо. ПЕРФ (D): ПЕРЕИСПОЛЬЗУЕМ struct в слоте, если он уже создан (мутируем
+    //   поля вместо аллокации нового struct на каждый лог). Аллокация происходит только при
+    //   первом заполнении кольца; дальше - in-place перезапись. Это безопасно: recorder
+    //   синхронно потребляет rec тут же, а старый rec в слоте уже был отформатирован/слит
+    //   на прошлом обороте (snapshot/flush держат ссылки лишь во время синхронного потребления).
+    var rec = st.ring[st.head];
+    if (is_struct(rec)) {
+        rec.time  = t;
+        rec.level = lvl;
+        rec.text  = txt;
+    } else {
+        rec = { time: t, level: lvl, text: txt };
+        st.ring[st.head] = rec;
+    }
     st.head = (st.head + 1) mod st.ring_size;
     if (st.count < st.ring_size) st.count++;
 

@@ -33,14 +33,28 @@ namespace PlayJoy.FastLogs
 
         private ILogSource _logSource;
         private ITriggerSource _triggerSource;
+        private ITriggerSource _quickSendTrigger; // separate gesture: send without opening the overlay
         private ILogUploader _uploader;
         private IScreenshotCapturer _screenshot;
         private IClipboard _clipboard;
         private ILogShareOverlay _overlay;
+        private IToastSink _toast;                 // optional toast seam (same object as _overlay when supported)
         private IWebDeviceInfoProvider _webInfo;
 
         private bool _isBusy;
         private UploadResultDto _lastResult = UploadResultDto.Disabled;
+
+        // Remembers the parameters of the last send so a Retry toast can re-run it.
+        private bool _lastSendIncludeScreenshot;
+        private string _lastSendTitle;
+        private string _lastSendComment;
+
+        // ---- Auto-send-on-exception state (dedup + throttle + per-session cap) ----
+        private bool _autoSendHooked;
+        private int _autoSendCountThisSession;
+        private float _lastAutoSendUnscaled = float.NegativeInfinity;
+        private int _lastAutoSendStackHash;       // 0 = none yet
+        private bool _inAutoSendDispatch;         // re-entrancy guard (our own logged exceptions must not re-trigger)
 
         public FastLogsConfig Config { get { return _config; } }
         public bool IsBusy { get { return _isBusy; } }
@@ -86,15 +100,35 @@ namespace PlayJoy.FastLogs
                 _triggerSource.Configure(_config.Trigger);
             }
 
+            // Quick-send is a package feature, built from the bundled triggers so it
+            // works regardless of the (possibly custom) overlay trigger provider.
+            // It reads the separate QuickSend* fields of TriggerConfig.
+            _quickSendTrigger = BuildQuickSendTrigger();
+            if (_quickSendTrigger != null && _config != null)
+            {
+                _quickSendTrigger.Configure(_config.Trigger);
+            }
+
             if (_overlay != null)
             {
                 _overlay.SendRequested += OnOverlaySendRequested;
+
+                // Light up the toast seam only if the overlay implements it. Existing
+                // overlays that do not implement IToastSink keep working (no toast).
+                _toast = _overlay as IToastSink;
+                if (_toast != null)
+                {
+                    _toast.RetryRequested += OnToastRetryRequested;
+                }
             }
 
             if (_config != null && _config.Recording.Enabled && _config.Recording.AutoStartRecording)
             {
                 SetRecording(true);
             }
+
+            // Auto-send-on-exception: hook the (main-thread) log callback once.
+            HookAutoSend();
 
             FlogLog.Info("Runtime initialized.");
         }
@@ -107,11 +141,19 @@ namespace PlayJoy.FastLogs
 
         private void OnDestroy()
         {
+            UnhookAutoSend();
+
             if (_overlay != null)
             {
                 _overlay.SendRequested -= OnOverlaySendRequested;
             }
+            if (_toast != null)
+            {
+                _toast.RetryRequested -= OnToastRetryRequested;
+                _toast = null;
+            }
             SafeDispose(_overlay);
+            SafeDispose(_quickSendTrigger);
             SafeDispose(_triggerSource);
             SafeDispose(_logSource);
             FlogLog.Info("Runtime destroyed.");
@@ -136,6 +178,8 @@ namespace PlayJoy.FastLogs
 
         private void Update()
         {
+            // Two cheap, allocation-free input polls per frame: one for the overlay
+            // gesture, one for the separate quick-send gesture.
             if (_triggerSource != null)
             {
                 bool fired = false;
@@ -144,6 +188,17 @@ namespace PlayJoy.FastLogs
                 if (fired)
                 {
                     ToggleOverlay();
+                }
+            }
+
+            if (_quickSendTrigger != null)
+            {
+                bool quick = false;
+                try { quick = _quickSendTrigger.Poll(); }
+                catch (Exception e) { FlogLog.Exception(e); }
+                if (quick)
+                {
+                    QuickSend();
                 }
             }
 
@@ -164,6 +219,216 @@ namespace PlayJoy.FastLogs
         {
             try { action(); }
             catch (Exception e) { FlogLog.Exception(e); }
+        }
+
+        // ---- Toast (status visible even when the overlay is closed) ----
+
+        private void ShowToast(ToastKind kind, string message, string url, float autoHideSeconds, bool allowRetry)
+        {
+            if (_toast == null)
+            {
+                return;
+            }
+            try { _toast.ShowToast(kind, message, url, autoHideSeconds, allowRetry); }
+            catch (Exception e) { FlogLog.Exception(e); }
+        }
+
+        private void OnToastRetryRequested()
+        {
+            // Re-run the last send with the same parameters.
+            BeginSend(_lastSendIncludeScreenshot, _lastSendTitle, _lastSendComment);
+        }
+
+        // ---- Quick-send (send immediately, without opening the overlay) ----
+
+        /// <summary>
+        /// Fire-and-forget quick send with config defaults (screenshot per
+        /// Screenshot.CaptureByDefault, no title/comment). Shows a status toast. If
+        /// there is nothing useful to send (no logs captured) it shows a hint toast
+        /// instead of starting an empty upload. Never throws.
+        /// </summary>
+        public void QuickSend()
+        {
+            try
+            {
+                if (_isBusy)
+                {
+                    ShowToast(ToastKind.Info, "FastLogs: a send is already in progress", null, 2.5f, false);
+                    return;
+                }
+
+                // If nothing useful is available, hint instead of uploading an empty
+                // report. "Useful" = live ring has entries, or any log was counted
+                // this session, or persistent recording holds history on disk.
+                if (_logSource == null)
+                {
+                    ShowToast(ToastKind.Info, "FastLogs: capture unavailable", null, 3f, false);
+                    return;
+                }
+
+                CountsDto c = _logSource.Counts;
+                bool hasSomething = _logSource.EntryCount > 0 || c.Total > 0;
+                if (!hasSomething)
+                {
+                    ShowToast(ToastKind.Info, "FastLogs: no logs captured yet", null, 3f, false);
+                    return;
+                }
+
+                bool shot = _config != null && _config.Screenshot.CaptureByDefault;
+                BeginSend(shot, null, null);
+            }
+            catch (Exception e)
+            {
+                FlogLog.Exception(e);
+            }
+        }
+
+        // Builds the quick-send gesture from the bundled triggers. A composite of a
+        // keyboard combo (Editor/standalone) and a corner multi-tap (mobile), both
+        // reading the separate QuickSend* fields of TriggerConfig. Each child is
+        // inert unless its config opts in, so the default is "no quick-send gesture".
+        private static ITriggerSource BuildQuickSendTrigger()
+        {
+            return new CompositeTrigger(
+                new KeyComboTrigger(quickSendBinding: true),
+                new MultiTapCornerTrigger(ScreenCorner.TopLeft, quickSendBinding: true));
+        }
+
+        // ---- Auto-send on unhandled exception ----
+
+        private void HookAutoSend()
+        {
+            if (_autoSendHooked)
+            {
+                return;
+            }
+            if (_config == null || _config.AutoSend == null || !_config.AutoSend.AutoSendOnException)
+            {
+                return;
+            }
+            // Main-thread callback: Unity raises logMessageReceived on the main thread,
+            // so we can safely touch runtime state and start a coroutine from here.
+            Application.logMessageReceived += OnLogMessageForAutoSend;
+            _autoSendHooked = true;
+        }
+
+        private void UnhookAutoSend()
+        {
+            if (!_autoSendHooked)
+            {
+                return;
+            }
+            Application.logMessageReceived -= OnLogMessageForAutoSend;
+            _autoSendHooked = false;
+        }
+
+        private void OnLogMessageForAutoSend(string condition, string stackTrace, LogType type)
+        {
+            // Only unhandled exceptions trigger an auto-send.
+            if (type != LogType.Exception)
+            {
+                return;
+            }
+
+            // Re-entrancy guard: any exception logged by FastLogs' own send pipeline
+            // (e.g. via FlogLog.Exception) arrives here too; never auto-send for that.
+            if (_inAutoSendDispatch)
+            {
+                return;
+            }
+
+            // Re-check the live toggle (it may have been turned off via settings).
+            if (_config == null || _config.AutoSend == null || !_config.AutoSend.AutoSendOnException)
+            {
+                return;
+            }
+
+            // Don't pile a second auto-send on top of an in-flight send.
+            if (_isBusy)
+            {
+                return;
+            }
+
+            // Per-session cap.
+            int cap = _config.AutoSend.MaxAutoSendsPerSession;
+            if (cap > 0 && _autoSendCountThisSession >= cap)
+            {
+                return;
+            }
+
+            float now;
+            try { now = Time.realtimeSinceStartup; } catch { now = 0f; }
+
+            int stackHash = ComputeStackHash(condition, stackTrace);
+            bool sameAsLast = stackHash == _lastAutoSendStackHash && _lastAutoSendStackHash != 0;
+
+            float minGap = _config.AutoSend.MinSecondsBetweenAutoSends;
+            float sinceLast = now - _lastAutoSendUnscaled;
+
+            // Global throttle: never auto-send more than once per minGap seconds. This
+            // alone keeps any flood (even of distinct exceptions) bounded.
+            if (sinceLast < minGap)
+            {
+                return;
+            }
+
+            // Dedup: an exception with the SAME stack as the previous auto-send is
+            // suppressed for an extended window (2x the gap), so a tight loop that
+            // throws the identical exception does not keep re-sending once per gap.
+            if (sameAsLast && sinceLast < minGap * 2f)
+            {
+                return;
+            }
+
+            RecordAutoSend(now, stackHash);
+
+            // Title marks the report as an auto-captured crash; comment carries the
+            // exception message so the report is self-describing.
+            string title = "Auto crash report";
+            string comment = "Unhandled exception (auto-sent by FastLogs):\n" + (condition ?? string.Empty);
+            bool shot = _config.AutoSend.IncludeScreenshot;
+
+            _inAutoSendDispatch = true;
+            try
+            {
+                ShowToast(ToastKind.Progress, "FastLogs: crash detected, sending...", null, 0f, false);
+                BeginSend(shot, title, comment);
+            }
+            catch (Exception e)
+            {
+                FlogLog.Exception(e);
+            }
+            finally
+            {
+                // Only the synchronous dispatch window is guarded; the send itself runs
+                // as a coroutine and is protected separately by _isBusy.
+                _inAutoSendDispatch = false;
+            }
+        }
+
+        private void RecordAutoSend(float now, int stackHash)
+        {
+            _lastAutoSendUnscaled = now;
+            _lastAutoSendStackHash = stackHash;
+            _autoSendCountThisSession++;
+        }
+
+        // Cheap, allocation-light stack signature. Prefers the stack trace; falls back
+        // to the message. Uses a stable FNV-1a hash so dedup is independent of the
+        // default string-hash randomization across runs.
+        private static int ComputeStackHash(string condition, string stackTrace)
+        {
+            string key = !string.IsNullOrEmpty(stackTrace) ? stackTrace : (condition ?? string.Empty);
+            unchecked
+            {
+                const int prime = 16777619;
+                int hash = (int)2166136261;
+                for (int i = 0; i < key.Length; i++)
+                {
+                    hash = (hash ^ key[i]) * prime;
+                }
+                return hash == 0 ? 1 : hash; // reserve 0 for "none"
+            }
         }
 
         // ---- Logging passthrough ----
@@ -226,11 +491,17 @@ namespace PlayJoy.FastLogs
         /// </summary>
         public FlogTask<UploadResultDto> BeginSend(bool includeScreenshot, string title, string comment)
         {
+            // Remember the parameters so a Retry toast can re-run exactly this send.
+            _lastSendIncludeScreenshot = includeScreenshot;
+            _lastSendTitle = title;
+            _lastSendComment = comment;
+
             var task = FlogTask.Create<UploadResultDto>();
 
             if (_isBusy)
             {
                 var busy = UploadResultDto.Fail("A FastLogs upload is already in progress.");
+                // Do not stomp the in-progress toast; just complete the task as busy.
                 task.SetResult(busy);
                 return task;
             }
@@ -238,9 +509,13 @@ namespace PlayJoy.FastLogs
             if (_uploader == null)
             {
                 var noUploader = UploadResultDto.Fail("No uploader is configured.");
+                ShowToast(ToastKind.Error, "FastLogs: no uploader configured", null, 4f, false);
                 task.SetResult(noUploader);
                 return task;
             }
+
+            // Status to the player even when the overlay is closed.
+            ShowToast(ToastKind.Progress, "FastLogs: sending...", null, 0f, false);
 
             try
             {
@@ -249,7 +524,9 @@ namespace PlayJoy.FastLogs
             catch (Exception e)
             {
                 FlogLog.Exception(e);
-                task.SetResult(UploadResultDto.Fail("Failed to start send: " + e.Message));
+                var fail = UploadResultDto.Fail("Failed to start send: " + e.Message);
+                ShowToast(ToastKind.Error, "FastLogs: " + fail.Error, null, 0f, true);
+                task.SetResult(fail);
             }
 
             return task;
@@ -341,6 +618,22 @@ namespace PlayJoy.FastLogs
             // user gesture), so the browser may reject it - that is fine, we never
             // throw and the overlay's Copy button stays as the fallback.
             TryCopyLinkOnSend(result);
+
+            // Player-facing status, visible even with the overlay closed. The link is
+            // already auto-copied above; the toast also offers Copy/Open and, on
+            // failure, Retry.
+            if (result.Success)
+            {
+                bool copied = _config != null && _config.UI.CopyLinkOnSend
+                              && !string.IsNullOrEmpty(result.Url);
+                string msg = copied ? "FastLogs: done (link copied)" : "FastLogs: done";
+                ShowToast(ToastKind.Success, msg, result.Url, 6f, false);
+            }
+            else
+            {
+                // Sticky error with a Retry affordance.
+                ShowToast(ToastKind.Error, "FastLogs error: " + result.Error, null, 0f, true);
+            }
 
             task.SetResult(result);
             try { Uploaded?.Invoke(result); }

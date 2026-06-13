@@ -43,7 +43,11 @@ namespace PlayJoy.FastLogs
         // event and queue, draining on Pump() (called from the runtime's Update).
 #if !UNITY_WEBGL || UNITY_EDITOR
         private readonly object _gate = new object();
-        private readonly List<LogEntry> _pending = new List<LogEntry>(64);
+        // Double buffer: handlers append to _pending (under lock); Pump() swaps the two
+        // references under the lock (O(1), zero alloc) and drains _draining outside it.
+        // Reused across frames so steady logging causes no per-frame heap allocation.
+        private List<LogEntry> _pending = new List<LogEntry>(64);
+        private List<LogEntry> _draining = new List<LogEntry>(64);
         private const bool Threaded = true;
 #else
         private const bool Threaded = false;
@@ -98,25 +102,27 @@ namespace PlayJoy.FastLogs
         public void Pump()
         {
 #if !UNITY_WEBGL || UNITY_EDITOR
-            // Swap the pending list under lock, then deliver outside the lock so a
-            // re-entrant log call from a handler cannot deadlock.
-            List<LogEntry> batch = null;
+            // Swap the two reusable lists under lock (no allocation), then deliver from
+            // _draining outside the lock so a re-entrant log call from a handler cannot
+            // deadlock and so steady logging produces zero per-frame GC pressure.
             lock (_gate)
             {
-                if (_pending.Count > 0)
+                if (_pending.Count == 0)
                 {
-                    batch = new List<LogEntry>(_pending);
-                    _pending.Clear();
+                    return;
                 }
+                var tmp = _pending;
+                _pending = _draining;
+                _draining = tmp;
             }
 
-            if (batch != null)
+            for (int i = 0; i < _draining.Count; i++)
             {
-                for (int i = 0; i < batch.Count; i++)
-                {
-                    Deliver(batch[i]);
-                }
+                Deliver(_draining[i]);
             }
+            // Clear after delivery so the buffer is empty for the next swap. Done outside
+            // the lock: _draining is not touched by handlers (they only write _pending).
+            _draining.Clear();
 #endif
         }
 
