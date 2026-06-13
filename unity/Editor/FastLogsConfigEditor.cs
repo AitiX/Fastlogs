@@ -56,7 +56,7 @@ namespace PlayJoy.FastLogs.Editor
 
             var cfg = (FastLogsConfig)target;
 
-            DrawHeader();
+            DrawConfigHeader();
             DrawValidationMessages(cfg);
             EditorGUILayout.Space(4);
 
@@ -80,7 +80,7 @@ namespace PlayJoy.FastLogs.Editor
 
         // ---- Helpers --------------------------------------------------------
 
-        private static void DrawHeader()
+        private static void DrawConfigHeader()
         {
             EditorGUILayout.Space(4);
             var style = new GUIStyle(EditorStyles.largeLabel)
