@@ -28,18 +28,30 @@ npm start
 
 ## Environment variables
 
-See `.env.example` for full docs. Key variables:
+See `.env.example` for inline docs. Full list:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `PORT` | `8787` | HTTP listen port (nginx proxies here) |
-| `ADMIN_TOKEN` | _(none)_ | Admin token for unpin/delete |
-| `VIEWER_TOKEN` | _(none)_ | Team viewer token for `/browse` |
-| `IP_SALT` | _(none)_ | Salt for IP hashing (set a random value) |
-| `TRUST_PROXY` | `1` | Trust `X-Forwarded-For` / `X-Real-IP` from nginx for the real client IP (rate limit + `ip_hash`). Set `0` only if Node is exposed directly |
+| `HOST` | `127.0.0.1` | Bind address. Use `0.0.0.0` in Docker (the published port is mapped to host loopback only) |
 | `BASE_URL` | `http://localhost:8787` | Public base URL for short links (set to your real URL in production) |
 | `DATA_DIR` | `./data` | SQLite DB directory |
-| `BLOB_DIR` | `./blobs` | Log body + screenshot storage |
+| `BLOB_DIR` | `./blobs` | Log body (gzip) + screenshot storage |
+| `DEFAULT_RETENTION_DAYS` | `30` | Default log lifetime (days) when an app has no own setting |
+| `MAX_RETENTION_DAYS` | `365` | Hard ceiling for retention; all values clamped to this |
+| `SWEEP_INTERVAL_SEC` | `3600` | How often expired (non-pinned) logs are purged. `0` disables the in-process sweep |
+| `SWEEP_BATCH` | `500` | Max logs deleted per sweep pass |
+| `MAX_PAYLOAD_BYTES` | `8388608` | Max whole request body (~8 MB) |
+| `MAX_SCREENSHOT_BYTES` | `2097152` | Max decoded PNG screenshot (~2 MB) |
+| `MAX_LOG_BYTES` | `20971520` | Max decompressed log text (~20 MB) |
+| `ADMIN_TOKEN` | _(none)_ | Admin: delete, manage apps (and unpin when `UNPIN_REQUIRES_ADMIN=1`). Empty disables admin auth (dev) |
+| `VIEWER_TOKEN` | _(none)_ | Team viewer token for the catalog `/browse`. Empty leaves the catalog open (dev) |
+| `TEAM_INGEST_TOKEN` | _(none)_ | Shared master ingest token valid for ANY app (one secret instead of per-app tokens) |
+| `ALLOW_AUTO_REGISTER` | `0` | With the team token, an unknown `appId` self-registers (tokenless) on first ingest. Requires `TEAM_INGEST_TOKEN` |
+| `UNPIN_REQUIRES_ADMIN` | `0` | `0` = anyone with the link can unpin (like pin); `1` = unpinning requires the admin token. Pinning is always open |
+| `IP_SALT` | _(none)_ | Salt for IP hashing (set a random value) |
+| `TRUST_PROXY` | `1` | Trust `X-Forwarded-For` / `X-Real-IP` from nginx for the real client IP (rate limit + `ip_hash`). Set `0` only if Node is exposed directly |
+| `CORS_ALLOW_ORIGIN` | `*` | Allowed CORS origin (`*` for any) |
 
 ## Adding an app
 

@@ -105,6 +105,11 @@ const config = Object.freeze({
   // running add-app.js. Requires TEAM_INGEST_TOKEN to be set.
   allowAutoRegister: envBool('ALLOW_AUTO_REGISTER', false),
 
+  // Unpinning policy. When false (default) unpin is OPEN: anyone with the log
+  // link may unpin, mirroring pin (which is always open). When true, unpinning
+  // requires the admin token, so only some people (admin-token holders) can unpin.
+  unpinRequiresAdmin: envBool('UNPIN_REQUIRES_ADMIN', false),
+
   // Salt for hashing client IPs before storage.
   ipSalt: envStr('IP_SALT', ''),
 

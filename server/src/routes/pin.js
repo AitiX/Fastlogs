@@ -6,7 +6,9 @@
 //   - pin:true  -> expires_at = null, pinned = true. Open by link: anyone with
 //                  the (unguessable) id may pin, which is handy for testers.
 //   - pin:false -> unpin. This SHRINKS the log's lifetime back to a finite
-//                  expiry, so it is admin-only (Authorization: Bearer <admin>).
+//                  expiry. Open by default (anyone with the link may unpin,
+//                  mirroring pin); set UNPIN_REQUIRES_ADMIN=1 to restrict it to
+//                  admin-token holders (Authorization: Bearer <admin>).
 //
 // On unpin we must recompute an expires_at, because while pinned the row had
 // expires_at = null. We base it on the original created_at plus the app's
@@ -64,10 +66,13 @@ async function pin(req, res, params) {
     return sendJson(res, 200, { id: row.id, pinned: true, expiresAt: null });
   }
 
-  // Unpin: admin only.
-  const token = auth.parseBearer(req.headers['authorization']);
-  if (!auth.isAdmin(token)) {
-    return sendError(res, 403, 'forbidden', 'Unpin requires admin token');
+  // Unpin. Open by default (anyone with the link, like pin); when
+  // UNPIN_REQUIRES_ADMIN is set, only admin-token holders may unpin.
+  if (config.unpinRequiresAdmin) {
+    const token = auth.parseBearer(req.headers['authorization']);
+    if (!auth.isAdmin(token)) {
+      return sendError(res, 403, 'forbidden', 'Unpin requires admin token');
+    }
   }
 
   const expiresAt = recomputeExpiry(row);
