@@ -199,6 +199,46 @@ namespace PlayJoy.FastLogs
         }
 
         // ============================================================
+        // Context & breadcrumbs (feature #2)
+        // ============================================================
+
+        /// <summary>
+        /// Set (or replace) a context key/value that rides with every subsequent
+        /// report (e.g. "level" -> "3", "playerId" -> "abc"). Pass a null value to
+        /// remove the key. Cheap: a dictionary write, no per-frame cost. Stripped in
+        /// retail/console (body and call sites removed).
+        /// </summary>
+        [Conditional("UNITY_EDITOR"), Conditional("DEVELOPMENT_BUILD"), Conditional("LOGSHARE_FORCE_ENABLED")]
+        public static void SetContext(string key, string value)
+        {
+#if FASTLOGS_ENABLED
+            if (_runtime != null) _runtime.SetContext(key, value);
+#endif
+        }
+
+        /// <summary>Remove all context entries. Stripped in retail/console.</summary>
+        [Conditional("UNITY_EDITOR"), Conditional("DEVELOPMENT_BUILD"), Conditional("LOGSHARE_FORCE_ENABLED")]
+        public static void ClearContext()
+        {
+#if FASTLOGS_ENABLED
+            if (_runtime != null) _runtime.ClearContext();
+#endif
+        }
+
+        /// <summary>
+        /// Add a breadcrumb to the rolling buffer of recent app events (a ring of the
+        /// last ~100). Included with every report. Cheap: O(1) ring write, no per-frame
+        /// allocation beyond the message string. Stripped in retail/console.
+        /// </summary>
+        [Conditional("UNITY_EDITOR"), Conditional("DEVELOPMENT_BUILD"), Conditional("LOGSHARE_FORCE_ENABLED")]
+        public static void Breadcrumb(string message, FastLogLevel level = FastLogLevel.Log)
+        {
+#if FASTLOGS_ENABLED
+            if (_runtime != null) _runtime.AddBreadcrumb(message, level);
+#endif
+        }
+
+        // ============================================================
         // Recording
         // ============================================================
 

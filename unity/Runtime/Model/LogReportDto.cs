@@ -1,5 +1,7 @@
 // Top-level FastLogs upload payload, mapped to the wire contract body.
 
+using System.Collections.Generic;
+
 namespace PlayJoy.FastLogs
 {
     /// <summary>
@@ -51,5 +53,33 @@ namespace PlayJoy.FastLogs
 
         /// <summary>tester - tester name from client settings, <=120 chars.</summary>
         public string Tester;
+
+        /// <summary>
+        /// context - free-form string->string map riding with the report (e.g. level,
+        /// playerId). Server caps total ~4KB, key &lt;=64, value &lt;=512. Omitted when
+        /// null/empty.
+        /// </summary>
+        public Dictionary<string, string> Context;
+
+        /// <summary>
+        /// breadcrumbs - rolling list of recent app events, oldest first. Server caps
+        /// 100 items and ~16KB. Omitted when null/empty.
+        /// </summary>
+        public List<BreadcrumbDto> Breadcrumbs;
+    }
+
+    /// <summary>
+    /// One breadcrumb entry. Maps to the contract object { t, m, lvl }.
+    /// </summary>
+    public struct BreadcrumbDto
+    {
+        /// <summary>t - ISO-8601 UTC timestamp of the event.</summary>
+        public string TimeUtc;
+
+        /// <summary>m - short human message describing the event.</summary>
+        public string Message;
+
+        /// <summary>lvl - optional severity: "info" | "warn" | "error". Omitted when empty.</summary>
+        public string Level;
     }
 }

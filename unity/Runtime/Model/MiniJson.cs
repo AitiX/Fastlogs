@@ -63,8 +63,70 @@ namespace PlayJoy.FastLogs
             w.Field("comment", report.Comment);
             w.Field("tester", report.Tester);
 
+            // Optional context object (string->string) - omitted when null/empty.
+            if (report.Context != null && report.Context.Count > 0)
+            {
+                w.Key("context");
+                WriteStringMap(sb, report.Context);
+                w.MarkWritten();
+            }
+
+            // Optional breadcrumbs array - omitted when null/empty.
+            if (report.Breadcrumbs != null && report.Breadcrumbs.Count > 0)
+            {
+                w.Key("breadcrumbs");
+                WriteBreadcrumbs(sb, report.Breadcrumbs);
+                w.MarkWritten();
+            }
+
             w.EndObject();
             return sb.ToString();
+        }
+
+        // Serialize a string->string map as a JSON object. Null values are written as
+        // empty strings; null/empty keys are skipped.
+        private static void WriteStringMap(StringBuilder sb, Dictionary<string, string> map)
+        {
+            sb.Append('{');
+            bool first = true;
+            foreach (var kv in map)
+            {
+                if (string.IsNullOrEmpty(kv.Key))
+                {
+                    continue;
+                }
+                if (!first) sb.Append(',');
+                first = false;
+                AppendKey(sb, kv.Key);
+                AppendString(sb, kv.Value ?? string.Empty);
+            }
+            sb.Append('}');
+        }
+
+        // Serialize breadcrumbs as an array of { t, m, lvl } objects. 't' and 'm' are
+        // always written (required by the entry shape); 'lvl' is omitted when empty.
+        private static void WriteBreadcrumbs(StringBuilder sb, List<BreadcrumbDto> crumbs)
+        {
+            sb.Append('[');
+            for (int i = 0; i < crumbs.Count; i++)
+            {
+                if (i > 0) sb.Append(',');
+                BreadcrumbDto c = crumbs[i];
+                sb.Append('{');
+                AppendKey(sb, "t");
+                AppendString(sb, c.TimeUtc ?? string.Empty);
+                sb.Append(',');
+                AppendKey(sb, "m");
+                AppendString(sb, c.Message ?? string.Empty);
+                if (!string.IsNullOrEmpty(c.Level))
+                {
+                    sb.Append(',');
+                    AppendKey(sb, "lvl");
+                    AppendString(sb, c.Level);
+                }
+                sb.Append('}');
+            }
+            sb.Append(']');
         }
 
         private static void WriteDevice(StringBuilder sb, DeviceInfoDto d)

@@ -18,6 +18,7 @@
 #if FASTLOGS_ENABLED
 using System;
 using System.Collections;
+using System.Collections.Generic;
 using UnityEngine;
 
 namespace PlayJoy.FastLogs
@@ -44,6 +45,19 @@ namespace PlayJoy.FastLogs
         private bool _isBusy;
         private UploadResultDto _lastResult = UploadResultDto.Disabled;
 
+        // ---- Context & breadcrumbs (feature #2) ----
+        private FastLogsCrumbStore _crumbs;
+
+        // ---- Crash-report persistence (feature #1) ----
+        private PendingCrashQueue _pendingQueue;
+        // Path of the on-disk crash file OWNED by the send currently in flight. Set only
+        // when an immediate auto-send is started for a freshly captured file, so that
+        // send's success deletes exactly that file. Cleared on success (after delete), on
+        // terminal failure (file left for the idle drain / next start), and whenever a
+        // non-crash send takes over (ForgetPendingCrashOwnership). A scheduled retry keeps
+        // it set across attempts. null = the in-flight send (if any) owns no crash file.
+        private string _pendingCrashFilePath;
+
         // Remembers the parameters of the last send so a Retry toast can re-run it.
         private bool _lastSendIncludeScreenshot;
         private string _lastSendTitle;
@@ -57,8 +71,15 @@ namespace PlayJoy.FastLogs
         // ---- Auto-send-on-exception state (dedup + throttle + per-session cap) ----
         private bool _autoSendHooked;
         private int _autoSendCountThisSession;
+        // Delivery (immediate-send) dedup/throttle state.
         private float _lastAutoSendUnscaled = float.NegativeInfinity;
         private int _lastAutoSendStackHash;       // 0 = none yet
+        // CAPTURE dedup state - deliberately SEPARATE from the delivery state above so a
+        // crash captured (but not immediately sent) still updates capture-dedup without
+        // touching send-dedup, and vice versa. Prevents a tight crash loop from spamming
+        // the outbox while still letting every distinct crash be captured.
+        private float _lastCapturedUnscaled = float.NegativeInfinity;
+        private int _lastCapturedStackHash;       // 0 = none yet
         private bool _inAutoSendDispatch;         // re-entrancy guard (our own logged exceptions must not re-trigger)
 
         public FastLogsConfig Config { get { return _config; } }
@@ -132,11 +153,31 @@ namespace PlayJoy.FastLogs
                 SetRecording(true);
             }
 
+            // Context + breadcrumb store (feature #2). Ring capacity is the breadcrumb
+            // cap (100), independent of the log ring.
+            _crumbs = new FastLogsCrumbStore(BreadcrumbCapacity);
+
+            // Crash-report persistence (feature #1). Build the queue, then resend any
+            // reports left pending from a previous (possibly crashed) session. Resend
+            // runs as a coroutine so it never blocks startup.
+            _pendingQueue = new PendingCrashQueue(PendingCrashCap);
+            if (_uploader != null)
+            {
+                try { _pendingQueue.ResendAll(_uploader, _config); }
+                catch (Exception e) { FlogLog.Exception(e); }
+            }
+
             // Auto-send-on-exception: hook the (main-thread) log callback once.
             HookAutoSend();
 
             FlogLog.Info("Runtime initialized.");
         }
+
+        // Breadcrumb ring capacity (cap of the rolling buffer included with reports).
+        private const int BreadcrumbCapacity = 100;
+
+        // Max pending crash-report files retained on disk for resend.
+        private const int PendingCrashCap = 5;
 
         private static void TryCreate(Action create)
         {
@@ -288,12 +329,23 @@ namespace PlayJoy.FastLogs
                 }
 
                 bool shot = _config != null && _config.Screenshot.CaptureByDefault;
+                // A user-initiated send is unrelated to any pending crash report; drop
+                // ownership so its success does not delete a leftover crash file.
+                ForgetPendingCrashOwnership();
                 BeginSend(shot, null, null);
             }
             catch (Exception e)
             {
                 FlogLog.Exception(e);
             }
+        }
+
+        // Detach the current send from any persisted crash file, WITHOUT deleting it
+        // (the file stays for resend-on-next-start). Used when a fresh, user-initiated
+        // send starts that is not a continuation of a crash send.
+        private void ForgetPendingCrashOwnership()
+        {
+            _pendingCrashFilePath = null;
         }
 
         // Builds the quick-send gesture from the bundled triggers. A composite of a
@@ -356,46 +408,10 @@ namespace PlayJoy.FastLogs
                 return;
             }
 
-            // Don't pile a second auto-send on top of an in-flight send OR while a retry
-            // of the current report is pending/counting down (blocked, same as any other
-            // external send). The internal retry loop keeps running its own report.
-            if (_isBusy || _retryCoroutine != null)
-            {
-                return;
-            }
-
-            // Per-session cap.
-            int cap = _config.AutoSend.MaxAutoSendsPerSession;
-            if (cap > 0 && _autoSendCountThisSession >= cap)
-            {
-                return;
-            }
-
             float now;
             try { now = Time.realtimeSinceStartup; } catch { now = 0f; }
 
             int stackHash = ComputeStackHash(condition, stackTrace);
-            bool sameAsLast = stackHash == _lastAutoSendStackHash && _lastAutoSendStackHash != 0;
-
-            float minGap = _config.AutoSend.MinSecondsBetweenAutoSends;
-            float sinceLast = now - _lastAutoSendUnscaled;
-
-            // Global throttle: never auto-send more than once per minGap seconds. This
-            // alone keeps any flood (even of distinct exceptions) bounded.
-            if (sinceLast < minGap)
-            {
-                return;
-            }
-
-            // Dedup: an exception with the SAME stack as the previous auto-send is
-            // suppressed for an extended window (2x the gap), so a tight loop that
-            // throws the identical exception does not keep re-sending once per gap.
-            if (sameAsLast && sinceLast < minGap * 2f)
-            {
-                return;
-            }
-
-            RecordAutoSend(now, stackHash);
 
             // Title marks the report as an auto-captured crash; comment carries the
             // exception message so the report is self-describing.
@@ -406,7 +422,77 @@ namespace PlayJoy.FastLogs
             _inAutoSendDispatch = true;
             try
             {
+                // ============================================================
+                // PHASE 1 - CAPTURE (always, before any delivery guard).
+                // ============================================================
+                // An unhandled crash must NEVER be lost in an enabled build, so the
+                // very first thing we do - ahead of every throttle/cap/busy/dedup gate -
+                // is durably persist the report to the on-disk outbox. If the upload
+                // below is skipped (busy / over cap / throttled) or the process dies,
+                // the file is still on disk and gets drained on idle or on the next
+                // start. The persisted copy carries NO screenshot (heavy, rarely useful
+                // for a crashed frame) and is PII-scrubbed by BuildReport. Synchronous
+                // and best-effort: one byte-capped JSON write, never throws out of here.
+                //
+                // Capture dedup (separate from send dedup): if the IDENTICAL stack was
+                // already captured within the throttle window, skip writing a new file
+                // so a tight crash loop does not spam the outbox. The OUTBOX CAP
+                // (PendingCrashCap + TrimToCap) bounds the file count regardless.
+                string capturedPath = CaptureCrashIfNew(title, comment, now, stackHash, condition, stackTrace);
+
+                // ============================================================
+                // PHASE 2 - DELIVERY (immediate upload + toast), gated.
+                // ============================================================
+                // The guards below decide ONLY whether to attempt an immediate upload
+                // now; they never affect the capture above. A report skipped here stays
+                // safely in the outbox for the idle-drain / next-start backstop.
+
+                // Don't pile a second auto-send on top of an in-flight send OR while a
+                // retry of the current report is pending/counting down. The internal
+                // retry loop keeps running its own report; this just defers delivery of
+                // the freshly captured file to the idle drain after that send finishes.
+                if (_isBusy || _retryCoroutine != null)
+                {
+                    return;
+                }
+
+                // Per-session cap on IMMEDIATE auto-sends (capture is uncapped except by
+                // the outbox cap).
+                int cap = _config.AutoSend.MaxAutoSendsPerSession;
+                if (cap > 0 && _autoSendCountThisSession >= cap)
+                {
+                    return;
+                }
+
+                bool sameAsLastSent = stackHash == _lastAutoSendStackHash && _lastAutoSendStackHash != 0;
+
+                float minGap = _config.AutoSend.MinSecondsBetweenAutoSends;
+                float sinceLastSent = now - _lastAutoSendUnscaled;
+
+                // Global throttle: never auto-send more than once per minGap seconds.
+                if (sinceLastSent < minGap)
+                {
+                    return;
+                }
+
+                // Send dedup: same stack as the previous auto-send is suppressed for an
+                // extended window (2x the gap), so a tight loop does not keep re-sending
+                // the identical exception once per gap.
+                if (sameAsLastSent && sinceLastSent < minGap * 2f)
+                {
+                    return;
+                }
+
+                RecordAutoSend(now, stackHash);
+
                 ShowToast(ToastKind.Progress, "FastLogs: crash detected, sending...", null, 0f, false);
+
+                // Bind THIS immediate upload to the file we just captured so its success
+                // deletes exactly that file (and nothing else). If capture failed we
+                // still attempt the send, but own no file (null) - nothing to delete and
+                // no orphan, since there is no file on disk in that case.
+                _pendingCrashFilePath = capturedPath;
+
                 BeginSend(shot, title, comment);
             }
             catch (Exception e)
@@ -444,6 +530,233 @@ namespace PlayJoy.FastLogs
                 }
                 return hash == 0 ? 1 : hash; // reserve 0 for "none"
             }
+        }
+
+        // ---- Crash-report capture (feature #1) ----
+
+        // CAPTURE: build a screenshot-less, PII-scrubbed report NOW and write it to the
+        // on-disk outbox, RETURNING its path (or null on skip/failure). This is the
+        // unconditional first step of the crash path - it runs ahead of every
+        // delivery guard so a crash is never lost. It does NOT touch
+        // _pendingCrashFilePath: ownership of a file by an in-flight upload is assigned
+        // by the caller only when it actually starts that upload.
+        //
+        // Capture dedup (separate state from delivery dedup): if the identical stack was
+        // already captured within the throttle window, return null without writing a new
+        // file, so a crash loop does not flood the outbox. The outbox cap still bounds
+        // the file count in every case.
+        //
+        // Best-effort: any failure is logged and ignored (delivery still proceeds; with
+        // no file it simply owns nothing to delete).
+        //
+        // FALLBACK (feature: "capture ALWAYS"): the full BuildReport touches the log
+        // source, diagnostics collector, web-info provider and breadcrumb store - any of
+        // which can fail or stall on a crashed frame. If BuildReport returns null OR
+        // throws, we do NOT lose the crash: we assemble a MINIMAL, self-contained report
+        // straight from what is reliably available (config ids, platform, version, the
+        // exception text) and persist THAT instead. The fallback deliberately depends on
+        // nothing that BuildReport depends on, so it survives the same crash that broke
+        // the full builder. The only thing it cannot work around is having nowhere to
+        // send to (no config / empty endpoint): then we honestly persist nothing.
+        private string CaptureCrashIfNew(string title, string comment, float now, int stackHash,
+            string condition, string stackTrace)
+        {
+            if (_pendingQueue == null)
+            {
+                return null;
+            }
+
+            // Capture dedup: same stack as the last CAPTURE, within the throttle window,
+            // is not re-written. Uses capture-specific state, independent of send dedup.
+            float minGap = _config != null && _config.AutoSend != null
+                ? _config.AutoSend.MinSecondsBetweenAutoSends
+                : 0f;
+            bool sameAsLastCapture = stackHash == _lastCapturedStackHash && _lastCapturedStackHash != 0;
+            float sinceLastCapture = now - _lastCapturedUnscaled;
+            if (sameAsLastCapture && sinceLastCapture < minGap)
+            {
+                return null;
+            }
+
+            // HAPPY PATH: the full builder. Kept exactly as before. Note a throw here is
+            // caught below and routed to the fallback instead of losing the crash.
+            LogReportDto report = null;
+            try
+            {
+                report = BuildReport(title, comment, null); // null = no screenshot
+            }
+            catch (Exception e)
+            {
+                FlogLog.Exception(e);
+                report = null; // fall through to the minimal fallback below
+            }
+
+            // FALLBACK PATH: BuildReport failed (returned null or threw). Build the
+            // minimal report directly. Returns null only when there is genuinely nowhere
+            // to send (no config / empty endpoint), in which case persisting is pointless.
+            if (report == null)
+            {
+                report = BuildMinimalCrashReport(title, comment, condition, stackTrace);
+                if (report == null)
+                {
+                    return null;
+                }
+            }
+
+            try
+            {
+                // Persisted copy is the plain contract body (no gzip); the resend path
+                // re-applies any gzip via the uploader.
+                report.LogEncoding = "plain";
+                string path = _pendingQueue.Persist(report);
+
+                // Record capture-dedup state only when a file was actually written.
+                if (!string.IsNullOrEmpty(path))
+                {
+                    _lastCapturedUnscaled = now;
+                    _lastCapturedStackHash = stackHash;
+                }
+                return path;
+            }
+            catch (Exception e)
+            {
+                FlogLog.Exception(e);
+                return null;
+            }
+        }
+
+        // Minimal, dependency-free crash report used only when the full BuildReport could
+        // not produce one (it returned null or threw on a crashed frame). It reads ONLY
+        // from _config and the exception text passed in, plus the same cheap platform /
+        // version Unity properties BuildReport uses - NONE of the heavier sources
+        // (DiagnosticsCollector, _logSource, _webInfo, _crumbs) that may have caused the
+        // original failure. The log source is consulted only opportunistically, in its own
+        // guarded block, so if it is the thing that broke we still fall back to the raw
+        // exception text. PII is scrubbed exactly like the normal path (ScrubPii default
+        // ON). Returns null when there is no endpoint to send to (nothing worth persisting).
+        private LogReportDto BuildMinimalCrashReport(string title, string comment,
+            string condition, string stackTrace)
+        {
+            // Nowhere to send -> nothing to persist. Endpoint is the deciding signal: the
+            // uploader rejects an empty endpoint outright, so a persisted file would only
+            // ever be dropped. AppId rides along in the body but is not the send gate.
+            string endpoint = _config != null && _config.Server != null ? _config.Server.EndpointUrl : null;
+            if (string.IsNullOrEmpty(endpoint))
+            {
+                return null;
+            }
+
+            bool scrubPii = _config == null || _config.Diagnostics.ScrubPii; // default ON
+
+            // Prefer the captured log text (recorder/ring) if the source can still produce
+            // it; this is best-effort and isolated so a faulty/half-dead source cannot take
+            // the fallback down with it. If empty/unavailable, fall back to the raw
+            // exception text (condition + stack), which is always present on this path.
+            string logText = null;
+            try
+            {
+                if (_logSource != null)
+                {
+                    int maxBytes = _config != null ? _config.Capture.MaxLogTextBytes : 0;
+                    logText = _logSource.BuildLogText(maxBytes);
+                }
+            }
+            catch (Exception e)
+            {
+                FlogLog.Exception(e);
+                logText = null;
+            }
+
+            if (string.IsNullOrEmpty(logText))
+            {
+                string cond = condition ?? string.Empty;
+                string st = stackTrace ?? string.Empty;
+                logText = string.IsNullOrEmpty(st) ? cond : (cond + "\n" + st);
+            }
+
+            // Counts if the source can give them cheaply; zeros otherwise. Isolated.
+            CountsDto counts;
+            try { counts = _logSource != null ? _logSource.Counts : default; }
+            catch { counts = default; }
+
+            if (scrubPii)
+            {
+                logText = PiiScrubber.Scrub(logText);
+            }
+
+            // Platform / version come from the same cheap Unity properties BuildReport
+            // uses; guarded so even those cannot abort the fallback.
+            string platform;
+            try { platform = PlatformName(); } catch { platform = "Other"; }
+
+            string appVersion;
+            try { appVersion = Application.version; } catch { appVersion = null; }
+
+            string timestamp;
+            try
+            {
+                timestamp = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ",
+                    System.Globalization.CultureInfo.InvariantCulture);
+            }
+            catch { timestamp = null; }
+
+            // Comment carries the exception message so the minimal report is still
+            // self-describing; fall back to the passed-in comment when condition is empty.
+            string minimalComment = !string.IsNullOrEmpty(condition) ? condition : comment;
+
+            var report = new LogReportDto
+            {
+                AppId = _config != null && _config.Server != null ? _config.Server.AppId : string.Empty,
+                Platform = platform,
+                AppVersion = appVersion,
+                TimestampUtc = timestamp,
+                Counts = counts,
+                LogText = logText,
+                LogEncoding = "plain",
+                Device = null, // serializer emits an empty {} device object; contract-valid
+                ScreenshotPngBase64 = null,
+                Title = string.IsNullOrEmpty(title) ? null : Truncate(title, 120),
+                Comment = string.IsNullOrEmpty(minimalComment) ? null : Truncate(minimalComment, 4000),
+            };
+
+            return report;
+        }
+
+        // ---- Context & breadcrumbs (feature #2) ----
+
+        public void SetContext(string key, string value)
+        {
+            if (_crumbs == null)
+            {
+                return;
+            }
+            try { _crumbs.SetContext(key, value); }
+            catch (Exception e) { FlogLog.Exception(e); }
+        }
+
+        public void ClearContext()
+        {
+            if (_crumbs == null)
+            {
+                return;
+            }
+            try { _crumbs.ClearContext(); }
+            catch (Exception e) { FlogLog.Exception(e); }
+        }
+
+        public void AddBreadcrumb(string message, FastLogLevel level)
+        {
+            if (_crumbs == null)
+            {
+                return;
+            }
+            try
+            {
+                double now;
+                try { now = Time.realtimeSinceStartupAsDouble; } catch { now = 0; }
+                _crumbs.AddBreadcrumb(message, level, now);
+            }
+            catch (Exception e) { FlogLog.Exception(e); }
         }
 
         // ---- Logging passthrough ----
@@ -497,6 +810,9 @@ namespace PlayJoy.FastLogs
 
         private void OnOverlaySendRequested(bool includeScreenshot, string title, string comment)
         {
+            // A manual overlay send is a fresh, user-initiated report; detach it from any
+            // pending crash file so its success cannot delete a leftover crash report.
+            ForgetPendingCrashOwnership();
             BeginSend(includeScreenshot, title, comment);
         }
 
@@ -652,6 +968,14 @@ namespace PlayJoy.FastLogs
             // failure, Retry.
             if (result.Success)
             {
+                // FEATURE #1: this send succeeded, so drop its persisted crash file (if
+                // this send owned one) and release ownership.
+                if (!string.IsNullOrEmpty(_pendingCrashFilePath))
+                {
+                    _pendingQueue?.Remove(_pendingCrashFilePath);
+                    _pendingCrashFilePath = null;
+                }
+
                 // Success reached (possibly after one or more outer retries): make sure
                 // no stale retry stays pending and the attempt counter is cleared, then
                 // show the existing success toast.
@@ -662,22 +986,62 @@ namespace PlayJoy.FastLogs
                               && !string.IsNullOrEmpty(result.Url);
                 string msg = copied ? "FastLogs: done (link copied)" : "FastLogs: done";
                 ShowToast(ToastKind.Success, msg, result.Url, 6f, false);
+
+                // "AT THE FIRST OPPORTUNITY": now that a send completed and the client is
+                // idle (no in-flight send, no pending retry), drain the outbox so any
+                // reports captured while we were busy/throttled/over-cap get delivered,
+                // one at a time with a frame gap. The file just sent was already removed
+                // above, so the drain never re-sends it. No-op when the outbox is empty.
+                DrainOutboxIfIdle();
             }
             else if (IsRetryable(result) && TryScheduleRetry())
             {
-                // A transient failure was rescheduled; the countdown toast ("Retrying in
-                // Ns...") is shown by the retry coroutine. Do not show the sticky error
-                // toast here.
+                // A transient failure was rescheduled; the same crash file (if owned)
+                // stays on disk AND _pendingCrashFilePath keeps pointing at it so the
+                // retry continues to own it. The countdown toast ("Retrying in Ns...") is
+                // shown by the retry coroutine. Do not show the sticky error toast here.
             }
             else
             {
-                // Permanent failure (4xx/415/413/local) or retries exhausted/disabled:
-                // sticky error with a manual Retry affordance.
+                // Terminal failure: a permanent client rejection (4xx/415/413/local) OR a
+                // transient failure with retries exhausted/disabled. Release ownership of
+                // the crash file (if any) WITHOUT deleting it from disk: the idle drain /
+                // next-start backstop will retry it later (and the poison-pill rule in
+                // the resend path drops it if the server keeps rejecting it permanently).
+                // Clearing the field here prevents a later, unrelated success from
+                // deleting a now-stale file and prevents the drain from double-owning it.
+                _pendingCrashFilePath = null;
+
                 ShowToast(ToastKind.Error, "FastLogs error: " + result.Error, null, 0f, true);
+
+                // The client is idle again (no retry scheduled): drain any reports waiting
+                // in the outbox. The just-failed file stays on disk and is picked up by
+                // this drain in turn.
+                DrainOutboxIfIdle();
             }
 
             task.SetResult(result);
             try { Uploaded?.Invoke(result); }
+            catch (Exception e) { FlogLog.Exception(e); }
+        }
+
+        // "AT THE FIRST OPPORTUNITY" drain: when the client is idle (no in-flight send,
+        // no pending retry) and the outbox holds files, resend them one at a time with a
+        // frame gap (PendingCrashQueue.ResendAll). Soft and best-effort; never throws.
+        // Files successfully delivered are removed by the resend path, so nothing is
+        // double-sent, and the file just delivered by the current send (already removed)
+        // is never re-sent.
+        private void DrainOutboxIfIdle()
+        {
+            if (_pendingQueue == null || _uploader == null)
+            {
+                return;
+            }
+            if (_isBusy || _retryCoroutine != null)
+            {
+                return; // not idle - wait; a later Complete will drain
+            }
+            try { _pendingQueue.ResendAll(_uploader, _config); }
             catch (Exception e) { FlogLog.Exception(e); }
         }
 
@@ -833,6 +1197,7 @@ namespace PlayJoy.FastLogs
         private LogReportDto BuildReport(string title, string comment, string screenshotBase64)
         {
             bool includeSensitive = _config != null && _config.Diagnostics.IncludeSensitive;
+            bool scrubPii = _config == null || _config.Diagnostics.ScrubPii; // default ON
 
             var device = DiagnosticsCollector.Collect(includeSensitive);
             if (_webInfo != null && device != null)
@@ -844,6 +1209,20 @@ namespace PlayJoy.FastLogs
             int maxBytes = _config != null ? _config.Capture.MaxLogTextBytes : 0;
             string logText = _logSource != null ? _logSource.BuildLogText(maxBytes) : string.Empty;
             CountsDto counts = Counts;
+
+            // Snapshot context + breadcrumbs (feature #2). One-shot copy, off the hot
+            // path. Null when empty so the serializer omits the fields.
+            Dictionary<string, string> context = _crumbs != null ? _crumbs.SnapshotContext() : null;
+            List<BreadcrumbDto> breadcrumbs = _crumbs != null ? _crumbs.SnapshotBreadcrumbs() : null;
+
+            // PII scrub (feature #3, privacy-by-default). One-shot pass at send time over
+            // the log text, every context value and every breadcrumb message.
+            if (scrubPii)
+            {
+                logText = PiiScrubber.Scrub(logText);
+                context = ScrubContext(context);
+                breadcrumbs = ScrubBreadcrumbs(breadcrumbs);
+            }
 
             // Core defaults logEncoding to "plain" so an un-augmented build is
             // always contract-valid. A log-source/uploader builder may instead
@@ -875,10 +1254,45 @@ namespace PlayJoy.FastLogs
                 RetentionDays = retention,
                 Title = string.IsNullOrEmpty(title) ? null : Truncate(title, 120),
                 Comment = string.IsNullOrEmpty(comment) ? null : Truncate(comment, 4000),
-                Tester = string.IsNullOrEmpty(tester) ? null : Truncate(tester, 120)
+                Tester = string.IsNullOrEmpty(tester) ? null : Truncate(tester, 120),
+                Context = context,
+                Breadcrumbs = breadcrumbs
             };
 
             return report;
+        }
+
+        // Scrub PII from context values in place (keys are not scrubbed - they are app
+        // labels like "level"/"playerId", not user data). Returns the same map.
+        private static Dictionary<string, string> ScrubContext(Dictionary<string, string> context)
+        {
+            if (context == null || context.Count == 0)
+            {
+                return context;
+            }
+            // Snapshot keys first - we are mutating values, not the key set.
+            var keys = new List<string>(context.Keys);
+            for (int i = 0; i < keys.Count; i++)
+            {
+                context[keys[i]] = PiiScrubber.Scrub(context[keys[i]]);
+            }
+            return context;
+        }
+
+        // Scrub PII from breadcrumb messages in place. Returns the same list.
+        private static List<BreadcrumbDto> ScrubBreadcrumbs(List<BreadcrumbDto> crumbs)
+        {
+            if (crumbs == null || crumbs.Count == 0)
+            {
+                return crumbs;
+            }
+            for (int i = 0; i < crumbs.Count; i++)
+            {
+                BreadcrumbDto c = crumbs[i];
+                c.Message = PiiScrubber.Scrub(c.Message);
+                crumbs[i] = c;
+            }
+            return crumbs;
         }
 
         private static string Truncate(string s, int max)
