@@ -110,6 +110,14 @@ const config = Object.freeze({
   // requires the admin token, so only some people (admin-token holders) can unpin.
   unpinRequiresAdmin: envBool('UNPIN_REQUIRES_ADMIN', false),
 
+  // Crash grouping. crashSigTopK = how many top normalized stack frames are
+  // folded into a crash signature (higher = finer grouping). crashRecomputeBatch
+  // = max crash_sig-NULL logs the /browse/:appId/crashes route lazily backfills
+  // per request (bounds first-access latency on a DB of pre-feature logs; 0
+  // disables the lazy backfill and relies on the backfill script instead).
+  crashSigTopK: envInt('CRASH_SIG_TOP_K', 8),
+  crashRecomputeBatch: envInt('CRASH_RECOMPUTE_BATCH', 200),
+
   // Salt for hashing client IPs before storage.
   ipSalt: envStr('IP_SALT', ''),
 

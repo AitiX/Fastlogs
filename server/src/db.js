@@ -79,11 +79,16 @@ function migrate() {
   // ADD COLUMN is the safe, idempotent way to evolve the schema; guarding with
   // table_info keeps a re-run a no-op.
   const logCols = db.prepare('PRAGMA table_info(logs)').all();
-  for (const col of ['comment', 'tester', 'context_json', 'breadcrumbs_json']) {
+  for (const col of ['comment', 'tester', 'context_json', 'breadcrumbs_json', 'crash_sig']) {
     if (!logCols.some((c) => c.name === col)) {
       db.exec(`ALTER TABLE logs ADD COLUMN ${col} TEXT`);
     }
   }
+
+  // Partial index backing the per-app crash grouping scan. Created AFTER the
+  // loop above, since crash_sig only exists once that ALTER has run (it is not
+  // part of the inline CREATE TABLE). Idempotent via IF NOT EXISTS.
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_logs_crash ON logs (app_id, crash_sig) WHERE crash_sig IS NOT NULL`);
 }
 
 migrate();
@@ -96,12 +101,12 @@ const stmts = {
   insertLog: db.prepare(`
     INSERT INTO logs (
       id, app_id, platform, app_version, device_json, title, comment, tester,
-      context_json, breadcrumbs_json, ts_utc,
+      context_json, breadcrumbs_json, crash_sig, ts_utc,
       cnt_error, cnt_warn, cnt_log, log_bytes, has_shot, created_at,
       expires_at, pinned, ip_hash
     ) VALUES (
       @id, @app_id, @platform, @app_version, @device_json, @title, @comment, @tester,
-      @context_json, @breadcrumbs_json, @ts_utc,
+      @context_json, @breadcrumbs_json, @crash_sig, @ts_utc,
       @cnt_error, @cnt_warn, @cnt_log, @log_bytes, @has_shot, @created_at,
       @expires_at, @pinned, @ip_hash
     )

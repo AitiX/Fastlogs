@@ -16,6 +16,7 @@ const { validateIngest } = require('../auth');
 const ratelimit = require('../ratelimit');
 const { sendJson, sendError, readJsonBody, nowUtcIso } = require('../util/http');
 const { linksFor } = require('./shared');
+const crashsig = require('../crashsig');
 
 // Valid platform enum per CONTRACT section 1.
 const VALID_PLATFORMS = new Set([
@@ -79,7 +80,8 @@ function decodeLogText(logText, logEncoding, maxBytes) {
       err.code = 'PAYLOAD_TOO_LARGE';
       throw err;
     }
-    return { buf, alreadyGzipped: false };
+    // `text` is the decompressed log used to compute the crash signature.
+    return { buf, alreadyGzipped: false, text: logText };
   }
 
   if (logEncoding === 'gzip+base64') {
@@ -106,8 +108,11 @@ function decodeLogText(logText, logEncoding, maxBytes) {
     // MAX_LOG_BYTES ceiling on the *decompressed* log at ingest time
     // (CONTRACT section 6). maxOutputLength makes zlib abort once the output
     // would exceed the limit, so a small "zip bomb" cannot blow up memory.
+    // We keep the decompressed result (`text`) for the crash signature instead
+    // of discarding it.
+    let decoded;
     try {
-      zlib.gunzipSync(gz, { maxOutputLength: maxBytes });
+      decoded = zlib.gunzipSync(gz, { maxOutputLength: maxBytes });
     } catch (e) {
       // RangeError from maxOutputLength => decompressed log too large.
       if (e instanceof RangeError || /maxOutputLength|buffer/i.test(e.message || '')) {
@@ -121,7 +126,7 @@ function decodeLogText(logText, logEncoding, maxBytes) {
     }
 
     // Valid gzip within limits: persist the gzipped buffer verbatim.
-    return { buf: gz, alreadyGzipped: true };
+    return { buf: gz, alreadyGzipped: true, text: decoded.toString('utf8') };
   }
 
   const err = new Error(`Unknown logEncoding: ${logEncoding}`);
@@ -312,9 +317,9 @@ async function handleIngest(req, res) {
   }
 
   // 6. Decode log text.
-  let logBuf, alreadyGzipped;
+  let logBuf, alreadyGzipped, logTextDecoded;
   try {
-    ({ buf: logBuf, alreadyGzipped } = decodeLogText(logText, logEncoding, config.maxLogBytes));
+    ({ buf: logBuf, alreadyGzipped, text: logTextDecoded } = decodeLogText(logText, logEncoding, config.maxLogBytes));
   } catch (err) {
     if (err.code === 'PAYLOAD_TOO_LARGE') {
       return sendError(res, 413, 'payload_too_large', err.message);
@@ -373,6 +378,9 @@ async function handleIngest(req, res) {
     tester,
     context_json: context ? JSON.stringify(context) : null,
     breadcrumbs_json: breadcrumbs ? JSON.stringify(breadcrumbs) : null,
+    // Crash signature for grouping. '' (not null) marks "computed, not a crash"
+    // so the lazy backfill never re-scans this log.
+    crash_sig: crashsig.computeSignature(logTextDecoded, { topK: config.crashSigTopK }) || '',
     ts_utc: timestampUtc,
     cnt_error: counts.error,
     cnt_warn: counts.warn,
