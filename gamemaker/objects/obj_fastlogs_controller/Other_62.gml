@@ -67,9 +67,11 @@ if (ok && !net_error) {
                 copied = false;                 // WebGL без жеста / платформенный отказ - не падаем
             }
         }
-        // Тост в оверлее, если он доступен. Если ссылку скопировали - отметим это.
-        if (script_exists(asset_get_index("fastlogs_ui_toast"))) {
-            fastlogs_ui_toast(copied ? "лог отправлен, ссылка скопирована" : "лог отправлен");
+        // STATUS (B): тост "Готово" + ссылка поверх игры, даже без открытого оверлея.
+        //   Ссылка уже авто-скопирована (copied) - в тосте даём её показ + клик для повторной копии.
+        if (script_exists(asset_get_index("fastlogs_status_toast"))) {
+            var ok_text = copied ? "Готово (ссылка скопирована)" : "Готово";
+            fastlogs_status_toast("ok", ok_text, { url: url });
         }
         // Комментарий ушёл с отчётом -> очищаем поле, чтобы он не уходил повторно (фича COMMENT).
         if (script_exists(asset_get_index("fastlogs_comment_clear"))) {
@@ -77,6 +79,10 @@ if (ok && !net_error) {
         }
     } else {
         show_debug_message("[FastLogs] ingest OK (" + string(http_status) + ") but no url in response: " + string(result));
+        // Успех, но сервер не вернул url - всё равно "Готово" (без ссылки).
+        if (script_exists(asset_get_index("fastlogs_status_toast"))) {
+            fastlogs_status_toast("ok", "Готово");
+        }
     }
 } else {
     // Ошибка: 4xx/5xx или сетевой обрыв.
@@ -88,10 +94,20 @@ if (ok && !net_error) {
     if (retryable) {
         retried = fastlogs_http_retry();        // ставит новый запрос, переустанавливает is_sending
     }
-    if (!retried) {
+    if (retried) {
+        // Авто-ретрай поставлен - держим статус "Отправка..." (повтор N/2).
+        if (script_exists(asset_get_index("fastlogs_status_toast"))) {
+            fastlogs_status_toast("sending", "Отправка... (повтор)");
+        }
+    } else {
         hs.state = "error";
-        if (script_exists(asset_get_index("fastlogs_ui_toast"))) {
-            fastlogs_ui_toast("ошибка отправки");
+        // STATUS (B): тост "Ошибка: <причина>" + кликабельная зона "Повторить" поверх игры.
+        if (script_exists(asset_get_index("fastlogs_status_toast"))) {
+            var reason;
+            if (net_error)                                  reason = "сеть недоступна";
+            else if (is_real(http_status) && http_status > 0) reason = "HTTP " + string(http_status);
+            else                                            reason = "неизвестно";
+            fastlogs_status_toast("error", "Ошибка: " + reason, { retry: true });
         }
     }
 }

@@ -31,9 +31,12 @@ function fastlogs_ui_state() {
             pressed:         false,   // был ли pressed-тап в этом кадре
             hover_id:        "",      // id зоны под указателем (для подсветки)
             __prev_touches:  0,       // число касаний на прошлом кадре (для фронта жеста)
-            // Тост "скопировано" (clipboard): текст + таймер кадров до скрытия.
+            // Тост (clipboard + STATUS, B): текст + таймер кадров до скрытия + тип/доп.поля.
             toast_text:      "",
-            toast_frames:    0,
+            toast_frames:    0,       // кадров до скрытия (0 -> нет тоста). -1 -> держать (sending).
+            toast_kind:      "info",  // "info" | "sending" | "ok" | "error"
+            toast_url:       "",      // ссылка для тоста "ok" (показываем + клик копирует)
+            toast_retry:     false,   // показывать ли подсказку/зону "Повторить" (тост "error")
             // Комментарий тестера (фича COMMENT). Накапливается inline через keyboard_string;
             //   уходит в opts.comment при отправке. Контракт: <=4000 символов.
             comment_text:    "",      // текущий введённый текст
@@ -199,13 +202,65 @@ function fastlogs_ui_ini_path() {
 }
 
 // =====================================================================================
-// ТОСТ "скопировано" и т.п. - небольшое всплывающее уведомление в оверлее.
+// ТОСТ-СТАТУС (фича STATUS, B). Лёгкое уведомление поверх игры ДАЖЕ без открытого оверлея.
+//   Рисуется только когда есть что показать (toast_frames != 0) - иначе ноль работы в Draw.
+//   Типы: "info" (нейтральный), "sending" (держится, пока идёт отправка), "ok" (успех + ссылка),
+//   "error" (причина + подсказка/зона "Повторить"). Длительности из FASTLOGS_TOAST_*.
 // =====================================================================================
+
+/// @returns {real} кадров для заданной длительности в секундах (по реальному game speed)
+function fastlogs_ui_toast_frames_for(seconds) {
+    // game_get_speed(gamespeed_fps) - целевой FPS логики; фолбэк 60 если недоступно/0.
+    var fps = 60;
+    try {
+        var f = game_get_speed(gamespeed_fps);
+        if (is_real(f) && f > 0) fps = f;
+    } catch (_e) { fps = 60; }
+    return max(1, round(seconds * fps));
+}
+
+/// Базовый тост (совместимость со старым API: clipboard зовёт fastlogs_ui_toast(text)).
+///   Это короткий info-тост. no-op при !FASTLOGS_ENABLED / выключенном тосте.
 function fastlogs_ui_toast(text) {
     if (!FASTLOGS_ENABLED) return;
+    fastlogs_status_toast("info", string(text));
+}
+
+/// Статус-тост с типом. kind: "info"|"sending"|"ok"|"error". opt - struct { url, retry }.
+///   "sending" держится до следующего статуса (таймер -1). Остальные гаснут по таймеру.
+/// @param {string} kind
+/// @param {string} text
+/// @param {struct} [opt] { url:string, retry:bool }
+function fastlogs_status_toast(kind, text, opt = undefined) {
+    if (!FASTLOGS_ENABLED) return;
+    if (!FASTLOGS_TOAST_ENABLED) return;
     var ui = fastlogs_ui_state();
-    ui.toast_text   = string(text);
-    ui.toast_frames = 90; // ~1.5 c при 60 fps // TODO verify game_get_speed для точной длительности
+    ui.toast_text  = string(text);
+    ui.toast_kind  = is_string(kind) ? kind : "info";
+    ui.toast_url   = (is_struct(opt) && variable_struct_exists(opt, "url")   && is_string(opt.url)) ? opt.url   : "";
+    ui.toast_retry = (is_struct(opt) && variable_struct_exists(opt, "retry")) ? bool(opt.retry) : false;
+
+    switch (ui.toast_kind) {
+        case "sending":
+            ui.toast_frames = -1;   // держать, пока идёт отправка (снимется следующим статусом)
+            break;
+        case "error":
+            ui.toast_frames = fastlogs_ui_toast_frames_for(FASTLOGS_TOAST_ERROR_SECONDS);
+            break;
+        default: // info / ok
+            ui.toast_frames = fastlogs_ui_toast_frames_for(FASTLOGS_TOAST_SECONDS);
+            break;
+    }
+}
+
+/// Скрыть тост немедленно (например, при ручном открытии оверлея).
+function fastlogs_status_toast_clear() {
+    if (!FASTLOGS_ENABLED) return;
+    var ui = fastlogs_ui_state();
+    ui.toast_frames = 0;
+    ui.toast_text   = "";
+    ui.toast_retry  = false;
+    ui.toast_url    = "";
 }
 
 // =====================================================================================
@@ -218,12 +273,31 @@ function fastlogs_ui_draw() {
     if (!FASTLOGS_ENABLED) return;
     var ui = fastlogs_ui_state();
 
-    // Тост уменьшаем по кадрам даже когда оверлей закрыт - чтобы "скопировано" гасло.
+    // Тост уменьшаем по кадрам даже когда оверлей закрыт. toast_frames == -1 -> держим (sending).
     if (ui.toast_frames > 0) ui.toast_frames -= 1;
 
     if (!ui.open) {
-        // Оверлей закрыт: рисуем только тост, если активен (например, после copy по хоткею).
-        if (ui.toast_frames > 0) fastlogs_ui_draw_toast(ui);
+        // Оверлей закрыт: рисуем ТОЛЬКО тост и только если он активен (иначе полный ноль работы -
+        //   ни сборки hit-rects, ни draw-стейта). Тост виден поверх игры (фича STATUS, B).
+        if (ui.toast_frames != 0) {
+            // Свежие зоны клика только для тоста (повтор/копирование ссылки).
+            ui.hit = [];
+            var old_col_t  = draw_get_colour();
+            var old_alpha_t = draw_get_alpha();
+            var old_hal_t  = draw_get_halign();
+            var old_val_t  = draw_get_valign();
+            fastlogs_ui_draw_toast(ui);
+            // Потребить клик по зонам тоста (Повторить/Копировать), если был тап в этом кадре.
+            if (ui.pressed) {
+                var hid_t = fastlogs_ui_hit_test(ui, ui.px, ui.py);
+                if (hid_t != "") fastlogs_ui_action(hid_t, ui);
+                ui.pressed = false;
+            }
+            draw_set_colour(old_col_t);
+            draw_set_alpha(old_alpha_t);
+            draw_set_halign(old_hal_t);
+            draw_set_valign(old_val_t);
+        }
         return;
     }
 
@@ -369,8 +443,8 @@ function fastlogs_ui_draw() {
         fastlogs_ui_draw_settings(gw, gh, ui_scale, btn_h, pad, fsize, ui);
     }
 
-    // --- Тост.
-    if (ui.toast_frames > 0) fastlogs_ui_draw_toast(ui);
+    // --- Тост (включая «держащийся» статус "Отправка..." с toast_frames == -1).
+    if (ui.toast_frames != 0) fastlogs_ui_draw_toast(ui);
 
     // Применить накопленный ввод по зонам этого кадра (после того как все hit-rects собраны).
     if (ui.pressed) {
@@ -496,6 +570,19 @@ function fastlogs_ui_action(id, ui) {
             if (script_exists(asset_get_index("fastlogs_copy_url"))) fastlogs_copy_url();
             break;
 
+        case "toast_copy_url":
+            // Клик по тосту "Готово" со ссылкой -> скопировать её (фича STATUS, B).
+            if (script_exists(asset_get_index("fastlogs_copy_url"))) fastlogs_copy_url();
+            break;
+
+        case "toast_retry":
+            // Клик по тосту "Ошибка" -> повторить отправку с тем же телом (фича STATUS, B).
+            //   fastlogs_send соберёт свежий payload; если идёт отправка - сам отобьётся.
+            if (script_exists(asset_get_index("fastlogs_send"))) {
+                fastlogs_send({ title: "Retry send" });
+            }
+            break;
+
         case "toggle_screenshot":
         case "set_toggle_screenshot":
             ui.cfg_screenshot = !ui.cfg_screenshot;
@@ -612,25 +699,64 @@ function fastlogs_ui_counter(x1, y1, w, h, letter, value, col, scale) {
     draw_set_valign(fa_top);
 }
 
-/// Тост-уведомление по центру внизу.
+/// Тост-уведомление по центру внизу (фича STATUS, B). Цвет рамки по типу; для "ok" показывает
+///   ссылку и кликабельную зону копирования, для "error" - зону "Повторить".
+///   Регистрирует зоны клика в ui.hit (их потребляет fastlogs_ui_draw в обеих ветках).
 function fastlogs_ui_draw_toast(ui) {
     if (ui.toast_text == "") return;
     var gw = display_get_gui_width();
     var gh = display_get_gui_height();
-    var tw = string_width(ui.toast_text) + 40;
-    var th = 48;
+
+    var kind = variable_struct_exists(ui, "toast_kind") ? ui.toast_kind : "info";
+    // Цвет рамки/акцента по типу статуса.
+    var accent = FASTLOGS_COL_ACCENT;
+    switch (kind) {
+        case "sending": accent = FASTLOGS_COL_WARN;   break;   // "Отправка..."
+        case "ok":      accent = FASTLOGS_COL_ACCENT; break;   // успех (зелёный)
+        case "error":   accent = FASTLOGS_COL_ERROR;  break;   // ошибка (красный)
+        default:        accent = FASTLOGS_COL_BTN_HOVER; break; // info (нейтральный)
+    }
+
+    // Доп.строка под основным текстом: ссылка (ok) или подсказка повтора (error).
+    var url   = variable_struct_exists(ui, "toast_url")   ? ui.toast_url   : "";
+    var retry = variable_struct_exists(ui, "toast_retry") ? ui.toast_retry : false;
+    var has_url   = (kind == "ok")    && is_string(url) && string_length(url) > 0;
+    var has_retry = (kind == "error") && retry;
+
+    var main_w = string_width(ui.toast_text);
+    var sub_text = "";
+    if (has_url)   sub_text = url + "   (нажмите - копировать)";
+    if (has_retry) sub_text = "Нажмите, чтобы повторить отправку";
+    var sub_w = (sub_text != "") ? string_width(sub_text) : 0;
+
+    var tw = max(main_w, sub_w) + 40;
+    var th = (sub_text != "") ? 74 : 48;
     var tx = (gw - tw) * 0.5;
     var ty = gh - th - 40;
+
     draw_set_colour(FASTLOGS_COL_PANEL);
     draw_set_alpha(0.9);
     draw_rectangle(tx, ty, tx + tw, ty + th, false);
     draw_set_alpha(1);
-    draw_set_colour(FASTLOGS_COL_ACCENT);
+    draw_set_colour(accent);
     draw_rectangle(tx, ty, tx + tw, ty + th, true);
+
+    // Основной текст статуса.
     draw_set_colour(FASTLOGS_COL_TEXT);
     draw_set_halign(fa_center);
     draw_set_valign(fa_middle);
-    draw_text((tx + tx + tw) * 0.5, (ty + ty + th) * 0.5, ui.toast_text);
+    var main_cy = (sub_text != "") ? (ty + 18) : ((ty + ty + th) * 0.5);
+    draw_text((tx + tx + tw) * 0.5, main_cy, ui.toast_text);
+
+    // Доп.строка + кликабельная зона (копирование ссылки / повтор).
+    if (sub_text != "") {
+        draw_set_colour(has_retry ? FASTLOGS_COL_ERROR : FASTLOGS_COL_ACCENT);
+        draw_text((tx + tx + tw) * 0.5, ty + th - 20, sub_text);
+        // Вся плашка тоста кликабельна для соответствующего действия.
+        if (has_url)   fastlogs_ui_register_hit(ui, tx, ty, tx + tw, ty + th, "toast_copy_url");
+        if (has_retry) fastlogs_ui_register_hit(ui, tx, ty, tx + tw, ty + th, "toast_retry");
+    }
+
     draw_set_halign(fa_left);
     draw_set_valign(fa_top);
 }

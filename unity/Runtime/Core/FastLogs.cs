@@ -283,6 +283,22 @@ namespace PlayJoy.FastLogs
         // ============================================================
 
         /// <summary>
+        /// Fire-and-forget quick send: build and upload a report immediately, using
+        /// config defaults (screenshot per Screenshot.CaptureByDefault, no title or
+        /// comment) and WITHOUT opening the overlay. A status toast is shown if the
+        /// overlay supports one. If there is nothing useful to send (no logs) it
+        /// shows a hint instead of uploading. Never throws. Stripped in retail/console
+        /// builds (both body and call sites are removed).
+        /// </summary>
+        [Conditional("UNITY_EDITOR"), Conditional("DEVELOPMENT_BUILD"), Conditional("LOGSHARE_FORCE_ENABLED")]
+        public static void Send()
+        {
+#if FASTLOGS_ENABLED
+            if (_runtime != null) _runtime.QuickSend();
+#endif
+        }
+
+        /// <summary>
         /// Build and upload a report, returning the result. Awaitable on all Unity
         /// versions (FlogTask, coroutine-driven). Optional title and comment are
         /// attached to the report (comment is the tester's free-form problem

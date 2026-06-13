@@ -148,6 +148,47 @@ namespace PlayJoy.FastLogs
         event Action<bool, string, string> SendRequested; // (includeScreenshot, title, comment)
     }
 
+    /// <summary>Severity / intent of a transient on-screen toast.</summary>
+    public enum ToastKind
+    {
+        Info = 0,
+        Progress = 1,
+        Success = 2,
+        Error = 3
+    }
+
+    /// <summary>
+    /// Optional seam for showing a lightweight, transient status toast that is
+    /// visible even when the overlay is closed (send progress / result / errors).
+    /// An overlay implementation MAY also implement this; the runtime checks for it
+    /// at runtime, so existing <see cref="ILogShareOverlay"/> implementations that
+    /// do not implement it keep working (no toast, no cost).
+    ///
+    /// Implementations must render NOTHING (zero per-frame work / allocations) while
+    /// no toast is active, so a closed overlay with no pending toast is free.
+    /// </summary>
+    public interface IToastSink
+    {
+        /// <summary>
+        /// Show or replace the current toast.
+        /// </summary>
+        /// <param name="kind">Severity / intent (drives colour and behaviour).</param>
+        /// <param name="message">Short status line.</param>
+        /// <param name="url">Optional shareable url shown/copyable on success (may be null).</param>
+        /// <param name="autoHideSeconds">Seconds before the toast auto-hides. &lt;= 0 keeps it until replaced/dismissed (used for in-progress and retryable errors).</param>
+        /// <param name="allowRetry">When true the toast offers a Retry affordance that re-runs the last send.</param>
+        void ShowToast(ToastKind kind, string message, string url, float autoHideSeconds, bool allowRetry);
+
+        /// <summary>Hide any active toast immediately.</summary>
+        void HideToast();
+
+        /// <summary>
+        /// Raised when the user taps the toast's Retry affordance. The host re-runs
+        /// the last send that produced an error toast.
+        /// </summary>
+        event Action RetryRequested;
+    }
+
     /// <summary>
     /// Factory seam so a builder can supply the concrete implementations to the
     /// core in one place. All members may return null - the core treats a null

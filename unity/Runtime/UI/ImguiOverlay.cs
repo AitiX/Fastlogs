@@ -35,13 +35,14 @@ namespace PlayJoy.FastLogs
     /// to the send pipeline: it just renders the latest data pushed by Refresh and
     /// raises SendRequested when the user taps Send.
     /// </summary>
-    public sealed class ImguiOverlay : ILogShareOverlay
+    public sealed class ImguiOverlay : ILogShareOverlay, IToastSink
     {
         // Logical (point) sizes; multiplied by the DPI scale at draw time.
         private const float MinTouch = 44f;
         private const float BasePadding = 8f;
         private const float QrLogicalSize = 160f;
         private const float CommentLogicalHeight = 72f; // multi-line comment input height (~3 lines)
+        private const float ToastLogicalWidth = 360f;   // toast bubble width (points)
 
         private readonly IClipboard _clipboard;
         private readonly SettingsPanel _settings; // optional embedded settings tab
@@ -81,7 +82,24 @@ namespace PlayJoy.FastLogs
         // Settings tab toggle.
         private bool _showSettings;
 
+        // ---- Toast state (visible even when the overlay is closed) ----
+        // When _toastActive is false NOTHING toast-related is drawn or allocated, so
+        // a closed overlay with no pending toast is zero-cost in OnGUI.
+        private bool _toastActive;
+        private ToastKind _toastKind;
+        private string _toastMessage;
+        private string _toastUrl;
+        private bool _toastAllowRetry;
+        private float _toastHideAtUnscaled;   // Time.unscaledTime to auto-hide at; <= 0 = sticky
+        private GUIStyle _toastLabel;
+        private GUIStyle _toastButton;
+        private Texture2D _toastTexInfo;
+        private Texture2D _toastTexProgress;
+        private Texture2D _toastTexSuccess;
+        private Texture2D _toastTexError;
+
         public event Action<bool, string, string> SendRequested; // (includeScreenshot, title, comment)
+        public event Action RetryRequested;
 
         public bool IsVisible { get { return _visible; } }
 
@@ -133,6 +151,126 @@ namespace PlayJoy.FastLogs
             _lastResult = lastResult;
         }
 
+        // ---- IToastSink (transient status, independent of overlay open/closed) ----
+
+        public void ShowToast(ToastKind kind, string message, string url, float autoHideSeconds, bool allowRetry)
+        {
+            _toastKind = kind;
+            _toastMessage = message ?? string.Empty;
+            _toastUrl = url;
+            _toastAllowRetry = allowRetry;
+            _toastActive = true;
+            // Snapshot the auto-hide deadline on the main thread; the runtime always
+            // calls this from the main thread (coroutine continuation / Update).
+            if (autoHideSeconds > 0f)
+            {
+                float now = 0f;
+                try { now = Time.unscaledTime; } catch { /* pre-init */ }
+                _toastHideAtUnscaled = now + autoHideSeconds;
+            }
+            else
+            {
+                _toastHideAtUnscaled = 0f; // sticky until replaced/dismissed
+            }
+        }
+
+        public void HideToast()
+        {
+            _toastActive = false;
+            _toastMessage = null;
+            _toastUrl = null;
+        }
+
+        // ---- Toast rendering (only reached while a toast is active) ----
+
+        private void DrawToast()
+        {
+            // Auto-expire sticky-with-deadline toasts.
+            if (_toastHideAtUnscaled > 0f)
+            {
+                float now;
+                try { now = Time.unscaledTime; } catch { now = _toastHideAtUnscaled; }
+                if (now >= _toastHideAtUnscaled)
+                {
+                    HideToast();
+                    return;
+                }
+            }
+
+            EnsureToastStyles();
+
+            float scale = DpiScale();
+            Rect safe = SafeAreaPixels();
+            float pad = BasePadding * scale;
+
+            float width = Mathf.Min(safe.width - pad * 2f, ToastLogicalWidth * scale);
+            float lineH = Mathf.Max(MinTouch * scale, 28f * scale);
+
+            // Height: message line, optional url line, optional action row.
+            bool hasUrl = !string.IsNullOrEmpty(_toastUrl);
+            bool hasActions = hasUrl || _toastAllowRetry;
+            float height = pad * 2f + lineH;            // message
+            if (hasUrl) height += lineH;                // url line
+            if (hasActions) height += lineH + pad;      // action row
+
+            // Anchored bottom-centre within the safe area.
+            float x = safe.xMin + (safe.width - width) * 0.5f;
+            float y = safe.yMax - height - pad;
+
+            var bubble = new Rect(x, y, width, height);
+            GUI.DrawTexture(bubble, ToastTexFor(_toastKind), ScaleMode.StretchToFill);
+
+            GUILayout.BeginArea(new Rect(bubble.x + pad, bubble.y + pad, bubble.width - pad * 2f, bubble.height - pad * 2f));
+
+            GUILayout.Label(_toastMessage ?? string.Empty, _toastLabel, GUILayout.Height(lineH));
+
+            if (hasUrl)
+            {
+                // Selectable so the link can be copied manually as a fallback.
+                GUILayout.TextField(_toastUrl, _toastLabel, GUILayout.Height(lineH));
+            }
+
+            if (hasActions)
+            {
+                GUILayout.BeginHorizontal();
+                if (hasUrl)
+                {
+                    if (GUILayout.Button("Copy", _toastButton, GUILayout.Height(lineH)))
+                    {
+                        CopyUrl(_toastUrl);
+                    }
+                    if (GUILayout.Button("Open", _toastButton, GUILayout.Height(lineH)))
+                    {
+                        OpenUrl(_toastUrl);
+                    }
+                }
+                if (_toastAllowRetry)
+                {
+                    if (GUILayout.Button("Retry", _toastButton, GUILayout.Height(lineH)))
+                    {
+                        RaiseRetry();
+                    }
+                }
+                if (GUILayout.Button("X", _toastButton, GUILayout.Width(lineH), GUILayout.Height(lineH)))
+                {
+                    HideToast();
+                }
+                GUILayout.EndHorizontal();
+            }
+
+            GUILayout.EndArea();
+        }
+
+        private void RaiseRetry()
+        {
+            var handler = RetryRequested;
+            if (handler != null)
+            {
+                try { handler(); }
+                catch (Exception e) { FlogLog.Exception(e); }
+            }
+        }
+
         // ---- Rendering (called by a host GUI pump) ----
 
         /// <summary>
@@ -142,8 +280,15 @@ namespace PlayJoy.FastLogs
         /// </summary>
         public void OnGUI()
         {
+            // Toast is independent of the overlay's open/closed state. When the
+            // overlay is closed AND no toast is active, this returns immediately:
+            // no styles built, no textures, no layout, no allocations.
             if (!_visible)
             {
+                if (_toastActive)
+                {
+                    DrawToast();
+                }
                 return;
             }
 
@@ -207,6 +352,12 @@ namespace PlayJoy.FastLogs
             }
 
             GUILayout.EndArea();
+
+            // Toast draws on top of the open overlay too (e.g. send progress).
+            if (_toastActive)
+            {
+                DrawToast();
+            }
         }
 
         private void DrawHeaderRow(float scale, float lineH)
@@ -498,6 +649,42 @@ namespace PlayJoy.FastLogs
             return t;
         }
 
+        // Toast styles/textures are built lazily and separately from the overlay's,
+        // so a closed overlay showing only a toast does not build the full overlay UI.
+        private bool _toastStylesBuilt;
+
+        private void EnsureToastStyles()
+        {
+            if (_toastStylesBuilt)
+            {
+                return;
+            }
+            _toastStylesBuilt = true;
+
+            int fontSize = Mathf.RoundToInt(14f * DpiScale());
+
+            _toastLabel = new GUIStyle(GUI.skin.label) { fontSize = fontSize, wordWrap = true };
+            _toastLabel.normal.textColor = Color.white;
+
+            _toastButton = new GUIStyle(GUI.skin.button) { fontSize = fontSize };
+
+            _toastTexInfo = SolidTexture(new Color(0.10f, 0.12f, 0.15f, 0.94f));
+            _toastTexProgress = SolidTexture(new Color(0.12f, 0.18f, 0.28f, 0.94f));
+            _toastTexSuccess = SolidTexture(new Color(0.10f, 0.26f, 0.14f, 0.94f));
+            _toastTexError = SolidTexture(new Color(0.30f, 0.10f, 0.10f, 0.94f));
+        }
+
+        private Texture2D ToastTexFor(ToastKind kind)
+        {
+            switch (kind)
+            {
+                case ToastKind.Progress: return _toastTexProgress;
+                case ToastKind.Success: return _toastTexSuccess;
+                case ToastKind.Error: return _toastTexError;
+                default: return _toastTexInfo;
+            }
+        }
+
         // ---- Dispose ----
 
         public void Dispose()
@@ -510,7 +697,12 @@ namespace PlayJoy.FastLogs
             DestroyQr();
             DestroySolid(ref _panelTex);
             DestroySolid(ref _accentTex);
+            DestroySolid(ref _toastTexInfo);
+            DestroySolid(ref _toastTexProgress);
+            DestroySolid(ref _toastTexSuccess);
+            DestroySolid(ref _toastTexError);
             SendRequested = null;
+            RetryRequested = null;
         }
 
         private static void DestroySolid(ref Texture2D tex)

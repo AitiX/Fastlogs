@@ -25,6 +25,9 @@ namespace PlayJoy.FastLogs
         [Header("Recording")]
         [SerializeField] private RecordingSection _recording = new RecordingSection();
 
+        [Header("Auto-send")]
+        [SerializeField] private AutoSendSection _autoSend = new AutoSendSection();
+
         [Header("Screenshot")]
         [SerializeField] private ScreenshotSection _screenshot = new ScreenshotSection();
 
@@ -47,6 +50,7 @@ namespace PlayJoy.FastLogs
         public ServerSection Server => _server;
         public CaptureSection Capture => _capture;
         public RecordingSection Recording => _recording;
+        public AutoSendSection AutoSend => _autoSend;
         public ScreenshotSection Screenshot => _screenshot;
         public DiagnosticsSection Diagnostics => _diagnostics;
         public TriggerConfig Trigger => _trigger;
@@ -116,6 +120,24 @@ namespace PlayJoy.FastLogs
             [Tooltip("Max bytes kept in the persistent store. 0 = unlimited.")]
             [Min(0)]
             public int MaxStoreBytes = 2 * 1024 * 1024; // 2 MB
+        }
+
+        [Serializable]
+        public sealed class AutoSendSection
+        {
+            [Tooltip("Automatically build and send a report when an unhandled exception is captured. On by default in dev/editor (the package itself is stripped in retail/console).")]
+            public bool AutoSendOnException = true;
+
+            [Tooltip("Minimum seconds between two automatic sends. Repeated/looping exceptions within this window are throttled (not resent).")]
+            [Min(0f)]
+            public float MinSecondsBetweenAutoSends = 30f;
+
+            [Tooltip("Maximum number of automatic sends allowed per play session. 0 = unlimited.")]
+            [Min(0)]
+            public int MaxAutoSendsPerSession = 10;
+
+            [Tooltip("Capture a screenshot with auto-sent crash reports. Off by default (a crashed frame is rarely useful and capture costs a frame).")]
+            public bool IncludeScreenshot = false;
         }
 
         [Serializable]

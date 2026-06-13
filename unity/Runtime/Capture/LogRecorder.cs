@@ -53,6 +53,17 @@ namespace PlayJoy.FastLogs
         private bool _sessionMarkerWritten;
         private bool _disposed;
 
+        // Reused per-append so formatting one entry to disk does not allocate a fresh
+        // StringBuilder on every log line (hot path while recording).
+        private readonly StringBuilder _appendSb = new StringBuilder(256);
+
+        // Batched flush: writes go to the StreamWriter's buffer (AutoFlush = false, so
+        // no fsync per line); we flush to the OS on a time interval, on send (ReadAll),
+        // and on Stop/Dispose. This bounds crash data loss without per-line IO cost.
+        private double _lastFlushRealtime;
+        private bool _dirtySinceFlush;
+        private const double FlushIntervalSeconds = 2.0;
+
         // Approximate current store size in bytes (UTF-8), kept incrementally so we
         // can decide when to compact without statting the file each append.
         private long _storeBytes;
@@ -190,15 +201,36 @@ namespace PlayJoy.FastLogs
 
             try
             {
-                var sb = new StringBuilder(64);
-                LogFormat.AppendEntry(sb, entry, repeatCount);
-                WriteRaw(sb.ToString());
+                _appendSb.Length = 0;
+                LogFormat.AppendEntry(_appendSb, entry, repeatCount);
+                WriteRaw(_appendSb.ToString());
                 EnforceCap();
             }
             catch (Exception e)
             {
                 FlogLog.Exception(e);
             }
+        }
+
+        /// <summary>
+        /// Flush buffered writes to the OS if the batch interval has elapsed. Called
+        /// each frame by the owning source; cheap and allocation-free when nothing is
+        /// pending or the interval has not elapsed. This is the time-based batching
+        /// that keeps us off a per-line fsync while bounding crash data loss.
+        /// </summary>
+        public void PumpFlush(double nowRealtime)
+        {
+            if (!_recording || !_dirtySinceFlush || _writer == null)
+            {
+                return;
+            }
+            if (nowRealtime - _lastFlushRealtime < FlushIntervalSeconds)
+            {
+                return;
+            }
+            Flush();
+            _lastFlushRealtime = nowRealtime;
+            _dirtySinceFlush = false;
         }
 
         // ---- read-out for upload ----
@@ -263,12 +295,14 @@ namespace PlayJoy.FastLogs
             }
             _writer.Write(text);
             _storeBytes += Encoding.UTF8.GetByteCount(text);
+            _dirtySinceFlush = true;
         }
 
         private void Flush()
         {
             try { _writer?.Flush(); }
             catch (Exception e) { FlogLog.Exception(e); }
+            _dirtySinceFlush = false;
         }
 
         private void CloseWriter()

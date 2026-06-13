@@ -255,7 +255,8 @@ namespace PlayJoy.FastLogs
             _ = added;
         }
 
-        // Drain off-thread Unity entries / poll SRDebugger each frame.
+        // Drain off-thread Unity entries / poll SRDebugger each frame, then run the
+        // recorder's time-based batched flush (no per-line fsync).
         private void PumpOnce()
         {
             if (_disposed)
@@ -269,6 +270,13 @@ namespace PlayJoy.FastLogs
             else
             {
                 _unityHook.Pump();
+            }
+
+            if (_recorder != null && _recorder.IsRecording)
+            {
+                double now = 0;
+                try { now = Time.realtimeSinceStartupAsDouble; } catch { }
+                _recorder.PumpFlush(now);
             }
         }
 

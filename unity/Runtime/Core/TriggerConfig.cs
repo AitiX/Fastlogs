@@ -24,6 +24,20 @@ namespace PlayJoy.FastLogs
         [Tooltip("Require this modifier alongside ToggleKey (None = no modifier).")]
         public TriggerModifier Modifier = TriggerModifier.None;
 
+        [Header("Quick-send (no overlay)")]
+        [Tooltip("Enable a keyboard shortcut that sends the current recording immediately, WITHOUT opening the overlay. Off by default; distinct from the overlay shortcut.")]
+        public bool EnableQuickSendKeyboard = false;
+
+        [Tooltip("Key for the quick-send shortcut. Pick one different from ToggleKey.")]
+        public KeyCode QuickSendKey = KeyCode.F9;
+
+        [Tooltip("Require this modifier alongside QuickSendKey (None = no modifier).")]
+        public TriggerModifier QuickSendModifier = TriggerModifier.None;
+
+        [Tooltip("On mobile, quick-send when this many fingers touch a corner that many times. 0 = disabled. Distinct from the overlay corner gesture.")]
+        [Range(0, 5)]
+        public int QuickSendCornerTaps = 0;
+
         [Header("Touch (Mobile)")]
         [Tooltip("Open the overlay when this many fingers touch the screen at once. 0 = disabled.")]
         [Range(0, 5)]

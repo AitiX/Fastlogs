@@ -58,6 +58,9 @@ namespace PlayJoy.FastLogs
         private const string KeyRingCapacity = Prefix + "ringCapacity";
         private const string KeyTesterName = Prefix + "testerName";
         private const string KeyCopyLinkOnSend = Prefix + "copyLinkOnSend";
+        private const string KeyAutoSendOnException = Prefix + "autoSendOnException";
+        private const string KeyQuickSendKeyboard = Prefix + "quickSendKeyboard";
+        private const string KeyQuickSendKey = Prefix + "quickSendKey";
 
         private readonly FastLogsConfig _config;
 
@@ -69,6 +72,9 @@ namespace PlayJoy.FastLogs
         private string _ringCapacityText = "1000";
         private string _testerName = string.Empty;
         private bool _copyLinkOnSend = true;
+        private bool _autoSendOnException = true;
+        private bool _quickSendKeyboard;
+        private KeyCode _quickSendKey = KeyCode.F9;
 
         // Built lazily inside OnGUILayout.
         private bool _stylesBuilt;
@@ -97,6 +103,9 @@ namespace PlayJoy.FastLogs
                 _ringCapacityText = _config.Capture.RingCapacity.ToString();
                 _testerName = _config.UI.TesterName ?? string.Empty;
                 _copyLinkOnSend = _config.UI.CopyLinkOnSend;
+                _autoSendOnException = _config.AutoSend.AutoSendOnException;
+                _quickSendKeyboard = _config.Trigger.EnableQuickSendKeyboard;
+                _quickSendKey = _config.Trigger.QuickSendKey;
             }
 
             _appId = PlayerPrefs.GetString(KeyAppId, _appId);
@@ -107,6 +116,9 @@ namespace PlayJoy.FastLogs
             _ringCapacityText = PlayerPrefs.GetInt(KeyRingCapacity, ParseIntOr(_ringCapacityText, 1000)).ToString();
             _testerName = PlayerPrefs.GetString(KeyTesterName, _testerName);
             _copyLinkOnSend = PlayerPrefs.GetInt(KeyCopyLinkOnSend, _copyLinkOnSend ? 1 : 0) != 0;
+            _autoSendOnException = PlayerPrefs.GetInt(KeyAutoSendOnException, _autoSendOnException ? 1 : 0) != 0;
+            _quickSendKeyboard = PlayerPrefs.GetInt(KeyQuickSendKeyboard, _quickSendKeyboard ? 1 : 0) != 0;
+            _quickSendKey = (KeyCode)PlayerPrefs.GetInt(KeyQuickSendKey, (int)_quickSendKey);
 
             ApplyToConfig();
         }
@@ -127,6 +139,9 @@ namespace PlayJoy.FastLogs
             _config.Capture.RingCapacity = Mathf.Max(1, ParseIntOr(_ringCapacityText, 1000));
             _config.UI.TesterName = _testerName ?? string.Empty;
             _config.UI.CopyLinkOnSend = _copyLinkOnSend;
+            _config.AutoSend.AutoSendOnException = _autoSendOnException;
+            _config.Trigger.EnableQuickSendKeyboard = _quickSendKeyboard;
+            _config.Trigger.QuickSendKey = _quickSendKey;
             ApplyTriggerKind(_triggerKind, _config.Trigger);
         }
 
@@ -140,6 +155,9 @@ namespace PlayJoy.FastLogs
             PlayerPrefs.SetInt(KeyRingCapacity, Mathf.Max(1, ParseIntOr(_ringCapacityText, 1000)));
             PlayerPrefs.SetString(KeyTesterName, _testerName ?? string.Empty);
             PlayerPrefs.SetInt(KeyCopyLinkOnSend, _copyLinkOnSend ? 1 : 0);
+            PlayerPrefs.SetInt(KeyAutoSendOnException, _autoSendOnException ? 1 : 0);
+            PlayerPrefs.SetInt(KeyQuickSendKeyboard, _quickSendKeyboard ? 1 : 0);
+            PlayerPrefs.SetInt(KeyQuickSendKey, (int)_quickSendKey);
             PlayerPrefs.Save();
         }
 
@@ -173,9 +191,10 @@ namespace PlayJoy.FastLogs
         /// <summary>Rough pixel height the panel needs (so the overlay can size itself).</summary>
         public float EstimateHeight(float scale)
         {
-            // ~14 rows of controls at ~30pt each, plus section labels (added the
-            // Tester Name label+field and the Copy-link-on-send toggle).
-            return 450f * scale;
+            // ~17 rows of controls at ~30pt each, plus section labels. Added the
+            // auto-send toggle, quick-send toggle and (conditional) key picker row.
+            float rows = _quickSendKeyboard ? 560f : 525f;
+            return rows * scale;
         }
 
         // ---- Rendering ----
@@ -224,6 +243,24 @@ namespace PlayJoy.FastLogs
 
             bool newCopyOnSend = GUILayout.Toggle(_copyLinkOnSend, " Copy link on send", GUILayout.Height(lineH));
             if (newCopyOnSend != _copyLinkOnSend) { _copyLinkOnSend = newCopyOnSend; changed = true; }
+
+            bool newAutoSend = GUILayout.Toggle(_autoSendOnException, " Auto-send on unhandled exception", GUILayout.Height(lineH));
+            if (newAutoSend != _autoSendOnException) { _autoSendOnException = newAutoSend; changed = true; }
+
+            // Quick-send (send without opening the overlay). Note: changing this takes
+            // effect on the next FastLogs.Init; the live trigger is configured once.
+            bool newQuickKb = GUILayout.Toggle(_quickSendKeyboard, " Quick-send keyboard shortcut", GUILayout.Height(lineH));
+            if (newQuickKb != _quickSendKeyboard) { _quickSendKeyboard = newQuickKb; changed = true; }
+
+            if (_quickSendKeyboard)
+            {
+                GUILayout.BeginHorizontal();
+                GUILayout.Label("Quick-send key:", _label, GUILayout.Height(lineH));
+                if (QuickSendKeyButton(KeyCode.F9, lineH)) { _quickSendKey = KeyCode.F9; changed = true; }
+                if (QuickSendKeyButton(KeyCode.F10, lineH)) { _quickSendKey = KeyCode.F10; changed = true; }
+                if (QuickSendKeyButton(KeyCode.F11, lineH)) { _quickSendKey = KeyCode.F11; changed = true; }
+                GUILayout.EndHorizontal();
+            }
 
             // Trigger selection.
             GUILayout.Label("Open overlay with:", _label);
@@ -282,6 +319,19 @@ namespace PlayJoy.FastLogs
                 GUI.backgroundColor = new Color(0.20f, 0.45f, 0.85f, 1f);
             }
             bool clicked = GUILayout.Button(label, _button, GUILayout.Height(lineH));
+            GUI.backgroundColor = prev;
+            return clicked && !selected;
+        }
+
+        private bool QuickSendKeyButton(KeyCode key, float lineH)
+        {
+            bool selected = _quickSendKey == key;
+            var prev = GUI.backgroundColor;
+            if (selected)
+            {
+                GUI.backgroundColor = new Color(0.20f, 0.45f, 0.85f, 1f);
+            }
+            bool clicked = GUILayout.Button(key.ToString(), _button, GUILayout.Height(lineH));
             GUI.backgroundColor = prev;
             return clicked && !selected;
         }

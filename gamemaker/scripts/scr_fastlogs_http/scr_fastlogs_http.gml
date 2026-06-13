@@ -62,6 +62,8 @@ function fastlogs_send(opts = undefined) {
     // endpoint обязателен.
     if (!is_string(FASTLOGS_ENDPOINT) || string_length(FASTLOGS_ENDPOINT) == 0) {
         show_debug_message("[FastLogs] send skipped: FASTLOGS_ENDPOINT is empty");
+        // Статус-подсказка игроку (фича QUICK-SEND/STATUS): не падаем, объясняем причину.
+        fastlogs_send_status("error", "Ошибка: не задан endpoint", false);
         return false;
     }
 
@@ -70,10 +72,20 @@ function fastlogs_send(opts = undefined) {
     // Запрет параллельной отправки (одна за раз).
     if (hs.is_sending) {
         show_debug_message("[FastLogs] send skipped: already sending");
+        fastlogs_send_status("info", "Отправка уже идёт...", false);
         return false;
     }
 
     if (!is_struct(opts)) { opts = {}; }
+
+    // ПЕРФ (D): перед сбором payload сбросить батч записи на диск, чтобы файл/logText были
+    //   согласованы (logText берётся из rec_text, но файл на диске тоже держим актуальным).
+    if (script_exists(asset_get_index("fastlogs_recorder_flush"))) {
+        try { fastlogs_recorder_flush(); } catch (_ef) { /* best-effort */ }
+    }
+
+    // STATUS (B): подняли "Отправка..." сразу - виден поверх игры даже без оверлея.
+    fastlogs_send_status("sending", "Отправка...", false);
 
     // Нужен ли скриншот в этой отправке?
     //   приоритет: opts.screenshot (явный override) -> текущий тоггл состояния -> дефолт макроса.
@@ -105,6 +117,41 @@ function fastlogs_send(opts = undefined) {
 }
 
 // =====================================================================================
+// fastlogs_quick_send([opts]) -> bool  (фича QUICK-SEND, A)
+// Быстрая отправка ТЕКУЩЕЙ записи БЕЗ открытия оверлея (fire-and-forget): вызывается из
+//   хоткея/жеста быстрой отправки или напрямую из кода интегратора. Тонкая обёртка над
+//   fastlogs_send: добавляет дружелюбный статус-тост и НЕ требует UI.
+// Поведение по краю (контракт A): если нет ни одной записи лога - не отправляем пустоту,
+//   показываем статус-подсказку и не падаем. Запись (recording) для отправки НЕ обязательна:
+//   logText берётся из кольца в памяти даже когда персист-запись выключена.
+// Возврат: true если отправка/захват поставлены; false если no-op (пусто/нет endpoint/занято).
+// =====================================================================================
+function fastlogs_quick_send(opts = undefined) {
+    if (!FASTLOGS_ENABLED) { return false; }
+    if (!is_struct(opts)) { opts = {}; }
+
+    // Нет логов вообще -> нечего слать. Подсказка вместо пустого отчёта (не падаем).
+    var have_logs = false;
+    if (script_exists(asset_get_index("fastlogs_get_counts"))) {
+        var c = fastlogs_get_counts();
+        if (is_struct(c)) {
+            var e = variable_struct_exists(c, "error") ? c.error : 0;
+            var w = variable_struct_exists(c, "warn")  ? c.warn  : 0;
+            var l = variable_struct_exists(c, "log")   ? c.log   : 0;
+            have_logs = (e + w + l) > 0;
+        }
+    }
+    if (!have_logs) {
+        fastlogs_send_status("info", "Нет логов для отправки", false);
+        return false;
+    }
+
+    // Тег быстрой отправки в title (если интегратор не задал свой) - помогает различать в каталоге.
+    if (!variable_struct_exists(opts, "title")) { opts.title = "Quick send"; }
+    return fastlogs_send(opts);
+}
+
+// =====================================================================================
 // Внутреннее: собрать тело (с уже готовым скриншотом, если был) и поставить POST.
 //   opts == undefined -> взять сохранённые st.__http_pending_opts (путь после захвата).
 //   true если http_request вызван.
@@ -124,6 +171,8 @@ function fastlogs_http_dispatch(opts) {
         show_debug_message("[FastLogs] send aborted: empty payload");
         hs.is_sending = false;
         hs.state      = "error";
+        // STATUS (B): снять «висящий» тост "Отправка..." -> ошибка (без повтора: тело пустое).
+        fastlogs_send_status("error", "Ошибка: пустой отчёт", false);
         return false;
     }
 
@@ -160,6 +209,8 @@ function fastlogs_http_post_internal(body) {
         show_debug_message("[FastLogs] http_request returned non-real id");
         hs.is_sending = false;
         hs.state      = "error";
+        // STATUS (B): снять «висящий» тост "Отправка..." -> ошибка с возможностью повтора.
+        fastlogs_send_status("error", "Ошибка: запрос не создан", true);
         return false;
     }
 
@@ -218,4 +269,16 @@ function fastlogs_last_url() {
 // =====================================================================================
 function fastlogs_http_get_state() {
     return __fastlogs_http_state();
+}
+
+// =====================================================================================
+// Внутреннее: безопасно поднять статус-тост (фича STATUS, B), не делая http зависимым от
+//   overlay-модуля жёстко. Если overlay не подключён - просто no-op. kind: info/sending/ok/error.
+// =====================================================================================
+function fastlogs_send_status(kind, text, retry, url = "") {
+    if (!FASTLOGS_ENABLED) { return; }
+    if (!script_exists(asset_get_index("fastlogs_status_toast"))) { return; }
+    var opt = { retry: bool(retry) };
+    if (is_string(url) && string_length(url) > 0) { opt.url = url; }
+    fastlogs_status_toast(kind, text, opt);
 }
