@@ -210,6 +210,30 @@ function sanitizeBreadcrumbs(raw) {
   return out.length ? out : null;
 }
 
+// Find a value in an object by a case/separator-insensitive key match (so the
+// device JSON casing - EngineVersion / engineVersion / engine_version - does
+// not matter).
+function findKeyCI(obj, name) {
+  if (!obj || typeof obj !== 'object') return undefined;
+  const target = name.toLowerCase().replace(/[^a-z0-9]/g, '');
+  for (const k of Object.keys(obj)) {
+    if (k.toLowerCase().replace(/[^a-z0-9]/g, '') === target) return obj[k];
+  }
+  return undefined;
+}
+
+// Derive the engine name from device.application: an explicit `engine` field
+// when the client sends one (e.g. GameMaker), else "Unity" when a Unity engine
+// version is present. '' when unknown (kept out of the engine catalog views).
+function deriveEngine(device) {
+  const app = device && device.application;
+  const explicit = findKeyCI(app, 'engine');
+  if (typeof explicit === 'string' && explicit.trim()) return explicit.trim().slice(0, 32);
+  const ver = findKeyCI(app, 'engineVersion');
+  if (ver != null && String(ver).trim()) return 'Unity';
+  return '';
+}
+
 // Rate-limit keys and limits (windows 60s = 1 minute, configurable here).
 const RL_WINDOW_SEC = 60;
 const RL_IP_LIMIT = 60;   // per ip per minute
@@ -381,6 +405,8 @@ async function handleIngest(req, res) {
     // Crash signature for grouping. '' (not null) marks "computed, not a crash"
     // so the lazy backfill never re-scans this log.
     crash_sig: crashsig.computeSignature(logTextDecoded, { topK: config.crashSigTopK }) || '',
+    // Engine name (Unity / GameMaker / ...) derived from device.application.
+    engine: deriveEngine(device),
     ts_utc: timestampUtc,
     cnt_error: counts.error,
     cnt_warn: counts.warn,

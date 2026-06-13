@@ -79,7 +79,7 @@ function migrate() {
   // ADD COLUMN is the safe, idempotent way to evolve the schema; guarding with
   // table_info keeps a re-run a no-op.
   const logCols = db.prepare('PRAGMA table_info(logs)').all();
-  for (const col of ['comment', 'tester', 'context_json', 'breadcrumbs_json', 'crash_sig', 'tags', 'redmine_issue_id', 'redmine_issue_url']) {
+  for (const col of ['comment', 'tester', 'context_json', 'breadcrumbs_json', 'crash_sig', 'tags', 'redmine_issue_id', 'redmine_issue_url', 'engine']) {
     if (!logCols.some((c) => c.name === col)) {
       db.exec(`ALTER TABLE logs ADD COLUMN ${col} TEXT`);
     }
@@ -109,12 +109,12 @@ const stmts = {
   insertLog: db.prepare(`
     INSERT INTO logs (
       id, app_id, platform, app_version, device_json, title, comment, tester,
-      context_json, breadcrumbs_json, crash_sig, ts_utc,
+      context_json, breadcrumbs_json, crash_sig, engine, ts_utc,
       cnt_error, cnt_warn, cnt_log, log_bytes, has_shot, created_at,
       expires_at, pinned, ip_hash
     ) VALUES (
       @id, @app_id, @platform, @app_version, @device_json, @title, @comment, @tester,
-      @context_json, @breadcrumbs_json, @crash_sig, @ts_utc,
+      @context_json, @breadcrumbs_json, @crash_sig, @engine, @ts_utc,
       @cnt_error, @cnt_warn, @cnt_log, @log_bytes, @has_shot, @created_at,
       @expires_at, @pinned, @ip_hash
     )
@@ -197,11 +197,20 @@ const stmts = {
 
   listLogs: db.prepare(`
     SELECT id, title, ts_utc, platform, cnt_error, cnt_warn, cnt_log,
-           log_bytes, has_shot, pinned, status, tags, crash_sig,
+           log_bytes, has_shot, pinned, status, tags, crash_sig, engine,
            created_at, expires_at
     FROM logs
     WHERE app_id = @app_id AND app_version = @version
     ORDER BY created_at DESC
+  `),
+
+  // Engine (Unity / GameMaker / ...) of the MOST RECENT log per app. SQLite
+  // takes the bare `engine` from the row holding MAX(created_at).
+  enginesByApp: db.prepare(`
+    SELECT app_id, engine, MAX(created_at) AS last_at
+    FROM logs
+    WHERE engine IS NOT NULL AND engine != ''
+    GROUP BY app_id
   `),
 
   setStatus: db.prepare(`UPDATE logs SET status = @status WHERE id = @id`),
@@ -324,6 +333,11 @@ function statsByApp() {
   return stmts.statsByApp.all();
 }
 
+// Engine name of the latest log per app (array of { app_id, engine, last_at }).
+function enginesByApp() {
+  return stmts.enginesByApp.all();
+}
+
 // Storage rollup for one app ({ logCount, totalBytes, pinnedCount }).
 function statsForApp(appId) {
   return stmts.statsForApp.get({ app_id: appId });
@@ -383,6 +397,7 @@ module.exports = {
   upsertApp,
   listVersions,
   statsByApp,
+  enginesByApp,
   statsForApp,
   largestLogs,
   listLogs,

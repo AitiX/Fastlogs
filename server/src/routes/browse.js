@@ -81,8 +81,10 @@ function browseRoot(req, res, params, query) {
     return sendError(res, 401, 'unauthorized', 'Viewer token required');
   }
   if (wantsHtml(req, query)) return serveBrowseHtml(res);
-  // Attach per-project storage totals (size, log count, pinned count).
+  // Attach per-project storage totals (size, log count, pinned count) and the
+  // engine of each project's most recent log.
   const statsById = new Map(db.statsByApp().map((s) => [s.app_id, s]));
+  const engineById = new Map(db.enginesByApp().map((e) => [e.app_id, e.engine]));
   const totals = { totalBytes: 0, logCount: 0, pinnedCount: 0 };
   const apps = db.listApps().map((a) => {
     const s = statsById.get(a.app_id) || { totalBytes: 0, logCount: 0, pinnedCount: 0 };
@@ -93,6 +95,7 @@ function browseRoot(req, res, params, query) {
       appId: a.app_id,
       name: a.name,
       enabled: a.enabled === 1,
+      engine: engineById.get(a.app_id) || null,
       totalBytes: s.totalBytes,
       logCount: s.logCount,
       pinnedCount: s.pinnedCount,
@@ -155,6 +158,7 @@ function browseVersion(req, res, params, query) {
     pinned: r.pinned === 1,
     status: r.status || 'new',
     tags: parseJsonColumn(r.tags, true, []),
+    engine: r.engine || null,
     expiresAt: r.expires_at || null,
   }));
   sendJson(res, 200, {

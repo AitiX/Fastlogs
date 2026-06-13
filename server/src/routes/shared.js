@@ -125,6 +125,8 @@ function publicLogObject(row) {
     // tags (empty [] when none).
     status: row.status || 'new',
     tags: parseJsonColumn(row.tags, true, []),
+    // Engine name (Unity / GameMaker / ...) of this log, or null when unknown.
+    engine: row.engine || null,
     // Redmine: whether the integration is configured (so the viewer can show
     // the button) and the linked issue, if any.
     redmineEnabled: config.redmine.enabled,
