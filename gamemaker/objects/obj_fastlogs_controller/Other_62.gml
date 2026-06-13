@@ -40,6 +40,18 @@ if (ok && !net_error) {
         fastlogs_retry_cancel();
     }
 
+    // ПЕРСИСТ КРАШ-ОТЧЁТА (фича #1): если этот успешный отчёт пришёл из дисковой очереди
+    //   pending - удалить его файл (доставлен). Путь привязан к запросу в hs.pending_file.
+    //   Запоминаем путь только что доставленного файла, чтобы дренаж-цепочка ниже не
+    //   попыталась переслать его повторно (и чтобы знать, что это была pending/дренаж-отправка).
+    var just_sent_file = is_string(hs.pending_file) ? hs.pending_file : "";
+    if (string_length(just_sent_file) > 0) {
+        if (script_exists(asset_get_index("fastlogs_pending_delete"))) {
+            fastlogs_pending_delete(just_sent_file);
+        }
+        hs.pending_file = "";
+    }
+
     // Тело ответа: { "id", "url", "rawUrl", "expiresAt" }.
     var url = "";
     var log_id = "";
@@ -91,13 +103,73 @@ if (ok && !net_error) {
             fastlogs_status_toast("ok", "Готово");
         }
     }
+
+    // ДРЕНАЖ OUTBOX "ПРИ ПЕРВОЙ ВОЗМОЖНОСТИ" (фича #1): отправка успешно завершилась и клиент
+    //   теперь простаивает (is_sending уже сброшен выше). Если в outbox остались файлы (краши,
+    //   захваченные во время занятости/троттла/сверх капа доставки) - дошлём СЛЕДУЮЩИЙ по одному,
+    //   мягко. Это и есть цепочка: каждый успех тянет следующий файл, пока очередь не опустеет
+    //   (раньше resend_all упирался в single-flight и слал лишь один за сессию). Не дублируем
+    //   только что отправленный (передаём just_sent_file в exclude).
+    //
+    //   FIX-1 (idle-дренаж не должен глохнуть): PER_START-лимит (FASTLOGS_PENDING_RESEND_PER_START)
+    //   применяем ТОЛЬКО к СТАРТ-цепочке (init_chain_active, запущенной fastlogs_pending_resend_all
+    //   при init) - чтобы старт не молотил весь outbox за раз. ЖИВОЙ idle-дренаж (после обычной
+    //   отправки/немедленного краша или ПОСЛЕ завершения старт-цепочки) этим лимитом НЕ гейтится:
+    //   тянем следующий pending, пока outbox непуст. Раньше единый session-cumulative drain_count
+    //   против PER_START(=5) НИКОГДА не сбрасывался и общий со стартом -> после 5 досылок за сессию
+    //   idle-цепочка вставала до перезапуска (ослабляло «при первой возможности»). Объём всё равно
+    //   ограничен FASTLOGS_PENDING_MAX/enforce_cap, поэтому idle-цепочка не может молотить бесконечно.
+    var retry_pending = script_exists(asset_get_index("fastlogs_retry_is_pending"))
+                      && fastlogs_retry_is_pending();
+    if (!retry_pending) {   // не вмешиваемся, если запланирован отложенный повтор
+        if (script_exists(asset_get_index("fastlogs_pending_drain_next"))) {
+            if (hs.init_chain_active) {
+                // СТАРТ-цепочка: соблюдаем PER_START. 0/отриц. -> без предела (тогда старт = idle).
+                var per = FASTLOGS_PENDING_RESEND_PER_START;
+                var unlimited = (!is_real(per) || per <= 0);
+                if (unlimited || hs.init_drain_count < per) {
+                    if (fastlogs_pending_drain_next(just_sent_file)) {
+                        hs.init_drain_count += 1;   // ещё один файл старт-бэкстопа
+                    } else {
+                        // Outbox пуст или слой занят -> старт-цепочка завершена. Снимаем флаг,
+                        //   дальнейшие успехи пойдут как живой idle-дренаж (без PER_START).
+                        hs.init_chain_active = false;
+                    }
+                } else {
+                    // PER_START исчерпан за этот старт -> завершаем СТАРТ-цепочку (бэкстоп). Остаток
+                    //   outbox доедет живым idle-дренажём (он не гейтится) или на следующем старте.
+                    hs.init_chain_active = false;
+                }
+            } else {
+                // ЖИВОЙ idle-дренаж: тянем следующий pending БЕЗ лимита, пока outbox непуст.
+                //   single-flight внутри fastlogs_pending_send: если занято - вернёт false (подхватим позже).
+                fastlogs_pending_drain_next(just_sent_file);
+            }
+        }
+    }
 } else {
     // Ошибка: 4xx/5xx или сетевой обрыв.
     show_debug_message("[FastLogs] ingest FAILED status=" + string(status) + " http_status=" + string(http_status) + " result=" + string(result));
 
     // Ретраим только сетевые ошибки и 5xx (4xx - проблема в теле, ретрай не поможет
     //   ни немедленно, ни отложенно -> такие сразу терминальный тост-ошибка).
-    var retryable = net_error || (is_real(http_status) && http_status >= 500);
+    //   Транзиентным считаем: сеть/обрыв (net_error||status<=0) ИЛИ http_status>=500.
+    var retryable = net_error || (is_real(http_status) && http_status >= 500) || (is_real(status) && status <= 0);
+
+    // POISON-PILL (фича #1): если это была отправка pending-файла из дискового outbox
+    //   (hs.pending_file задан) и ошибка ПОСТОЯННАЯ непереходящая (4xx: 400/401/403/413/415,
+    //   т.е. !retryable) - файл вечно слать бессмысленно: УДАЛЯЕМ его из outbox (+лог), чтобы
+    //   он не блокировал дренаж навсегда. Для ТРАНЗИЕНТНЫХ (сеть/0/5xx) файл ОСТАВЛЯЕМ -
+    //   доедет на следующем старте/при простое. Делаем это ДО ретраев/планировщика, т.к. для
+    //   4xx ретраи не ставятся (retryable=false) и это терминал для данного файла.
+    if (!retryable && is_string(hs.pending_file) && string_length(hs.pending_file) > 0) {
+        show_debug_message("[FastLogs] poison-pill: dropping pending file (permanent HTTP "
+            + string(http_status) + "): " + hs.pending_file);
+        if (script_exists(asset_get_index("fastlogs_pending_delete"))) {
+            fastlogs_pending_delete(hs.pending_file);
+        }
+        hs.pending_file = "";   // отвязали: файла больше нет
+    }
 
     // 1) Сначала - НЕМЕДЛЕННЫЕ ретраи аплоадера (мгновенные, до FASTLOGS_HTTP_MAX_RETRIES).
     var retried = false;

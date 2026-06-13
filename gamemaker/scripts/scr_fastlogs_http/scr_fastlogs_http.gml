@@ -55,6 +55,18 @@ function __fastlogs_http_state() {
             dretry_body    : "",
             dretry_count   : 0,
             dretry_seconds : 0,
+            // ПЕРСИСТ КРАШ-ОТЧЁТА (фича #1): путь pending-файла, привязанного к ТЕКУЩЕМУ
+            //   in-flight запросу. На успехе Async-обработчик удалит этот файл из очереди.
+            //   "" -> обычная отправка (не из очереди), удалять нечего.
+            pending_file   : "",
+            // ДРЕНАЖ OUTBOX (фича #1, "при первой возможности").
+            //   FIX-1: PER_START-лимит (FASTLOGS_PENDING_RESEND_PER_START) применяется ТОЛЬКО к
+            //   СТАРТ-бэкстопу (цепочке, инициированной fastlogs_pending_resend_all при init), чтобы
+            //   не молотить весь outbox за один старт. ЖИВОЙ idle-дренаж (после обычной отправки/
+            //   немедленного краша/по завершении старт-цепочки) этим счётчиком НЕ гейтится - тянет
+            //   следующий pending, пока outbox непуст (объём ограничен FASTLOGS_PENDING_MAX/enforce_cap).
+            init_chain_active : false,  // активна ли СТАРТ-цепочка дренажа (запущена resend_all)
+            init_drain_count  : 0,      // сколько файлов дослано в рамках СТАРТ-цепочки (лимит PER_START)
         };
     }
     return st.http;
@@ -122,6 +134,7 @@ function fastlogs_send(opts = undefined) {
     hs.is_sending = true;
     hs.state      = "sending";
     hs.retry_count = 0;
+    hs.pending_file = "";   // обычная отправка - не из pending-очереди (фича #1)
 
     if (want_shot) {
         // Асинхронный захват кадра (произойдёт в ближайшем Draw GUI End), затем отправка
@@ -174,6 +187,37 @@ function fastlogs_quick_send(opts = undefined) {
     // Тег быстрой отправки в title (если интегратор не задал свой) - помогает различать в каталоге.
     if (!variable_struct_exists(opts, "title")) { opts.title = "Quick send"; }
     return fastlogs_send(opts);
+}
+
+// =====================================================================================
+// fastlogs_pending_send(body_json, file_path) -> bool  (фича #1: досыл pending-краша)
+// Отправить УЖЕ ГОТОВОЕ JSON-тело отчёта из дисковой очереди (recorder.pending). На успехе
+//   Async-обработчик (Other_62) удалит file_path из очереди (по hs.pending_file). НЕ строит
+//   payload заново (тело уже несёт timestampUtc/logText/counts/comment/tester/context/breadcrumbs
+//   момента краха). НЕ снимает скриншот. Уважает single-flight: если уже идёт отправка или
+//   ждёт отложенный повтор - возвращает false (файл остаётся в очереди, подхватится позже).
+// Возврат: true если запрос поставлен; false если no-op (выключено / нет endpoint / занято / пусто).
+// =====================================================================================
+function fastlogs_pending_send(body_json, file_path) {
+    if (!FASTLOGS_ENABLED) { return false; }
+    if (!is_string(FASTLOGS_ENDPOINT) || string_length(FASTLOGS_ENDPOINT) == 0) { return false; }
+    if (!is_string(body_json) || string_length(body_json) == 0) { return false; }
+
+    var hs = __fastlogs_http_state();
+    // Single-flight: не вмешиваемся в идущую отправку/ожидание повтора (файл ждёт следующего раза).
+    if (hs.is_sending || fastlogs_retry_is_pending()) { return false; }
+
+    hs.is_sending   = true;
+    hs.state        = "sending";
+    hs.retry_count  = 0;
+    hs.pending_body = body_json;
+    // Привязать файл к этому запросу: на успехе Async-обработчик удалит именно его.
+    hs.pending_file = is_string(file_path) ? file_path : "";
+
+    // Лёгкий статус (не обязателен на старте, но информативен, если оверлей/тост подключён).
+    fastlogs_send_status("sending", "Досыл отчёта о краше...", false);
+
+    return fastlogs_http_post_internal(body_json);
 }
 
 // =====================================================================================

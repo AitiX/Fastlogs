@@ -480,6 +480,170 @@ function fastlogs_record_clear() {
 }
 
 // =====================================================================================
+// ПЕРСИСТ КРАШ-ОТЧЁТА + ДОСЫЛ ПРИ СТАРТЕ (фича #1, PENDING-QUEUE).
+// -------------------------------------------------------------------------------------
+// Модель: при авто-отправке по краху сначала СИНХРОННО пишем ГОТОВОЕ JSON-тело payload в
+//   отдельный файл в каталоге pending (внутри game_save_id), затем пытаемся отправить.
+//   На успех файл удаляем (по запомненному пути). На старте сканируем каталог и досылаем
+//   неотправленное - так жёсткий краш, убивший процесс до завершения HTTP, доедет позже.
+//   Кап очереди FASTLOGS_PENDING_MAX (старые сверх лимита отбрасываем).
+//   Файлы - сырой UTF-8 JSON (через те же буферные хелперы, что и лог).
+// =====================================================================================
+
+// Каталог pending относительно game_save_id (как остальные пути рекордера).
+function __fastlogs_pending_dir() {
+    return FASTLOGS_PERSIST_DIR + "/" + FASTLOGS_PENDING_DIR;
+}
+
+// Убедиться, что каталог pending существует (родительский + сам).
+function __fastlogs_pending_ensure_dir() {
+    __fastlogs_ensure_dir();                       // FASTLOGS_PERSIST_DIR
+    var d = __fastlogs_pending_dir();
+    if (!directory_exists(d)) directory_create(d);
+}
+
+// Список файлов pending (ОТНОСИТЕЛЬНЫЕ пути dir+"/"+name), отсортированных по имени.
+//   Имя файла начинается с zero-padded времени -> лексикографический порядок = хронологический.
+function __fastlogs_pending_list() {
+    var out = [];
+    var d = __fastlogs_pending_dir();
+    if (!directory_exists(d)) return out;
+    // file_find_first(mask, attr): mask с путём; attr=0 -> только обычные файлы. Возвращает ИМЯ.
+    var fname = file_find_first(d + "/*.json", 0);
+    while (fname != "") {
+        if (fname != "." && fname != "..") array_push(out, d + "/" + fname);
+        fname = file_find_next();
+    }
+    file_find_close();
+    array_sort(out, true);                          // по возрастанию имени (хронологически)
+    return out;
+}
+
+// Применить кап очереди: удалить старейшие файлы сверх FASTLOGS_PENDING_MAX.
+function __fastlogs_pending_enforce_cap() {
+    var cap = max(1, FASTLOGS_PENDING_MAX);
+    var files = __fastlogs_pending_list();          // отсортированы: старые первыми
+    var over = array_length(files) - cap;
+    for (var i = 0; i < over; i++) {
+        try { if (file_exists(files[i])) file_delete(files[i]); } catch (_e) { /* best-effort */ }
+    }
+}
+
+// =====================================================================================
+// fastlogs_pending_write(body_json) -> string (путь файла) | ""
+//   Синхронно записать готовое JSON-тело отчёта в очередь pending. Возвращает относительный
+//   путь созданного файла (для последующего удаления на успехе) или "" при неудаче/выкл.
+//   Имя: crash_<UTC-компактно>_<guid8>.json (сортируемое по времени).
+// =====================================================================================
+function fastlogs_pending_write(body_json) {
+    if (!FASTLOGS_ENABLED) return "";
+    if (!is_string(body_json) || string_length(body_json) == 0) return "";
+    var rs = __fastlogs_rec_state();
+    if (!rs.disk_ok) return "";
+
+    var path = "";
+    try {
+        __fastlogs_pending_ensure_dir();
+        // Компактная сортируемая метка времени из UTC ISO (убираем не-алфанумерику).
+        var ts = __fastlogs_utc_iso();
+        ts = string_replace_all(ts, "-", "");
+        ts = string_replace_all(ts, ":", "");
+        ts = string_replace_all(ts, "T", "");
+        ts = string_replace_all(ts, "Z", "");
+        var guid8 = string_copy(__fastlogs_make_guid(), 1, 8);
+        path = __fastlogs_pending_dir() + "/crash_" + ts + "_" + guid8 + ".json";
+        __fastlogs_write_text_file(path, body_json);   // сырой UTF-8 (как лог-файл)
+        // После добавления применим кап (отбросим старейшие сверх лимита).
+        __fastlogs_pending_enforce_cap();
+    } catch (_e) {
+        rs.disk_ok = false;
+        return "";
+    }
+    return path;
+}
+
+// =====================================================================================
+// fastlogs_pending_delete(path) -> void
+//   Удалить один pending-файл по запомненному пути (на успешной отправке этого отчёта).
+// =====================================================================================
+function fastlogs_pending_delete(path) {
+    if (!FASTLOGS_ENABLED) return;
+    if (!is_string(path) || string_length(path) == 0) return;
+    try { if (file_exists(path)) file_delete(path); } catch (_e) { /* best-effort */ }
+}
+
+// =====================================================================================
+// fastlogs_pending_drain_next([exclude_path]) -> bool (поставлена ли отправка ОДНОГО файла)
+//   Дренаж outbox ПО ОДНОМУ: найти старейший pending-файл (кроме exclude_path - только что
+//   отправленного, чтобы не переслать его повторно) и поставить ОДНУ его отправку. Уважает
+//   single-flight внутри fastlogs_pending_send (если занято/ждёт повтор - вернёт false, файл
+//   остаётся в очереди). Битые/пустые файлы по пути удаляет, чтобы не застревали.
+//   ЦЕПОЧКА: следующий файл запускает Async success-обработчик (Other_62) после завершения
+//   предыдущего - так за сессию дренируется несколько файлов, а не один (раньше resend_all в
+//   цикле упирался в single-flight, и все итерации кроме первой были no-op).
+//   Возврат: true если запрос поставлен (есть что досылать и слой свободен); иначе false.
+// =====================================================================================
+function fastlogs_pending_drain_next(exclude_path = "") {
+    if (!FASTLOGS_ENABLED) return false;
+    if (!script_exists(asset_get_index("fastlogs_pending_send"))) return false;
+
+    var files = __fastlogs_pending_list();          // старые первыми
+    var ex = is_string(exclude_path) ? exclude_path : "";
+
+    for (var i = 0; i < array_length(files); i++) {
+        var fp = files[i];
+        if (fp == ex) continue;                     // не пересылаем только что отправленный
+        var body = __fastlogs_read_text_file(fp);
+        if (!is_string(body) || string_length(body) == 0) {
+            // Битый/пустой файл - удаляем, чтобы не застревал в очереди, и пробуем следующий.
+            fastlogs_pending_delete(fp);
+            continue;
+        }
+        // Одна отправка (http-слой удалит файл на успехе по этому пути). Single-flight внутри:
+        //   если сейчас занято/ждёт повтор - вернёт false, выходим (подхватится позже).
+        return fastlogs_pending_send(body, fp);
+    }
+    return false;                                   // очередь пуста (или остались только битые)
+}
+
+// =====================================================================================
+// fastlogs_pending_resend_all() -> bool (запущена ли первая отправка цепочки)
+//   ДРЕНАЖ НА СТАРТЕ (фича #1, бэкстоп). Вызывается из fastlogs_init на старте. Запускает ОДНУ
+//   первую отправку дренаж-цепочки; СЛЕДУЮЩИЕ файлы досылает Async success-обработчик (Other_62)
+//   по одному, пока в outbox есть файлы (в пределах FASTLOGS_PENDING_RESEND_PER_START за старт,
+//   см. ограничитель в Other_62). Так за сессию дренируется несколько, а не один.
+//   ПРЕЖДЕ: тут был цикл по fastlogs_pending_send, но single-flight (is_sending) делал все
+//   итерации кроме первой no-op - реально слался лишь один файл. Теперь явная цепочка.
+//   Каждый отчёт уже несёт готовое тело (timestampUtc/logText/counts/comment/tester/context/
+//   breadcrumbs), поэтому шлём его как есть. Зависит от fastlogs_pending_send(body, file_path).
+// =====================================================================================
+function fastlogs_pending_resend_all() {
+    if (!FASTLOGS_ENABLED) return false;
+    // FIX-1: пометить эту цепочку как СТАРТ-бэкстоп. Лимит FASTLOGS_PENDING_RESEND_PER_START
+    //   применяется в Other_62 ТОЛЬКО пока активна старт-цепочка (init_chain_active);
+    //   живой idle-дренаж (после неё) этим лимитом не гейтится. Сбрасываем счётчик старта.
+    if (script_exists(asset_get_index("fastlogs_http_get_state"))) {
+        var hs = fastlogs_http_get_state();
+        hs.init_chain_active = true;
+        hs.init_drain_count  = 0;
+    }
+    // Старт цепочки: первый файл. Следующие подхватит Other_62 (success) через drain_next.
+    var started = fastlogs_pending_drain_next("");
+    if (!started) {
+        // Нечего слать (outbox пуст) или слой занят -> старт-цепочки фактически нет.
+        if (script_exists(asset_get_index("fastlogs_http_get_state"))) {
+            fastlogs_http_get_state().init_chain_active = false;
+        }
+    } else {
+        // Первый файл старт-цепочки поставлен -> учитываем его в PER_START-счётчике старта.
+        if (script_exists(asset_get_index("fastlogs_http_get_state"))) {
+            fastlogs_http_get_state().init_drain_count += 1;
+        }
+    }
+    return started;
+}
+
+// =====================================================================================
 // fastlogs_recorder_get_logtext() -> string
 //   Отдаёт текст логов для payload logText. Источник по приоритету:
 //     1) накопленный персист rec_text (прошлые + текущая сессия), если он непустой -
