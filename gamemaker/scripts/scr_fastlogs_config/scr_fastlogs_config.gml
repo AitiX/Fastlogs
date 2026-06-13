@@ -12,9 +12,8 @@
 //   debug   - отладочный конфиг (клиент ВКЛ).
 // Паттерн как __INPUT_DEBUG_STEAM_INPUT / __SCRIBBLE_DEBUG.
 // В ритейле на консолях собирают Default -> запрещённые сетевые/скриншот-вызовы не исполняются.
-#macro                FASTLOGS_ENABLED false
-#macro Default:       FASTLOGS_ENABLED false
-#macro debug:         FASTLOGS_ENABLED true
+#macro Default:FASTLOGS_ENABLED false
+#macro debug:FASTLOGS_ENABLED true
 
 // =====================================================================================
 // СЕРВЕР / ИНГЕСТ (тот же сервер, что у Unity-клиента)
