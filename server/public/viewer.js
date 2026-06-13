@@ -484,9 +484,24 @@
   // ---- Screenshot ----
 
   var screenshotWrap = document.getElementById('screenshot-wrap');
-  if (data.hasScreenshot) {
+  // Build relative screenshot URLs from the count (robust against a baseUrl that
+  // differs from the host serving the viewer). Index 0 is /<id>/screenshot.
+  var shotCount = data.screenshotCount || (data.hasScreenshot ? 1 : 0);
+  if (shotCount > 0) {
     screenshotWrap.style.display = '';
-    document.getElementById('screenshot-img').src = '/' + data.id + '/screenshot';
+
+    var label = document.getElementById('screenshot-label');
+    if (label) label.textContent = shotCount > 1 ? 'Screenshots (' + shotCount + ')' : 'Screenshot';
+
+    var body = document.getElementById('screenshot-body');
+    body.textContent = '';
+    for (var si = 0; si < shotCount; si++) {
+      var img = document.createElement('img');
+      img.src = si === 0 ? '/' + data.id + '/screenshot' : '/' + data.id + '/screenshot/' + si;
+      img.alt = 'Screenshot ' + (si + 1);
+      img.loading = 'lazy';
+      body.appendChild(img);
+    }
 
     var screenshotHeader = document.getElementById('screenshot-header');
     var screenshotArrow = document.getElementById('screenshot-arrow');

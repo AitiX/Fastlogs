@@ -40,9 +40,11 @@ function logPath(id) {
   return path.join(shardDir(id), `${id}.log.gz`);
 }
 
-// Absolute path to the screenshot for an id.
-function shotPath(id) {
-  return path.join(shardDir(id), `${id}.png`);
+// Absolute path to a screenshot for an id. Index 0 is "<id>.png" (the original
+// single-screenshot layout, kept for back-compat); index N>0 is "<id>.N.png".
+function shotPath(id, index = 0) {
+  const suffix = index > 0 ? `.${index}` : '';
+  return path.join(shardDir(id), `${id}${suffix}.png`);
 }
 
 // Ensure the shard directory for an id exists.
@@ -77,32 +79,48 @@ async function readLogGz(id, { raw = false } = {}) {
   return buf.toString('utf8');
 }
 
-// Store a screenshot. `data` is a PNG Buffer (or base64 string). Returns the
-// number of bytes written.
-async function saveShot(id, data) {
+// Store a screenshot at `index` (0-based). `data` is a PNG Buffer (or base64
+// string). Returns the number of bytes written.
+async function saveShot(id, data, index = 0) {
   await ensureShard(id);
   const buf = Buffer.isBuffer(data) ? data : Buffer.from(data, 'base64');
-  await fsp.writeFile(shotPath(id), buf);
+  await fsp.writeFile(shotPath(id, index), buf);
   return buf.length;
 }
 
-// Read a screenshot as a Buffer, or null if missing.
-async function readShot(id) {
+// Read the screenshot at `index` as a Buffer, or null if missing.
+async function readShot(id, index = 0) {
   try {
-    return await fsp.readFile(shotPath(id));
+    return await fsp.readFile(shotPath(id, index));
   } catch (err) {
     if (err.code === 'ENOENT') return null;
     throw err;
   }
 }
 
-// Remove all blobs for an id (log body and screenshot if present). Missing
-// files are ignored. Returns the count of files actually removed.
+// Remove all blobs for an id: the log body and EVERY screenshot ("<id>.png",
+// "<id>.1.png", ...). Missing files are ignored. Returns the count removed.
 async function removeBlobs(id) {
   let removed = 0;
-  for (const p of [logPath(id), shotPath(id)]) {
+  try {
+    await fsp.unlink(logPath(id));
+    removed += 1;
+  } catch (err) {
+    if (err.code !== 'ENOENT') throw err;
+  }
+
+  let entries = [];
+  try {
+    entries = await fsp.readdir(shardDir(id));
+  } catch (err) {
+    if (err.code !== 'ENOENT') throw err;
+  }
+  const escaped = id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const shotRe = new RegExp('^' + escaped + '(\\.\\d+)?\\.png$');
+  for (const name of entries) {
+    if (!shotRe.test(name)) continue;
     try {
-      await fsp.unlink(p);
+      await fsp.unlink(path.join(shardDir(id), name));
       removed += 1;
     } catch (err) {
       if (err.code !== 'ENOENT') throw err;

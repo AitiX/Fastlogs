@@ -204,6 +204,7 @@ a:hover { color: var(--accent-h); text-decoration: underline; }
 .screenshot-body { display: none; padding: 10px; text-align: center; }
 .screenshot-wrap.open .screenshot-body { display: block; }
 .screenshot-body img { max-width: 100%; border-radius: 4px; border: 1px solid var(--border); }
+.screenshot-body img + img { margin-top: 10px; }
 
 /* ---- Log controls ---- */
 

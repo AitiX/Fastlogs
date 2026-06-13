@@ -96,6 +96,10 @@ const config = Object.freeze({
   maxScreenshotBytes: envInt('MAX_SCREENSHOT_BYTES', 2 * 1024 * 1024),
   maxLogBytes: envInt('MAX_LOG_BYTES', 20 * 1024 * 1024),
 
+  // Max screenshots accepted per report (the rest are dropped). A log can carry
+  // several shots (the client can capture more than one before sending).
+  maxScreenshots: envInt('MAX_SCREENSHOTS', 8),
+
   // Auth tokens (empty string means the corresponding auth tier is disabled).
   adminToken: envStr('ADMIN_TOKEN', ''),
   viewerToken: envStr('VIEWER_TOKEN', ''),

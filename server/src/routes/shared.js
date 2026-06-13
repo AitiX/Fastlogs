@@ -59,6 +59,18 @@ function linksFor(id, hasShot) {
   return links;
 }
 
+// Public URLs for a log's screenshots (0..count-1). Index 0 is /<id>/screenshot
+// (back-compat); the rest are /<id>/screenshot/<n>.
+function screenshotUrls(id, count) {
+  const base = config.baseUrl;
+  const enc = encodeURIComponent(id);
+  const out = [];
+  for (let i = 0; i < count; i++) {
+    out.push(i === 0 ? `${base}/${enc}/screenshot` : `${base}/${enc}/screenshot/${i}`);
+  }
+  return out;
+}
+
 // Single, uniform 404 for the public surface (anti-enumeration). Always the
 // same body and status regardless of why the id is not served.
 function notFound(res) {
@@ -104,6 +116,8 @@ function parseJsonColumn(text, expectArray, fallback) {
 // Shape the public JSON view of a log row (used by /api/logs/:id and the
 // inline data island). Does not include the log text; callers add it.
 function publicLogObject(row) {
+  // shot_count is the source of truth; fall back to has_shot for pre-feature rows.
+  const shotCount = row.shot_count > 0 ? row.shot_count : (row.has_shot === 1 ? 1 : 0);
   return {
     id: row.id,
     appId: row.app_id,
@@ -134,6 +148,8 @@ function publicLogObject(row) {
       ? { id: row.redmine_issue_id, url: row.redmine_issue_url || null }
       : null,
     hasScreenshot: row.has_shot === 1,
+    screenshotCount: shotCount,
+    screenshots: screenshotUrls(row.id, shotCount),
     device: parseDevice(row),
     // Structured context (key->value object) and breadcrumbs (array of
     // { t?, m, lvl? }). Always present so clients have a stable shape: an

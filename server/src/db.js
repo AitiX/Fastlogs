@@ -93,6 +93,13 @@ function migrate() {
     db.exec(`ALTER TABLE logs ADD COLUMN status TEXT NOT NULL DEFAULT 'new'`);
   }
 
+  // Number of screenshots stored for a log (0..MAX_SCREENSHOTS). NOT NULL with a
+  // constant DEFAULT so existing rows backfill to 0. has_shot stays in sync
+  // (has_shot = shot_count > 0) for the back-compat single-screenshot path.
+  if (!logCols.some((c) => c.name === 'shot_count')) {
+    db.exec(`ALTER TABLE logs ADD COLUMN shot_count INTEGER NOT NULL DEFAULT 0`);
+  }
+
   // Partial index backing the per-app crash grouping scan. Created AFTER the
   // loop above, since crash_sig only exists once that ALTER has run (it is not
   // part of the inline CREATE TABLE). Idempotent via IF NOT EXISTS.
@@ -110,12 +117,12 @@ const stmts = {
     INSERT INTO logs (
       id, app_id, platform, app_version, device_json, title, comment, tester,
       context_json, breadcrumbs_json, crash_sig, engine, ts_utc,
-      cnt_error, cnt_warn, cnt_log, log_bytes, has_shot, created_at,
+      cnt_error, cnt_warn, cnt_log, log_bytes, has_shot, shot_count, created_at,
       expires_at, pinned, ip_hash
     ) VALUES (
       @id, @app_id, @platform, @app_version, @device_json, @title, @comment, @tester,
       @context_json, @breadcrumbs_json, @crash_sig, @engine, @ts_utc,
-      @cnt_error, @cnt_warn, @cnt_log, @log_bytes, @has_shot, @created_at,
+      @cnt_error, @cnt_warn, @cnt_log, @log_bytes, @has_shot, @shot_count, @created_at,
       @expires_at, @pinned, @ip_hash
     )
   `),

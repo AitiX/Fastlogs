@@ -294,7 +294,8 @@ async function handleIngest(req, res) {
   const context = sanitizeContext(body.context);
   const breadcrumbs = sanitizeBreadcrumbs(body.breadcrumbs);
   const retentionDaysRaw = body.retentionDays;
-  const screenshotPng = body.screenshotPng || null;
+  // Screenshots: the new `screenshotsPng` array plus the legacy single
+  // `screenshotPng` are collected and validated at step 7.
 
   // 4. Auth: validate app + token.
   let { ok, app, code } = validateIngest(appId, req.headers['authorization']);
@@ -351,16 +352,28 @@ async function handleIngest(req, res) {
     return sendError(res, 400, 'bad_request', err.message);
   }
 
-  // 7. Validate screenshot size if provided.
-  let shotBuf = null;
-  if (screenshotPng) {
-    if (typeof screenshotPng !== 'string') {
-      return sendError(res, 400, 'bad_request', 'screenshotPng must be a base64 string');
+  // 7. Collect + validate screenshots: the `screenshotsPng` array (new) and the
+  // legacy single `screenshotPng`, capped to config.maxScreenshots. Each is an
+  // unprefixed base64 PNG; oversized ones are rejected (413), as before.
+  if (body.screenshotPng != null && typeof body.screenshotPng !== 'string') {
+    return sendError(res, 400, 'bad_request', 'screenshotPng must be a base64 string');
+  }
+  const shotStrings = [];
+  if (Array.isArray(body.screenshotsPng)) {
+    for (const s of body.screenshotsPng) {
+      if (typeof s === 'string' && s.length > 0) shotStrings.push(s);
     }
-    shotBuf = Buffer.from(screenshotPng, 'base64');
-    if (shotBuf.length > config.maxScreenshotBytes) {
+  }
+  if (typeof body.screenshotPng === 'string' && body.screenshotPng.length > 0) {
+    shotStrings.push(body.screenshotPng);
+  }
+  const shotBufs = [];
+  for (const s of shotStrings.slice(0, config.maxScreenshots)) {
+    const buf = Buffer.from(s, 'base64');
+    if (buf.length > config.maxScreenshotBytes) {
       return sendError(res, 413, 'payload_too_large', 'Screenshot exceeds size limit');
     }
+    shotBufs.push(buf);
   }
 
   // 8. Generate unique id.
@@ -380,13 +393,16 @@ async function handleIngest(req, res) {
     return sendError(res, 500, 'internal_error', 'Failed to store log');
   }
 
-  if (shotBuf) {
+  let shotCount = 0;
+  for (let i = 0; i < shotBufs.length; i++) {
     try {
-      await storage.saveShot(id, shotBuf);
+      await storage.saveShot(id, shotBufs[i], i);
+      shotCount += 1;
     } catch (err) {
-      // Non-fatal for the log itself; remove blob and proceed without screenshot.
-      console.error('[ingest] failed to save screenshot:', err);
-      shotBuf = null;
+      // Non-fatal for the log itself; stop at the first failure but keep the
+      // contiguous shots already saved (the viewer reads 0..shot_count-1).
+      console.error('[ingest] failed to save screenshot', i, err);
+      break;
     }
   }
 
@@ -412,7 +428,8 @@ async function handleIngest(req, res) {
     cnt_warn: counts.warn,
     cnt_log: counts.log,
     log_bytes: logBytes,
-    has_shot: shotBuf ? 1 : 0,
+    has_shot: shotCount > 0 ? 1 : 0,
+    shot_count: shotCount,
     created_at: createdAt,
     expires_at: expiresAt,
     pinned: 0,
@@ -448,7 +465,7 @@ async function handleIngest(req, res) {
   }
 
   // 13. Respond 201.
-  const links = linksFor(id, !!shotBuf);
+  const links = linksFor(id, shotCount > 0);
   sendJson(res, 201, {
     id,
     url: links.self,

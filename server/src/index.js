@@ -70,6 +70,7 @@ router.get('/browse.js', (req, res) => staticRoutes.serveAsset(req, res, '/brows
 // segment ("raw"/"screenshot"), so they never collide with "/browse/:appId".
 router.get('/:id/raw', raw);
 router.get('/:id/screenshot', screenshot);
+router.get('/:id/screenshot/:n', screenshot);
 
 // Viewer catch-all (must be last among GET routes).
 router.get('/:id', viewer);
