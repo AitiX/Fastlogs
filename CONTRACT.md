@@ -58,7 +58,8 @@ http://localhost:8787
                      "hardwareConcurrency": 0, "deviceMemoryGB": 0, "connection": "" }
   },
 
-  "screenshotPng": "iVBORw0KGgo...",       // ОПЦ. base64 PNG БЕЗ префикса "data:"; присылается только если включён тоггл
+  "screenshotPng": "iVBORw0KGgo...",       // ОПЦ. base64 PNG БЕЗ префикса "data:" (legacy: один скриншот по тоглу)
+  "screenshotsPng": ["iVBOR...", "iVBOR..."], // ОПЦ. несколько base64 PNG (без "data:"); сервер берёт array + legacy single, кап MAX_SCREENSHOTS (8)
   "retentionDays": 14,                     // ОПЦ. per-request override; сервер делает clamp(1, app.maxRetentionDays)
   "title": "Crash on level load",          // ОПЦ. <=120 символов - заголовок записи в каталоге/вьюере
   "comment": "Открыл уровень 3, зависло на загрузке",  // ОПЦ. <=4000 символов - свободный комментарий тестера (описание проблемы), показывается во вьюере
@@ -111,8 +112,9 @@ http://localhost:8787
 |----------|-----------|
 | `GET /<id>` | HTML-вьюер: device-info (сворачиваемые группы), счётчики E/W/L, фильтр по уровню, поиск, сворачивание стектрейсов, raw/pretty, copy, скриншот, кнопка «сохранить (pin)» |
 | `GET /<id>/raw` | `text/plain` - сырой лог. `?download=1` → `attachment`. При `Accept-Encoding: gzip` отдаётся `.log.gz` без распаковки |
-| `GET /<id>/screenshot` | `image/png` - скриншот (404 если нет) |
-| `GET /api/logs/<id>` | JSON-данные для вьюера |
+| `GET /<id>/screenshot` | `image/png` - первый скриншот (индекс 0; 404 если нет) |
+| `GET /<id>/screenshot/<n>` | `image/png` - n-й скриншот (0-based; 404 если индекс вне диапазона) |
+| `GET /api/logs/<id>` | JSON-данные для вьюера (вкл. `screenshotCount` и массив `screenshots`) |
 
 Несуществующий / просроченный / невалидный `id` → **единый `404`** (анти-перебор).
 
@@ -162,6 +164,7 @@ http://localhost:8787
 | Размер тела запроса (nginx `client_max_body_size`) | 10 MB |
 | `MAX_PAYLOAD` (приложение) | ~8 MB |
 | `MAX_SCREENSHOT` (PNG) | ~2 MB |
+| `MAX_SCREENSHOTS` (скриншотов на отчёт) | 8 |
 | `MAX_LOG_BYTES` (распакованный лог) | ~20 MB |
 | Ретеншн по умолчанию | 30 дней |
 | Ретеншн максимум | 365 дней |
@@ -171,7 +174,7 @@ http://localhost:8787
 
 ## 7. Инварианты для клиентов (Unity / GameMaker / прочие)
 
-1. `screenshotPng` - **чистый base64 PNG без** `data:` префикса.
+1. `screenshotPng` / `screenshotsPng[]` - **чистый base64 PNG без** `data:` префикса (один или массив; сервер берёт оба, кап `MAX_SCREENSHOTS`).
 2. `counts` - всего за сессию; `logText` усечён по `MAX_LOG_BYTES` с пометкой об усечении.
 3. Пустые/недоступные поля `device` - **опускать**, а не слать `null`/`0`.
 4. На **WebGL**: `logEncoding=plain` (без gzip тела - preflight/CORS), отправка только через корутину, copy/open ссылки - синхронно из обработчика клика (user-gesture).

@@ -44,6 +44,7 @@ See `.env.example` for inline docs. Full list:
 | `MAX_PAYLOAD_BYTES` | `8388608` | Max whole request body (~8 MB) |
 | `MAX_SCREENSHOT_BYTES` | `2097152` | Max decoded PNG screenshot (~2 MB) |
 | `MAX_LOG_BYTES` | `20971520` | Max decompressed log text (~20 MB) |
+| `MAX_SCREENSHOTS` | `8` | Max screenshots accepted per report (a log can carry several; extras dropped) |
 | `ADMIN_TOKEN` | _(none)_ | Admin: delete, manage apps (and unpin when `UNPIN_REQUIRES_ADMIN=1`). Empty disables admin auth (dev) |
 | `VIEWER_TOKEN` | _(none)_ | Team viewer token for the catalog `/browse`. Empty CLOSES the catalog (fail-closed): `/browse` returns 401 for everyone except the admin token |
 | `TEAM_INGEST_TOKEN` | _(none)_ | Shared master ingest token valid for ANY app (one secret instead of per-app tokens) |
