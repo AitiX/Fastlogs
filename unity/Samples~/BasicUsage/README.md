@@ -11,15 +11,22 @@ and handle the result. It covers everything a QA workflow needs.
    subsequent `Debug.Log` output is captured in the ring buffer.
 3. **Log a message** - `FastLogs.Log("FastLogs basic usage sample started.")` adds
    a tagged entry to the buffer.
-4. **Send on key press** - press `F9` (configurable in the Inspector) to call
+4. **Attach context and breadcrumbs** - in `Awake` the sample calls
+   `FastLogs.SetContext("level", "1")` / `SetContext("mode", "sample")` and
+   `FastLogs.Breadcrumb("Sample initialized")`, then drops another breadcrumb on each
+   send. This enriches every report with what the player was doing (Context section in
+   the viewer) and a trail of recent events (Breadcrumbs timeline). Context survives
+   until changed/cleared; breadcrumbs roll over after the last ~100. Both are
+   PII-scrubbed before upload by default.
+5. **Send on key press** - press `F9` (configurable in the Inspector) to call
    `FastLogs.SendAsync(includeScreenshot: true, title: "Manual report from sample", comment: "...")`.
    `title` is a short headline; `comment` is the tester's free-form problem
    description (both optional). The tester name and "copy link on send" behaviour
    are read from the config (`Config > UI`), so they apply to every report.
    The coroutine-backed await works on every Unity version and on WebGL.
-5. **Handle the result** - logs the shareable URL on success or the error on failure;
+6. **Handle the result** - logs the shareable URL on success or the error on failure;
    also wires `FastLogs.OnUploaded` to demonstrate the event callback.
-6. **Overlay** - once FastLogs is initialized, press `F8` (the default trigger key
+7. **Overlay** - once FastLogs is initialized, press `F8` (the default trigger key
    configured in `TriggerConfig`) to open or close the share overlay from anywhere.
    You can also call `FastLogs.ShowOverlay()` from code or a UI button.
 
@@ -47,4 +54,7 @@ and click **Import** next to "Basic Usage". Unity copies the sample into
   disabled result.
 - `RecordScope` example: wrap code in `using (FastLogs.RecordScope()) { ... }` to
   capture only that section.
+- Unhandled exceptions are captured and auto-sent in dev (on by default), persisted
+  to a disk outbox first so a crash that kills the process is re-sent on the next
+  launch. No sample wiring is needed - throw an uncaught exception to see it.
 - On WebGL the `await` resolves via the same coroutine path - no threads are used.

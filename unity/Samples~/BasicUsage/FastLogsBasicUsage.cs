@@ -33,6 +33,16 @@ namespace PlayJoy.FastLogs.Samples
             FastLogs.StartRecording();
 
             FastLogs.Log("FastLogs basic usage sample started.");
+
+            // Context rides with every subsequent report (shown in the viewer's
+            // Context section). Update it whenever your game state changes; pass a
+            // null value to remove a key, or call ClearContext() to drop them all.
+            FastLogs.SetContext("level", "1");
+            FastLogs.SetContext("mode", "sample");
+
+            // Breadcrumbs are a rolling trail of recent events (last ~100), shown as
+            // a timeline next to the report. Drop one at meaningful moments.
+            FastLogs.Breadcrumb("Sample initialized");
         }
 
         private void OnDestroy()
@@ -50,6 +60,10 @@ namespace PlayJoy.FastLogs.Samples
 
         private async void Send()
         {
+            // A breadcrumb just before the action it precedes - this shows up in the
+            // report's Breadcrumbs timeline so you can see what led up to the send.
+            FastLogs.Breadcrumb("Send key pressed", FastLogLevel.Warning);
+
             FastLogs.Warn("Manual report requested.");
 
             // Awaitable on every Unity version (FlogTask, coroutine-driven).

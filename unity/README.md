@@ -4,10 +4,17 @@ Lightweight in-game log capture and one-tap sharing for Unity.
 
 FastLogs records your console output into a ring buffer, gathers a rich device
 snapshot, optionally grabs a screenshot, and uploads everything to a FastLogs
-server - returning a short, shareable link your QA / team can open in a browser.
+server - returning a short, shareable link your QA / team can open in a browser
+(the overlay also shows a QR code of that link so it can be scanned from another
+device).
+It also attaches lightweight **context** (what the player was doing), a rolling
+trail of **breadcrumbs** (recent app events), and - in dev - **always captures
+unhandled crashes**, persisting them to disk so they are never lost.
 
 - No hardcoded endpoints or domains. Everything is configured per project.
-- No third-party dependencies. JSON and (later) QR are self-contained.
+- No third-party dependencies. JSON is self-contained.
+- Privacy by default: outgoing text is PII-scrubbed and sensitive device fields
+  are omitted unless you opt in (see [Privacy](#privacy)).
 - SRDebugger integration is optional (soft, via reflection / `versionDefines`).
 - Console-safe: all capture, networking, overlay and screenshot logic is gated
   to Editor and Development builds and stripped on retail / console targets.
@@ -24,7 +31,7 @@ Add to `Packages/manifest.json`:
 ```jsonc
 {
   "dependencies": {
-    "com.playjoy.fastlogs": "https://github.com/PlayJoy/fastlogs.git?path=/unity#main"
+    "com.playjoy.fastlogs": "https://github.com/AitiX/Fastlogs.git?path=/unity#main"
   }
 }
 ```
@@ -106,7 +113,23 @@ Open the config asset in the Inspector. All sections are shown with foldouts.
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `IncludeSensitive` | false | Include device model, app identifier, page URL, and referrer in the device snapshot. |
+| `IncludeSensitive` | false | Include device model, app identifier, page URL, and referrer in the device snapshot. Off by default (privacy-by-default). |
+| `ScrubPii` | true | Scrub PII (emails, IPv4/IPv6, Bearer/Authorization tokens, 9+ digit runs) from the log text, context values and breadcrumb messages before upload. On by default. Extensible via `PiiScrubber.AddPattern`. See [Privacy](#privacy). |
+
+### Auto-send (crash reports)
+
+Controls automatic upload when an unhandled exception is captured. Every captured
+crash is **first written to a durable disk outbox** before any upload is attempted,
+so it survives even a hard crash that kills the process (it is re-sent on the next
+launch). These knobs throttle only the *upload tempo*, never the capture - see
+[Crashes are always captured](#crashes-are-always-captured-persisted-and-delivered).
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `AutoSendOnException` | true | Build and send a report automatically when an unhandled exception is captured. On by default in dev/editor. |
+| `MinSecondsBetweenAutoSends` | 30 | Minimum seconds between two automatic sends. Repeated/looping exceptions within this window are throttled (not resent). |
+| `MaxAutoSendsPerSession` | 10 | Max automatic sends per play session. 0 = unlimited. |
+| `IncludeScreenshot` | false | Capture a screenshot with auto-sent crash reports. Off by default (a crashed frame is rarely useful and capture costs a frame). |
 
 ### Trigger
 
@@ -228,6 +251,48 @@ FastLogs.Error("Enemy spawner failed to initialize");
 FastLogs.Log("Verbose detail", FastLogLevel.Log);
 ```
 
+### Context (what the player was doing)
+
+Context is a small set of key/value strings that ride with **every** subsequent
+report - the current level, game mode, a player id, a feature flag, etc. It shows
+up in a dedicated **Context** section in the viewer. Setting context is cheap (a
+dictionary write, no per-frame cost), so update it whenever your game state changes.
+
+```csharp
+// Set / replace a key:
+FastLogs.SetContext("level", "3");
+FastLogs.SetContext("mode", "coop");
+FastLogs.SetContext("playerId", "abc");
+
+// Remove a single key by passing a null value:
+FastLogs.SetContext("playerId", null);
+
+// Remove everything:
+FastLogs.ClearContext();
+```
+
+Caps (clamped on the client to match the server): key <= 64 chars, value <= 512
+chars, and the server trims the whole context object to ~4 KB total. Context values
+are PII-scrubbed before upload when `ScrubPii` is on (the default).
+
+### Breadcrumbs (a trail of recent events)
+
+Breadcrumbs are a rolling ring of the last ~100 app events (the oldest is dropped
+when the ring is full). Drop one at meaningful moments - a scene load, a button
+tap, a purchase, an API call - and the viewer shows them as a **Breadcrumbs**
+timeline alongside the report, so you can see what led up to the issue. Adding a
+crumb is O(1) with no per-frame allocation beyond the message string.
+
+```csharp
+FastLogs.Breadcrumb("Entered shop");
+FastLogs.Breadcrumb("Tapped Buy", FastLogLevel.Log);
+FastLogs.Breadcrumb("Inventory full", FastLogLevel.Warning);
+FastLogs.Breadcrumb("Purchase failed", FastLogLevel.Error);
+```
+
+The level maps to `info` / `warn` / `error` in the report. Breadcrumb messages are
+clamped (<= 512 chars each) and PII-scrubbed before upload when `ScrubPii` is on.
+
 ### Sending a report
 
 ```csharp
@@ -258,9 +323,16 @@ upload (best-effort on WebGL - see the overlay note below).
 The overlay provides a one-tap send UI with a screenshot toggle, a single-line
 **Title** input, a multi-line **Comment** input (the tester's free-form problem
 description), the current tester name (read-only; edit it in the **Settings** tab),
-and a clickable result link. The Settings tab also exposes the **Tester Name** field
-and a **Copy link on send** toggle. The overlay is opened by the default gesture
-(3 taps in the top-right corner, or F8) or from code:
+and, after a successful send, a result link (with **Copy** / **Open** buttons) plus a
+**QR code of that link** so it can be scanned from another device (phone camera).
+The **Settings** tab exposes runtime-tunable knobs
+(persisted in `PlayerPrefs`, applied to the live config immediately): App Id, Tester
+Name, **Capture screenshot by default**, **Include sensitive device info**, **Scrub
+PII (emails, IPs, tokens)**, **Copy link on send**, **Auto-send on unhandled
+exception**, an optional quick-send keyboard shortcut, the trigger selection,
+retention override, ring-buffer capacity, recording Start/Stop/Clear, and an open
+data folder button. The overlay is opened by the default gesture (3 taps in the
+top-right corner, or F8) or from code:
 
 ```csharp
 FastLogs.ShowOverlay();
@@ -283,10 +355,17 @@ user-gesture handler (button click). The overlay handles this automatically.
 4. Optional: toggle the screenshot, type a short **Title** and a longer **Comment**
    describing the problem. Set your **Tester Name** once in the Settings tab - it is
    attached to every report you send.
-5. Tap **Send**. A short link (e.g. `https://<server>/abc123`) appears in the panel.
+5. Tap **Send**. A short link (e.g. `https://<server>/abc123`) appears in the panel,
+   together with a **QR code** of it - scan it with another device to open the report
+   without retyping the link.
 6. Copy the link and send it to the developer. It opens in any browser with **no
-   token** - showing the console, error/warning/log counts, device snapshot and the
-   screenshot.
+   token** - showing the console, error/warning/log counts, device snapshot, the
+   screenshot, and (when present) the **Context** and **Breadcrumbs** sections.
+
+> Unhandled crashes are captured and uploaded automatically in dev builds (and
+> re-sent on the next launch if the first attempt did not get through), so a tester
+> does not have to do anything to report a crash. See
+> [Crashes are always captured](#crashes-are-always-captured-persisted-and-delivered).
 
 Recent-reports dashboard (optional): `https://<server>/browse/<appId>` lists versions
 and then logs. The catalog is gated by a team **viewer token** - append
@@ -351,12 +430,89 @@ event. A README inside the sample folder explains each step.
 
 ## Privacy
 
-- `Config > Diagnostics > IncludeSensitive = false` (the default) omits the device
-  model name, application identifier, and (on WebGL) the page URL and referrer from
-  the uploaded device snapshot.
-- Screenshots are only captured when explicitly requested via the overlay toggle or
-  `SendAsync(includeScreenshot: true)`.
-- No data is sent automatically. All uploads are user-initiated (gesture / API call).
+FastLogs is **private by default**: the two settings below ship in the safe
+position, and you opt in to looser behaviour rather than out of it.
+
+### PII scrubbing (`ScrubPii`, default ON)
+
+Right before a report is serialized for upload (or persisted to the crash outbox),
+FastLogs runs a best-effort redaction pass over the **log text**, every **context
+value**, and every **breadcrumb message**. Matches are replaced with `[redacted]`.
+The built-in patterns cover:
+
+- email addresses,
+- IPv4 and IPv6 addresses,
+- Bearer / `Authorization:` token values (the keyword is kept, the value redacted),
+- long digit runs (9+ consecutive digits: card / phone / account-like numbers).
+
+The pass runs once per report (never per frame, never on the logging hot path).
+
+> **Best-effort, biased toward privacy.** The long-digit-run rule can over-redact
+> (for example a long frame count or a timestamp). That is a deliberate trade-off:
+> we would rather redact too much than leak. Turn `ScrubPii` off (config, or the
+> Settings tab toggle) if you accept that risk for a given build.
+
+**Extending the rules.** Add your own patterns before the first send (e.g. from your
+game's init), and they run after the built-in set:
+
+```csharp
+using PlayJoy.FastLogs;
+
+// Redact your own secret-shaped strings, e.g. internal session ids:
+PiiScrubber.AddPattern(@"\bSESS-[A-Z0-9]{16}\b");
+```
+
+### Sensitive device fields (`IncludeSensitive`, default OFF)
+
+With `IncludeSensitive = false` (the default) the uploaded device snapshot omits the
+device model name, the application identifier, and (on WebGL) the page URL and
+referrer. The client also never sends a raw IP address; the server salts and SHA-256
+hashes the request IP solely for rate-limiting.
+
+### Other privacy notes
+
+- Both toggles are exposed at runtime in the overlay's **Settings** tab (**Scrub
+  PII** and **Include sensitive device info**), persisted in `PlayerPrefs`.
+- Screenshots are only captured when explicitly requested via the overlay toggle,
+  `SendAsync(includeScreenshot: true)`, or `Config > Auto-send > IncludeScreenshot`
+  (off by default).
+- Manual reports are always user-initiated (gesture / API call). The one automatic
+  path is `Config > Auto-send > AutoSendOnException` (on by default in dev) - see the
+  next section.
+- The whole package, including all networking, is stripped from retail and console
+  builds, so none of this runs in a shipped game.
+
+---
+
+## Crashes are always captured, persisted, and delivered
+
+In dev/editor builds, FastLogs installs an unhandled-exception hook and treats a
+crash as the one thing it must never drop. The design separates **capture** (always
+happens) from **upload tempo** (rate-limited):
+
+- **Capture first, to disk, before anything else.** On an unhandled exception the
+  report payload is written **synchronously to a durable on-disk outbox**
+  (`Application.persistentDataPath/FastLogs/pending/<id>.json`) *before* any throttle
+  or in-flight guard is consulted. So even a hard crash that kills the process before
+  the HTTP round-trip finishes does not lose the report.
+- **De-duplication.** Repeated/looping crashes are de-duplicated so a crash loop
+  cannot flood the outbox with copies.
+- **Delivery at the first opportunity.** Pending reports are drained when the app is
+  idle, and any leftovers are re-sent on the **next launch** (`FastLogs.Init` scans
+  the outbox). A report whose process died mid-upload still arrives eventually.
+- **Throttles bound upload tempo, not capture.** `MinSecondsBetweenAutoSends` (30 s),
+  `MaxAutoSendsPerSession` (10), and the single-in-flight lock only limit how often
+  uploads are *attempted*; the disk capture always runs.
+- **Poison-pill handling.** A report the server rejects with a permanent 4xx
+  (400/401/403/413/415) is removed from the outbox so it is not retried forever.
+  Transient failures (network error, status 0, 5xx) are kept for a future attempt.
+- **Persisted crashes carry no screenshot** (a crashed frame is rarely useful and
+  PNGs are heavy) and are PII-scrubbed before they touch disk.
+- **Retail / console:** the whole tool, crash capture included, is stripped - by
+  design, crashes are not sent from shipped or console builds.
+
+Auto-send on exception is on by default in dev; toggle it via
+`Config > Auto-send > AutoSendOnException` or the Settings tab.
 
 ---
 
