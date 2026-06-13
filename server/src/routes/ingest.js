@@ -129,6 +129,82 @@ function decodeLogText(logText, logEncoding, maxBytes) {
   throw err;
 }
 
+// ---------------------------------------------------------------------------
+// Optional structured fields: context (key->value map) and breadcrumbs (array).
+// Both are clamped server-side to bounded sizes so a malformed or oversized
+// client cannot bloat storage. Invalid *types* are ignored (treated as absent),
+// never a 400, because these fields are optional (CONTRACT section 7).
+// ---------------------------------------------------------------------------
+
+// Caps mirror the contract: context ~4KB total / key<=64 / value<=512;
+// breadcrumbs 100 items / ~16KB total / lvl in {info,warn,error}.
+const CTX_MAX_BYTES = 4 * 1024;
+const CTX_MAX_KEY = 64;
+const CTX_MAX_VALUE = 512;
+const BC_MAX_ITEMS = 100;
+const BC_MAX_BYTES = 16 * 1024;
+const BC_MAX_TEXT = 512;
+const BC_MAX_T = 40; // generous bound for an ISO-8601 timestamp string
+const BC_LEVELS = new Set(['info', 'warn', 'error']);
+
+const byteLen = (s) => Buffer.byteLength(s, 'utf8');
+
+// Sanitize the context object into a clamped { string: string } map, or return
+// null when the input is not a usable object. Keys/values are coerced to
+// strings and individually truncated; entries are added until the running
+// UTF-8 byte total would exceed CTX_MAX_BYTES, after which the rest is dropped.
+function sanitizeContext(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const out = {};
+  let total = 0;
+  let any = false;
+  for (const rawKey of Object.keys(raw)) {
+    const val = raw[rawKey];
+    if (val === null || val === undefined) continue;
+    if (typeof val === 'object') continue; // only scalar values are kept
+    const key = String(rawKey).slice(0, CTX_MAX_KEY);
+    if (key.length === 0) continue;
+    const value = String(val).slice(0, CTX_MAX_VALUE);
+    const cost = byteLen(key) + byteLen(value);
+    if (total + cost > CTX_MAX_BYTES) break;
+    out[key] = value;
+    total += cost;
+    any = true;
+  }
+  return any ? out : null;
+}
+
+// Sanitize the breadcrumbs array into a clamped list of { t?, m, lvl? } items,
+// or return null when the input is not a usable array. Items without a usable
+// `m` text are skipped; `lvl` is kept only if it is a valid enum value. Stops
+// after BC_MAX_ITEMS or once the running UTF-8 byte total exceeds BC_MAX_BYTES.
+function sanitizeBreadcrumbs(raw) {
+  if (!Array.isArray(raw)) return null;
+  const out = [];
+  let total = 0;
+  for (const item of raw) {
+    if (out.length >= BC_MAX_ITEMS) break;
+    if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
+    if (item.m === null || item.m === undefined) continue;
+    const m = String(item.m).slice(0, BC_MAX_TEXT);
+    if (m.length === 0) continue;
+    const crumb = { m };
+    if (item.t !== null && item.t !== undefined) {
+      const t = String(item.t).slice(0, BC_MAX_T);
+      if (t.length > 0) crumb.t = t;
+    }
+    if (item.lvl !== null && item.lvl !== undefined) {
+      const lvl = String(item.lvl);
+      if (BC_LEVELS.has(lvl)) crumb.lvl = lvl;
+    }
+    const cost = byteLen(crumb.m) + (crumb.t ? byteLen(crumb.t) : 0) + (crumb.lvl ? byteLen(crumb.lvl) : 0);
+    if (total + cost > BC_MAX_BYTES) break;
+    out.push(crumb);
+    total += cost;
+  }
+  return out.length ? out : null;
+}
+
 // Rate-limit keys and limits (windows 60s = 1 minute, configurable here).
 const RL_WINDOW_SEC = 60;
 const RL_IP_LIMIT = 60;   // per ip per minute
@@ -184,6 +260,10 @@ async function handleIngest(req, res) {
   const comment = body.comment != null ? String(body.comment).slice(0, 4000) : null;
   // Tester name from the client settings (who submitted this report).
   const tester = body.tester != null ? String(body.tester).slice(0, 120) : null;
+  // Optional structured context (key->value) and breadcrumbs (event trail).
+  // Sanitized + clamped here; invalid types collapse to null (field omitted).
+  const context = sanitizeContext(body.context);
+  const breadcrumbs = sanitizeBreadcrumbs(body.breadcrumbs);
   const retentionDaysRaw = body.retentionDays;
   const screenshotPng = body.screenshotPng || null;
 
@@ -291,6 +371,8 @@ async function handleIngest(req, res) {
     title,
     comment,
     tester,
+    context_json: context ? JSON.stringify(context) : null,
+    breadcrumbs_json: breadcrumbs ? JSON.stringify(breadcrumbs) : null,
     ts_utc: timestampUtc,
     cnt_error: counts.error,
     cnt_warn: counts.warn,

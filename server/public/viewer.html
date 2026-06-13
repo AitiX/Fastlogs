@@ -50,6 +50,23 @@
     <div class="device-groups" id="device-groups"></div>
   </div>
 
+  <div class="ctx-panel" id="context-panel" style="display:none">
+    <div class="ctx-panel-header" id="context-panel-header">
+      <span class="ctx-arrow">&#9658;</span>
+      <h3>Context</h3>
+    </div>
+    <div class="ctx-body" id="context-body"></div>
+  </div>
+
+  <div class="ctx-panel" id="breadcrumbs-panel" style="display:none">
+    <div class="ctx-panel-header" id="breadcrumbs-panel-header">
+      <span class="ctx-arrow">&#9658;</span>
+      <h3>Breadcrumbs</h3>
+      <span class="ctx-count" id="breadcrumbs-count"></span>
+    </div>
+    <div class="ctx-body" id="breadcrumbs-body"></div>
+  </div>
+
   <div class="screenshot-wrap" id="screenshot-wrap" style="display:none">
     <div class="screenshot-header" id="screenshot-header">
       <span id="screenshot-arrow">&#9658;</span>&nbsp;Screenshot
@@ -94,7 +111,9 @@
            hasScreenshot,
            logText: string (decompressed),
            device: { system:{}, graphics:{}, display:{}, application:{},
-                     runtime:{}, memory:{}, network:{}, build:{}, web:{} } }
+                     runtime:{}, memory:{}, network:{}, build:{}, web:{} },
+           context: { key: value, ... },
+           breadcrumbs: [ { t?, m, lvl? }, ... ] }
   See viewer.js for the full contract.
 -->
 <script>var __LD = /*__FASTLOGS_DATA__*/ null;</script>
