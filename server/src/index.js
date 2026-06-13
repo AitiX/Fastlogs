@@ -30,6 +30,7 @@ const { screenshot } = require('./routes/screenshot');
 const { viewer } = require('./routes/viewer');
 const { pin } = require('./routes/pin');
 const { setStatus, setTags } = require('./routes/triage');
+const { createRedmineIssue } = require('./routes/redmine');
 const { browseRoot, browseApp, browseVersion, browseCrashes } = require('./routes/browse');
 const staticRoutes = require('./routes/static');
 
@@ -45,6 +46,7 @@ router.post('/api/logs', handleIngest);
 router.post('/api/logs/:id/pin', pin);
 router.post('/api/logs/:id/status', setStatus);
 router.post('/api/logs/:id/tags', setTags);
+router.post('/api/logs/:id/redmine', createRedmineIssue);
 router.get('/api/logs/:id', meta);
 
 // Catalog (viewer-token gated). The literal "crashes" route MUST precede the

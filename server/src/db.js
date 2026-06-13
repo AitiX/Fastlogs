@@ -79,7 +79,7 @@ function migrate() {
   // ADD COLUMN is the safe, idempotent way to evolve the schema; guarding with
   // table_info keeps a re-run a no-op.
   const logCols = db.prepare('PRAGMA table_info(logs)').all();
-  for (const col of ['comment', 'tester', 'context_json', 'breadcrumbs_json', 'crash_sig', 'tags']) {
+  for (const col of ['comment', 'tester', 'context_json', 'breadcrumbs_json', 'crash_sig', 'tags', 'redmine_issue_id', 'redmine_issue_url']) {
     if (!logCols.some((c) => c.name === col)) {
       db.exec(`ALTER TABLE logs ADD COLUMN ${col} TEXT`);
     }
@@ -208,6 +208,11 @@ const stmts = {
 
   setTags: db.prepare(`UPDATE logs SET tags = @tags WHERE id = @id`),
 
+  setRedmine: db.prepare(`
+    UPDATE logs SET redmine_issue_id = @redmine_issue_id, redmine_issue_url = @redmine_issue_url
+    WHERE id = @id
+  `),
+
   // Raw crash rows for one app (grouping + first/last-seen done in JS so the
   // version compare is authoritative). Liveness mirrors getLiveLog (pinned OR
   // not-yet-expired) so the crashes view never counts logs the sweeper drops.
@@ -282,6 +287,16 @@ function setStatus(id, status) {
 // Set a log's tags. `tagsJson` is a JSON-array string, or null for "no tags".
 function setTags(id, tagsJson) {
   return stmts.setTags.run({ id, tags: tagsJson });
+}
+
+// Link a log to a created Redmine issue. issueId is coerced to a string (the
+// column is TEXT); issueUrl is the browser-facing issue URL.
+function setRedmine(id, issueId, issueUrl) {
+  return stmts.setRedmine.run({
+    id,
+    redmine_issue_id: issueId == null ? null : String(issueId),
+    redmine_issue_url: issueUrl || null,
+  });
 }
 
 // List all registered apps.
@@ -362,6 +377,7 @@ module.exports = {
   setPin,
   setStatus,
   setTags,
+  setRedmine,
   listApps,
   getApp,
   upsertApp,

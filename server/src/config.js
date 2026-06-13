@@ -63,6 +63,11 @@ function resolveDir(p) {
   return path.isAbsolute(p) ? p : path.resolve(SERVER_ROOT, p);
 }
 
+// Redmine integration inputs (read once so `enabled` can be precomputed; the
+// config object is frozen, so a getter is avoided).
+const redmineUrl = envStr('REDMINE_URL', '').replace(/\/+$/, '');
+const redmineApiKey = envStr('REDMINE_API_KEY', '');
+
 const config = Object.freeze({
   // Server.
   port: envInt('PORT', 8787),
@@ -147,6 +152,17 @@ const config = Object.freeze({
   // bounded. 0 disables it (use an external cron / systemd timer instead).
   sweepIntervalSec: envInt('SWEEP_INTERVAL_SEC', 3600),
   sweepBatch: envInt('SWEEP_BATCH', 500),
+
+  // Redmine "create issue from log" integration. Disabled unless both URL and
+  // API key are set (button hidden client-side, endpoint returns 503).
+  redmine: Object.freeze({
+    url: redmineUrl,
+    apiKey: redmineApiKey,
+    projectId: envStr('REDMINE_PROJECT_ID', ''),
+    trackerId: envStr('REDMINE_TRACKER_ID', ''),
+    timeoutMs: envInt('REDMINE_TIMEOUT_MS', 10000),
+    enabled: !!(redmineUrl && redmineApiKey),
+  }),
 });
 
 module.exports = config;

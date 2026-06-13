@@ -125,6 +125,12 @@ function publicLogObject(row) {
     // tags (empty [] when none).
     status: row.status || 'new',
     tags: parseJsonColumn(row.tags, true, []),
+    // Redmine: whether the integration is configured (so the viewer can show
+    // the button) and the linked issue, if any.
+    redmineEnabled: config.redmine.enabled,
+    redmineIssue: row.redmine_issue_id
+      ? { id: row.redmine_issue_id, url: row.redmine_issue_url || null }
+      : null,
     hasScreenshot: row.has_shot === 1,
     device: parseDevice(row),
     // Structured context (key->value object) and breadcrumbs (array of
