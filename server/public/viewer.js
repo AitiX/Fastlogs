@@ -13,6 +13,12 @@
 //   timestampUtc: string,          // ISO-8601 UTC
 //   pinned:       boolean,
 //   counts:       { error, warn, log },
+//   status:       string,          // new | triaged | in_progress | fixed | wontfix
+//   tags:         string[],        // possibly empty
+//   engine:       string | null,   // "Unity", "GameMaker", or null
+//   crashSig:     string | null,
+//   redmineEnabled: boolean,
+//   redmineIssue: { id, url } | null,
 //   hasScreenshot: boolean,
 //   logText:      string,          // decompressed, may be large
 //   device: {
@@ -42,6 +48,18 @@
     el.classList.add('show');
     if (toastTimer) clearTimeout(toastTimer);
     toastTimer = setTimeout(function () { el.classList.remove('show'); }, durationMs || 2000);
+  }
+
+  // ---- Mutation URL builder ----
+
+  // Build an /api/logs/:id/<action> URL, forwarding a ?token= from the current
+  // location when present. The token is harmless on the open-by-link endpoints
+  // (status/tags) and required by the viewer-gated one (redmine).
+  function apiUrl(id, action) {
+    var url = '/api/logs/' + encodeURIComponent(id) + '/' + action;
+    var token = new URLSearchParams(window.location.search).get('token');
+    if (token) url += '?token=' + encodeURIComponent(token);
+    return url;
   }
 
   // ---- Format byte size ----
@@ -78,6 +96,14 @@
   // Raw link
   var rawLink = document.getElementById('raw-link');
   rawLink.href = '/' + data.id + '/raw';
+
+  // FastLogs logo -> projects home (catalog). Carry the token when the page has
+  // one so the catalog stays authorized; a bare /browse would 401.
+  var logoEl = document.getElementById('topbar-logo');
+  if (logoEl) {
+    var logoToken = new URLSearchParams(window.location.search).get('token');
+    logoEl.href = '/browse' + (logoToken ? '?token=' + encodeURIComponent(logoToken) : '');
+  }
 
   // Copy link button
   document.getElementById('copy-link-btn').addEventListener('click', function () {
@@ -119,6 +145,164 @@
     }).catch(function (err) { toast('Network error'); });
   });
 
+  // ---- Status dropdown ----
+
+  // Triage status as a select. Mirrors the pin fetch: POST -> JSON -> toast.
+  // A per-status data attribute drives the dot/badge colour in CSS.
+  var statusSelect = document.getElementById('status-select');
+  var currentStatus = data.status || 'new';
+
+  function reflectStatus(status) {
+    currentStatus = status;
+    statusSelect.value = status;
+    statusSelect.dataset.status = status;
+  }
+  reflectStatus(currentStatus);
+
+  statusSelect.addEventListener('change', function () {
+    var next = statusSelect.value;
+    var prev = currentStatus;
+    fetch(apiUrl(data.id, 'status'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: next })
+    }).then(function (r) {
+      if (!r.ok) {
+        // Roll back the select to the last confirmed status on failure.
+        reflectStatus(prev);
+        return r.json().then(function (e) { toast('Error: ' + (e.message || r.status)); });
+      }
+      return r.json().then(function (res) {
+        reflectStatus(res.status || next);
+        data.status = currentStatus;
+        toast('Status updated');
+      });
+    }).catch(function (err) { reflectStatus(prev); toast('Network error'); });
+  });
+
+  // ---- Tags ----
+
+  // Tags render as chips (createElement + textContent, never innerHTML). Each
+  // chip carries a small "x" that removes it; Enter in the input adds one. Both
+  // paths POST the FULL array and re-render from the server's normalized list.
+  var tagsList = document.getElementById('tags-list');
+  var tagsInput = document.getElementById('tags-input');
+  var currentTags = Array.isArray(data.tags) ? data.tags.slice() : [];
+
+  function renderTags(tags) {
+    currentTags = Array.isArray(tags) ? tags.slice() : [];
+    data.tags = currentTags.slice();
+    tagsList.textContent = '';
+    currentTags.forEach(function (tag) {
+      var chip = document.createElement('span');
+      chip.className = 'tag-chip';
+
+      var label = document.createElement('span');
+      label.className = 'tag-chip-label';
+      label.textContent = tag;
+
+      var x = document.createElement('span');
+      x.className = 'tag-chip-x';
+      x.textContent = '×';
+      x.title = 'Remove tag';
+      x.addEventListener('click', function () {
+        var next = currentTags.filter(function (t) { return t !== tag; });
+        postTags(next);
+      });
+
+      chip.appendChild(label);
+      chip.appendChild(x);
+      tagsList.appendChild(chip);
+    });
+  }
+
+  // POST the full tags array; re-render from the server's normalized response.
+  function postTags(tags) {
+    fetch(apiUrl(data.id, 'tags'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tags: tags })
+    }).then(function (r) {
+      if (!r.ok) {
+        return r.json().then(function (e) { toast('Error: ' + (e.message || r.status)); });
+      }
+      return r.json().then(function (res) {
+        renderTags(Array.isArray(res.tags) ? res.tags : []);
+      });
+    }).catch(function (err) { toast('Network error'); });
+  }
+
+  renderTags(currentTags);
+
+  tagsInput.addEventListener('keydown', function (e) {
+    if (e.key !== 'Enter') return;
+    e.preventDefault();
+    var typed = tagsInput.value.trim();
+    if (!typed) return;
+    tagsInput.value = '';
+    // Add locally then POST the full array; server normalizes (trim/dedupe/cap).
+    var next = currentTags.slice();
+    next.push(typed);
+    postTags(next);
+  });
+
+  // ---- Redmine button / link ----
+
+  // One <a> element doubles as the create button and the resulting issue link.
+  // - existing issue -> render as a link to data.redmineIssue.url, shown.
+  // - else enabled    -> show the "+ Redmine issue" create button.
+  // - else            -> stay hidden (default display:none in the markup).
+  var redmineBtn = document.getElementById('redmine-btn');
+
+  // Render the linked-issue state: an "Issue #<id>" anchor opening in a new tab.
+  function renderRedmineIssue(id, url) {
+    redmineBtn.textContent = 'Issue #' + id;
+    redmineBtn.classList.add('redmine-linked');
+    if (url) {
+      redmineBtn.href = url;
+      redmineBtn.target = '_blank';
+      redmineBtn.rel = 'noopener noreferrer';
+    } else {
+      redmineBtn.removeAttribute('href');
+    }
+    redmineBtn.style.display = '';
+  }
+
+  function createRedmineIssue() {
+    redmineBtn.classList.add('busy');
+    fetch(apiUrl(data.id, 'redmine'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({})
+    }).then(function (r) {
+      if (!r.ok) {
+        if (r.status === 401) { toast('Redmine requires a team token'); return; }
+        return r.json().then(function (e) { toast('Error: ' + (e.message || r.status)); });
+      }
+      return r.json().then(function (res) {
+        data.redmineIssue = { id: res.issueId, url: res.issueUrl };
+        renderRedmineIssue(res.issueId, res.issueUrl);
+        toast('Redmine issue created');
+      });
+    }).catch(function (err) {
+      toast('Network error');
+    }).then(function () {
+      redmineBtn.classList.remove('busy');
+    });
+  }
+
+  if (data.redmineIssue && data.redmineIssue.id) {
+    renderRedmineIssue(data.redmineIssue.id, data.redmineIssue.url);
+  } else if (data.redmineEnabled) {
+    redmineBtn.textContent = '+ Redmine issue';
+    redmineBtn.style.display = '';
+    redmineBtn.addEventListener('click', function (e) {
+      e.preventDefault();
+      if (redmineBtn.classList.contains('redmine-linked') || redmineBtn.classList.contains('busy')) return;
+      createRedmineIssue();
+    });
+  }
+
   // ---- Counts bar ----
 
   var counts = data.counts || {};
@@ -129,6 +313,8 @@
   var metaParts = [];
   if (data.platform) metaParts.push(data.platform);
   if (data.appVersion) metaParts.push(data.appVersion);
+  // Engine (Unity / GameMaker / ...) only when known; at-a-glance line.
+  if (data.engine) metaParts.push(data.engine);
   if (data.logBytes !== null && data.logBytes !== undefined && !isNaN(data.logBytes)) metaParts.push(fmtBytes(data.logBytes));
   if (data.timestampUtc) {
     try { metaParts.push(new Date(data.timestampUtc).toLocaleString()); } catch (e) { metaParts.push(data.timestampUtc); }

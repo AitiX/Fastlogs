@@ -11,19 +11,33 @@
 <div class="page">
 
   <div class="topbar">
-    <span class="topbar-logo">Fast<span>Logs</span></span>
+    <a class="topbar-logo" id="topbar-logo" href="/browse">Fast<span>Logs</span></a>
     <span class="topbar-sep">/</span>
     <span class="topbar-title" id="page-title">Loading...</span>
     <div class="topbar-actions">
+      <select class="status-select" id="status-select" title="Triage status">
+        <option value="new">New</option>
+        <option value="triaged">Triaged</option>
+        <option value="in_progress">In progress</option>
+        <option value="fixed">Fixed</option>
+        <option value="wontfix">Won't fix</option>
+      </select>
       <a class="btn btn-ghost" id="raw-link" href="#">Raw</a>
       <button class="btn btn-ghost" id="copy-link-btn" type="button">Copy link</button>
       <button class="btn btn-pin" id="pin-btn" type="button">Pin</button>
+      <a class="btn btn-redmine" id="redmine-btn" style="display:none"></a>
     </div>
   </div>
 
   <div class="comment-box" id="comment-box" style="display:none">
     <div class="comment-label">Comment</div>
     <div class="comment-text" id="comment-text"></div>
+  </div>
+
+  <div class="tags-box" id="tags-box">
+    <div class="tags-label">Tags</div>
+    <div class="tags-list" id="tags-list"></div>
+    <input class="tags-input" id="tags-input" type="text" placeholder="Add tag, press Enter">
   </div>
 
   <div class="counts-bar" id="counts-bar">
@@ -109,6 +123,11 @@
   Shape: { id, appId, appVersion, platform, title, timestampUtc, pinned,
            counts: { error, warn, log },
            hasScreenshot,
+           status,                       // new | triaged | in_progress | fixed | wontfix
+           tags: [string, ...],          // possibly empty
+           engine,                       // "Unity" | "GameMaker" | null
+           redmineEnabled,               // boolean
+           redmineIssue: { id, url } | null,
            logText: string (decompressed),
            device: { system:{}, graphics:{}, display:{}, application:{},
                      runtime:{}, memory:{}, network:{}, build:{}, web:{} },

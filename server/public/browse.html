@@ -28,6 +28,23 @@
       <option value="error">Has errors</option>
       <option value="warn">Has warnings</option>
     </select>
+    <select class="filter-select" id="status-select" style="display:none">
+      <option value="">Any status</option>
+      <option value="new">New</option>
+      <option value="triaged">Triaged</option>
+      <option value="in_progress">In progress</option>
+      <option value="fixed">Fixed</option>
+      <option value="wontfix">Won't fix</option>
+    </select>
+    <select class="filter-select" id="sort-select" style="display:none">
+      <option value="newest">Newest</option>
+      <option value="oldest">Oldest</option>
+      <option value="errors">Most errors</option>
+      <option value="largest">Largest</option>
+    </select>
+    <label class="filter-toggle-label" id="errors-only-label" style="display:none">
+      <input type="checkbox" id="errors-only-cb"> Errors only
+    </label>
   </div>
 
   <div id="content">

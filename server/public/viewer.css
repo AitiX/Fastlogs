@@ -46,7 +46,9 @@ a:hover { color: var(--accent-h); text-decoration: underline; }
   flex-wrap: wrap;
 }
 
-.topbar-logo { font-weight: 700; font-size: 16px; color: var(--text); letter-spacing: -0.3px; }
+.topbar-logo { font-weight: 700; font-size: 16px; color: var(--text); letter-spacing: -0.3px;
+  text-decoration: none; cursor: pointer; }
+.topbar-logo:hover { opacity: 0.85; }
 .topbar-logo span { color: var(--accent); }
 .topbar-sep { color: var(--border); font-size: 20px; }
 .topbar-title { font-size: 15px; color: var(--text); flex: 1; min-width: 0;
@@ -327,6 +329,67 @@ a:hover { color: var(--accent-h); text-decoration: underline; }
   pointer-events: none; z-index: 999;
 }
 .toast.show { opacity: 1; transform: none; }
+
+/* ---- Status select (topbar) ---- */
+
+.status-select {
+  padding: 5px 10px; border-radius: var(--radius); font-size: 13px;
+  font-family: inherit; line-height: 1.4; cursor: pointer;
+  background: var(--bg2); color: var(--text); border: 1px solid var(--border);
+  outline: none; transition: border-color 0.12s;
+}
+.status-select:hover { border-color: var(--accent); }
+.status-select:focus { border-color: var(--accent); }
+/* Per-status accent on the left edge (dot-like badge). */
+.status-select[data-status] { border-left-width: 3px; }
+.status-select[data-status="new"]         { border-left-color: var(--text-dim); }
+.status-select[data-status="triaged"]     { border-left-color: var(--accent); }
+.status-select[data-status="in_progress"] { border-left-color: var(--yellow); }
+.status-select[data-status="fixed"]       { border-left-color: var(--green); }
+.status-select[data-status="wontfix"]     { border-left-color: var(--text-dim); }
+
+/* ---- Redmine button / linked issue ---- */
+
+.btn-redmine { background: transparent; color: var(--accent); border-color: var(--border); }
+.btn-redmine:hover { background: var(--bg3); border-color: var(--accent); text-decoration: none; }
+.btn.redmine-linked { color: var(--green); border-color: var(--green); }
+.btn.redmine-linked:hover { background: var(--bg3); color: var(--green); }
+.btn-redmine.busy { opacity: 0.45; cursor: default; }
+
+/* ---- Tags ---- */
+
+.tags-box {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 10px 16px; background: var(--bg2);
+  border: 1px solid var(--border); border-radius: var(--radius);
+  margin-bottom: 16px;
+}
+.tags-label {
+  font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em;
+  color: var(--text-dim); flex-shrink: 0;
+}
+.tags-list { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.tag-chip {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 2px 4px 2px 9px; border-radius: var(--radius);
+  background: var(--bg3); border: 1px solid var(--border);
+  font-size: 12px; color: var(--text);
+}
+.tag-chip-label { word-break: break-all; }
+.tag-chip-x {
+  cursor: pointer; user-select: none; color: var(--text-dim);
+  font-size: 14px; line-height: 1; padding: 0 4px; border-radius: var(--radius);
+  transition: color 0.1s, background 0.1s;
+}
+.tag-chip-x:hover { color: var(--red); background: var(--red-bg); }
+.tags-input {
+  flex: 1; min-width: 120px; padding: 4px 9px;
+  background: var(--bg3); border: 1px solid var(--border);
+  border-radius: var(--radius); color: var(--text); font-size: 12px;
+  outline: none; font-family: inherit;
+}
+.tags-input:focus { border-color: var(--accent); }
+.tags-input::placeholder { color: var(--text-dim); }
 
 /* ---- Scrollbar ---- */
 ::-webkit-scrollbar { width: 6px; height: 6px; }
