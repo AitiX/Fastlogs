@@ -329,9 +329,22 @@
     return 'log';
   }
 
-  // Detect stack trace continuation lines (indented or starting with "at ").
+  // Detect stack trace continuation lines so they can be folded under the log
+  // entry that produced them. Covers Unity's real formats: IL2CPP/Mono managed
+  // frames "Ns.Class:Method(args)" (no space after the colon - the hallmark
+  // that separates a frame from a "Tag: message" log line), the editor's
+  // "Class.Method (args) (at File.cs:line)" form, .NET "  at ..." frames,
+  // IL2CPP "[0x0001] in <...>" offsets, and wrapper/rethrow markers.
   function isTraceLine(line) {
-    return /^(\s+at\s|\s{2,}UnityEngine\.|  \[0x)/.test(line);
+    if (!line) return false;
+    if (/^\s+at\s/.test(line)) return true;
+    if (/\[0x[0-9a-fA-F]+\]\s+in\s/.test(line)) return true;
+    if (/\(at\s.+:\d+\)\s*$/.test(line)) return true;
+    if (/^[A-Za-z_][\w.+<>\[\]`]*:[A-Za-z_<.][\w.<>\[\]`]*\s*\(.*\)\s*$/.test(line)) return true;
+    if (/^\(wrapper\s/.test(line)) return true;
+    if (/^Rethrow as\s/.test(line)) return true;
+    if (/^---\s*End of\s/.test(line)) return true;
+    return false;
   }
 
   // Build pretty rendered lines.
