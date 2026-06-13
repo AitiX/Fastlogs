@@ -72,6 +72,19 @@ a:hover { color: var(--accent-h); text-decoration: underline; }
 .btn-pin.pinned { background: var(--yellow); color: #000; border-color: var(--yellow); }
 .btn:disabled { opacity: 0.45; cursor: default; }
 
+/* ---- Comment ---- */
+
+.comment-box {
+  padding: 12px 16px; background: var(--bg2);
+  border: 1px solid var(--border); border-left: 3px solid var(--accent);
+  border-radius: var(--radius); margin-bottom: 16px;
+}
+.comment-label {
+  font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em;
+  color: var(--text-dim); margin-bottom: 6px;
+}
+.comment-text { white-space: pre-wrap; word-break: break-word; color: var(--text); }
+
 /* ---- Counts bar ---- */
 
 .counts-bar {

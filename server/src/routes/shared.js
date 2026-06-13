@@ -94,6 +94,8 @@ function publicLogObject(row) {
     appVersion: row.app_version,
     platform: row.platform,
     title: row.title || null,
+    comment: row.comment || null,
+    tester: row.tester || null,
     timestampUtc: row.ts_utc,
     createdAt: row.created_at,
     expiresAt: row.expires_at || null,
