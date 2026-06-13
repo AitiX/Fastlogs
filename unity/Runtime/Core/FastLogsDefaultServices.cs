@@ -38,7 +38,7 @@ namespace PlayJoy.FastLogs
         public override ILogShareOverlay CreateOverlay(FastLogsConfig config)
         {
             bool captureByDefault = config != null && config.Screenshot.CaptureByDefault;
-            return new ImguiOverlay(new ClipboardService(), new SettingsPanel(config), captureByDefault);
+            return new ImguiOverlay(new ClipboardService(), new SettingsPanel(config), config, captureByDefault);
         }
     }
 }

@@ -12,7 +12,10 @@ and handle the result. It covers everything a QA workflow needs.
 3. **Log a message** - `FastLogs.Log("FastLogs basic usage sample started.")` adds
    a tagged entry to the buffer.
 4. **Send on key press** - press `F9` (configurable in the Inspector) to call
-   `FastLogs.SendAsync(includeScreenshot: true, title: "Manual report from sample")`.
+   `FastLogs.SendAsync(includeScreenshot: true, title: "Manual report from sample", comment: "...")`.
+   `title` is a short headline; `comment` is the tester's free-form problem
+   description (both optional). The tester name and "copy link on send" behaviour
+   are read from the config (`Config > UI`), so they apply to every report.
    The coroutine-backed await works on every Unity version and on WebGL.
 5. **Handle the result** - logs the shareable URL on success or the error on failure;
    also wires `FastLogs.OnUploaded` to demonstrate the event callback.

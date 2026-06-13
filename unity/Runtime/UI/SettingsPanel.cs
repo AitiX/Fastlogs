@@ -56,6 +56,8 @@ namespace PlayJoy.FastLogs
         private const string KeyTriggerKind = Prefix + "triggerKind";
         private const string KeyRetention = Prefix + "retentionDays";
         private const string KeyRingCapacity = Prefix + "ringCapacity";
+        private const string KeyTesterName = Prefix + "testerName";
+        private const string KeyCopyLinkOnSend = Prefix + "copyLinkOnSend";
 
         private readonly FastLogsConfig _config;
 
@@ -65,6 +67,8 @@ namespace PlayJoy.FastLogs
         private TriggerKind _triggerKind = TriggerKind.KeyCombo;
         private string _retentionText = "0";
         private string _ringCapacityText = "1000";
+        private string _testerName = string.Empty;
+        private bool _copyLinkOnSend = true;
 
         // Built lazily inside OnGUILayout.
         private bool _stylesBuilt;
@@ -91,6 +95,8 @@ namespace PlayJoy.FastLogs
                 _includeSensitive = _config.Diagnostics.IncludeSensitive;
                 _retentionText = _config.Server.RetentionDaysOverride.ToString();
                 _ringCapacityText = _config.Capture.RingCapacity.ToString();
+                _testerName = _config.UI.TesterName ?? string.Empty;
+                _copyLinkOnSend = _config.UI.CopyLinkOnSend;
             }
 
             _appId = PlayerPrefs.GetString(KeyAppId, _appId);
@@ -99,6 +105,8 @@ namespace PlayJoy.FastLogs
             _triggerKind = (TriggerKind)PlayerPrefs.GetInt(KeyTriggerKind, (int)_triggerKind);
             _retentionText = PlayerPrefs.GetInt(KeyRetention, ParseIntOr(_retentionText, 0)).ToString();
             _ringCapacityText = PlayerPrefs.GetInt(KeyRingCapacity, ParseIntOr(_ringCapacityText, 1000)).ToString();
+            _testerName = PlayerPrefs.GetString(KeyTesterName, _testerName);
+            _copyLinkOnSend = PlayerPrefs.GetInt(KeyCopyLinkOnSend, _copyLinkOnSend ? 1 : 0) != 0;
 
             ApplyToConfig();
         }
@@ -117,6 +125,8 @@ namespace PlayJoy.FastLogs
             _config.Diagnostics.IncludeSensitive = _includeSensitive;
             _config.Server.RetentionDaysOverride = Mathf.Max(0, ParseIntOr(_retentionText, 0));
             _config.Capture.RingCapacity = Mathf.Max(1, ParseIntOr(_ringCapacityText, 1000));
+            _config.UI.TesterName = _testerName ?? string.Empty;
+            _config.UI.CopyLinkOnSend = _copyLinkOnSend;
             ApplyTriggerKind(_triggerKind, _config.Trigger);
         }
 
@@ -128,6 +138,8 @@ namespace PlayJoy.FastLogs
             PlayerPrefs.SetInt(KeyTriggerKind, (int)_triggerKind);
             PlayerPrefs.SetInt(KeyRetention, Mathf.Max(0, ParseIntOr(_retentionText, 0)));
             PlayerPrefs.SetInt(KeyRingCapacity, Mathf.Max(1, ParseIntOr(_ringCapacityText, 1000)));
+            PlayerPrefs.SetString(KeyTesterName, _testerName ?? string.Empty);
+            PlayerPrefs.SetInt(KeyCopyLinkOnSend, _copyLinkOnSend ? 1 : 0);
             PlayerPrefs.Save();
         }
 
@@ -161,8 +173,9 @@ namespace PlayJoy.FastLogs
         /// <summary>Rough pixel height the panel needs (so the overlay can size itself).</summary>
         public float EstimateHeight(float scale)
         {
-            // ~11 rows of controls at ~30pt each, plus section labels.
-            return 360f * scale;
+            // ~14 rows of controls at ~30pt each, plus section labels (added the
+            // Tester Name label+field and the Copy-link-on-send toggle).
+            return 450f * scale;
         }
 
         // ---- Rendering ----
@@ -193,12 +206,24 @@ namespace PlayJoy.FastLogs
                 changed = true;
             }
 
+            // Tester name (editable) - attached to every report's "tester" field.
+            GUILayout.Label("Tester Name:", _label);
+            string newTester = GUILayout.TextField(_testerName, _field, GUILayout.Height(lineH));
+            if (!string.Equals(newTester, _testerName, StringComparison.Ordinal))
+            {
+                _testerName = newTester;
+                changed = true;
+            }
+
             // Toggles.
             bool newShot = GUILayout.Toggle(_captureShot, " Capture screenshot by default", GUILayout.Height(lineH));
             if (newShot != _captureShot) { _captureShot = newShot; changed = true; }
 
             bool newSensitive = GUILayout.Toggle(_includeSensitive, " Include sensitive device info", GUILayout.Height(lineH));
             if (newSensitive != _includeSensitive) { _includeSensitive = newSensitive; changed = true; }
+
+            bool newCopyOnSend = GUILayout.Toggle(_copyLinkOnSend, " Copy link on send", GUILayout.Height(lineH));
+            if (newCopyOnSend != _copyLinkOnSend) { _copyLinkOnSend = newCopyOnSend; changed = true; }
 
             // Trigger selection.
             GUILayout.Label("Open overlay with:", _label);

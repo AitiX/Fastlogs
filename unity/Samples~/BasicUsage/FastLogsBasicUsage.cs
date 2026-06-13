@@ -53,10 +53,18 @@ namespace PlayJoy.FastLogs.Samples
             FastLogs.Warn("Manual report requested.");
 
             // Awaitable on every Unity version (FlogTask, coroutine-driven).
-            var result = await FastLogs.SendAsync(_includeScreenshot, "Manual report from sample");
+            // title is a short headline; comment is the tester's free-form problem
+            // description (both optional). The tester name and copy-link-on-send
+            // behaviour come from the config (Config > UI), not from this call.
+            var result = await FastLogs.SendAsync(
+                _includeScreenshot,
+                "Manual report from sample",
+                "Reproduced by pressing the send key in the Basic Usage sample.");
 
             if (result.Success)
             {
+                // With Config > UI > CopyLinkOnSend enabled (default), the link is
+                // already on the clipboard here; copying again is harmless.
                 Debug.Log("[FastLogs sample] Uploaded: " + result.Url);
             }
             else

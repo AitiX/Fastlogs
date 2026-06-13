@@ -5,7 +5,7 @@ namespace PlayJoy.FastLogs
     /// <summary>
     /// The full ingest payload sent to `POST /api/logs`. Required fields are
     /// always serialized; optional fields (ScreenshotPngBase64, RetentionDays,
-    /// Title) are omitted when empty per the contract.
+    /// Title, Comment, Tester) are omitted when empty per the contract.
     /// </summary>
     public sealed class LogReportDto
     {
@@ -45,5 +45,11 @@ namespace PlayJoy.FastLogs
 
         /// <summary>title - record title, <=120 chars.</summary>
         public string Title;
+
+        /// <summary>comment - free-form tester problem description, <=4000 chars.</summary>
+        public string Comment;
+
+        /// <summary>tester - tester name from client settings, <=120 chars.</summary>
+        public string Tester;
     }
 }

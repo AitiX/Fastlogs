@@ -60,6 +60,8 @@ namespace PlayJoy.FastLogs
             w.Field("screenshotPng", report.ScreenshotPngBase64);
             w.Field("retentionDays", report.RetentionDays);
             w.Field("title", report.Title);
+            w.Field("comment", report.Comment);
+            w.Field("tester", report.Tester);
 
             w.EndObject();
             return sb.ToString();

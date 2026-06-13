@@ -26,6 +26,27 @@ function fastlogs_input_poll() {
     if (!FASTLOGS_ENABLED) return;
     var ui = fastlogs_ui_state();
 
+    // --- 0) Ввод комментария тестера (фича COMMENT): когда поле в фокусе, клавиатура
+    //   принадлежит полю. Накапливаем символы и НЕ даём хоткею-тогглу/жестам перехватить ввод
+    //   (иначе печать буквы хоткея закрыла бы оверлей). Esc - выйти из режима ввода.
+    var editing = variable_struct_exists(ui, "comment_editing") ? ui.comment_editing : false;
+    if (editing) {
+        if (script_exists(asset_get_index("fastlogs_comment_poll_input"))) {
+            fastlogs_comment_poll_input();
+        }
+        if (keyboard_check_pressed(vk_escape)) {
+            if (script_exists(asset_get_index("fastlogs_comment_set_editing"))) {
+                fastlogs_comment_set_editing(false);
+            }
+        }
+        // В режиме ввода обрабатываем только указатель (клики по кнопкам), без хоткея/жестов.
+        var ptr_e = fastlogs_input_pointer();
+        ui.px      = ptr_e.x;
+        ui.py      = ptr_e.y;
+        ui.pressed = ptr_e.pressed;
+        return;
+    }
+
     // --- 1) Хоткей клавиатуры: тоггл оверлея.
     // keyboard_check_pressed безопасен и на платформах без клавиатуры (просто не срабатывает).
     if (keyboard_check_pressed(FASTLOGS_HOTKEY_TOGGLE)) {

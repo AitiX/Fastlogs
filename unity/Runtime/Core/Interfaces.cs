@@ -145,7 +145,7 @@ namespace PlayJoy.FastLogs
         void Refresh(CountsDto counts, bool isBusy, UploadResultDto lastResult);
 
         /// <summary>Raised when the user requests a send from the overlay.</summary>
-        event Action<bool, string> SendRequested; // (includeScreenshot, title)
+        event Action<bool, string, string> SendRequested; // (includeScreenshot, title, comment)
     }
 
     /// <summary>

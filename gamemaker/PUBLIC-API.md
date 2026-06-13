@@ -81,8 +81,15 @@
 ### `fastlogs_send([opts_struct])` -> bool
 Собирает payload по `CONTRACT.md` и шлёт `POST` на `FASTLOGS_ENDPOINT`
 (`Content-Type: application/json`, при наличии токена `Authorization: Bearer <token>`).
-- `opts_struct` (опц., struct): `title` (string, <=120), `retentionDays` (int),
-  `screenshot` (bool override), `extraDevice` (struct, доп. поля в device).
+- `opts_struct` (опц., struct): `title` (string, <=120), `comment` (string, <=4000 -
+  свободное описание проблемы тестером, уходит в поле `comment`; пустое опускается),
+  `retentionDays` (int), `screenshot` (bool override), `extraDevice` (struct, доп. поля в device).
+- Поле `tester` (имя тестера, <=120) НЕ передаётся через opts: оно берётся из настройки
+  `FASTLOGS_TESTER` (или runtime-override `fastlogs_init({ tester })`) и уходит с КАЖДЫМ
+  отчётом автоматически; пустое опускается.
+- После УСПЕШНОЙ отправки при `FASTLOGS_COPY_ON_SEND` (деф. true) короткая ссылка (`url`)
+  автоматически копируется в буфер обмена устройства. На WebGL копирование требует
+  user-gesture и может не сработать (не падаем; кнопка "Копировать" в оверлее - fallback).
 - Поведение: асинхронно (`http_request`); ответ обрабатывается в Async HTTP событии
   (`Other_62.gml`), при `201` заполняется `last_url`. Возврат: `true` если запрос
   поставлен в отправку, `false` если no-op (выключено / нет endpoint / уже идёт отправка

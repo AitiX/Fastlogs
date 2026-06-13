@@ -156,6 +156,12 @@ namespace PlayJoy.FastLogs
         {
             [Tooltip("Enable the in-game overlay UI.")]
             public bool EnableUI = true;
+
+            [Tooltip("Tester name attached to every report's 'tester' field. Empty by default.")]
+            public string TesterName = string.Empty;
+
+            [Tooltip("After a successful send, automatically copy the short link to the device clipboard. On by default. On WebGL this may be blocked outside a user gesture; the overlay's Copy button remains as a fallback.")]
+            public bool CopyLinkOnSend = true;
         }
 
         [Serializable]

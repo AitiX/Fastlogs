@@ -34,6 +34,10 @@ function fastlogs_ui_state() {
             // Тост "скопировано" (clipboard): текст + таймер кадров до скрытия.
             toast_text:      "",
             toast_frames:    0,
+            // Комментарий тестера (фича COMMENT). Накапливается inline через keyboard_string;
+            //   уходит в opts.comment при отправке. Контракт: <=4000 символов.
+            comment_text:    "",      // текущий введённый текст
+            comment_editing: false,   // активен ли режим ввода (фокус на поле комментария)
             // Настройки (персист ini). Значения подгружаются fastlogs_ui_settings_load().
             settings_loaded: false,
             cfg_screenshot:  FASTLOGS_SCREENSHOT_DEFAULT,
@@ -69,6 +73,77 @@ function fastlogs_toggle() {
 function fastlogs_is_open() {
     if (!FASTLOGS_ENABLED) return false;
     return fastlogs_ui_state().open;
+}
+
+// =====================================================================================
+// КОММЕНТАРИЙ ТЕСТЕРА (фича COMMENT). Многострочный inline-ввод через keyboard_string.
+//   Путь keyboard_string выбран как надёжный для inline-накопления в оверлее (desktop/HTML5);
+//   нативный get_string_async на части платформ однострочный/модальный - не подходит.
+//   // TODO verify доступность keyboard_string на целевых консолях (там обычно экранная
+//   клавиатура через get_string_async; для консолей COMMENT можно не предлагать).
+// =====================================================================================
+
+// Максимальная длина комментария (контракт: <=4000). Локальный макрос, чтобы не трогать config.
+#macro FASTLOGS_COMMENT_MAX 4000
+
+/// @returns {string} текущий введённый комментарий тестера ("" если пуст)
+function fastlogs_comment_get() {
+    if (!FASTLOGS_ENABLED) return "";
+    return fastlogs_ui_state().comment_text;
+}
+
+/// Очистить комментарий и выйти из режима ввода (напр. после успешной отправки).
+function fastlogs_comment_clear() {
+    if (!FASTLOGS_ENABLED) return;
+    var ui = fastlogs_ui_state();
+    ui.comment_text    = "";
+    ui.comment_editing = false;
+}
+
+/// Войти/выйти из режима ввода комментария. При входе синхронизируем keyboard_string
+///   с текущим текстом, чтобы редактирование продолжалось с уже введённого.
+/// @param {bool} on
+function fastlogs_comment_set_editing(on) {
+    if (!FASTLOGS_ENABLED) return;
+    var ui = fastlogs_ui_state();
+    ui.comment_editing = bool(on);
+    if (ui.comment_editing) {
+        // keyboard_string - встроенная строка-аккумулятор ввода (учитывает backspace).
+        //   Засеваем её текущим текстом, чтобы продолжить с места.
+        keyboard_string = ui.comment_text;
+    }
+}
+
+/// Опрос ввода комментария. Вызывать каждый Step ПОКА оверлей открыт и поле в фокусе.
+///   Накапливает символы из keyboard_string; Enter добавляет перевод строки (многострочно);
+///   обрезает до FASTLOGS_COMMENT_MAX. Вызывается из fastlogs_input_poll (input-скрипт).
+function fastlogs_comment_poll_input() {
+    if (!FASTLOGS_ENABLED) return;
+    var ui = fastlogs_ui_state();
+    if (!ui.open || !ui.comment_editing) return;
+
+    // 1) Базовый текст = текущий keyboard_string (GM сам обрабатывает печать и backspace).
+    //    На платформах без keyboard_string останется пустым - тогда поле просто не наполняется.
+    var s = is_string(keyboard_string) ? keyboard_string : "";
+
+    // 2) Многострочность: GM кладёт в keyboard_string печатные символы; Enter обычно НЕ
+    //    попадает в keyboard_string. Ловим нажатие Enter отдельно и вставляем "\n".
+    //    Делаем это, дописывая перевод строки прямо в аккумулятор keyboard_string, чтобы
+    //    последующий backspace тоже корректно его удалял.
+    //    // TODO verify: на части рантаймов keyboard_string может сам содержать \r/\n от Enter
+    //    (тогда возможен двойной перевод) - проверить при импорте в IDE на целевой платформе.
+    if (keyboard_check_pressed(vk_enter)) {
+        keyboard_string += "\n";
+        s = keyboard_string;
+    }
+
+    // 3) Лимит длины (контракт <=4000). Режем аккумулятор, чтобы UI и отправка совпадали.
+    if (string_length(s) > FASTLOGS_COMMENT_MAX) {
+        s = string_copy(s, 1, FASTLOGS_COMMENT_MAX);
+        keyboard_string = s;
+    }
+
+    ui.comment_text = s;
 }
 
 // =====================================================================================
@@ -181,7 +256,10 @@ function fastlogs_ui_draw() {
     var y  = panel_y;
 
     // Высоту панели посчитаем как сумму строк ниже; для простоты рисуем фон достаточной высоты.
-    var panel_h = btn_h * 5 + pad * 7;
+    // +1 строка под "Тестер:" (line_h) и +поле комментария (comment_h) к исходным 5 рядам кнопок.
+    var line_h    = round(28 * ui_scale);          // высота однострочной подписи
+    var comment_h = btn_h * 2;                      // высота многострочного поля комментария
+    var panel_h = btn_h * 5 + pad * 9 + line_h + comment_h;
     fastlogs_ui_panel_bg(x1, y, x1 + panel_w, y + panel_h);
 
     var inner_x = x1 + pad;
@@ -205,6 +283,46 @@ function fastlogs_ui_draw() {
     fastlogs_ui_counter(inner_x + third,     cy, third - pad, btn_h, "W", counts.warn,  FASTLOGS_COL_WARN,  fsize);
     fastlogs_ui_counter(inner_x + third * 2, cy, third - pad, btn_h, "L", counts.log,   FASTLOGS_COL_LOG,   fsize);
     cy += btn_h + pad;
+
+    // --- Имя тестера (из конфига FASTLOGS_TESTER / runtime-override). Read-only показ.
+    //   Помогает тестеру убедиться, что его имя уйдёт с отчётом (фича TESTER).
+    var tester_name = fastlogs_ui_tester_safe();
+    draw_set_colour(FASTLOGS_COL_LOG);
+    fastlogs_ui_text(inner_x, cy, "Тестер:", fsize);
+    draw_set_colour(FASTLOGS_COL_TEXT);
+    var tester_shown = (tester_name == "") ? "(не задан в конфиге)" : tester_name;
+    fastlogs_ui_text_clipped(inner_x + round(110 * ui_scale), cy, tester_shown, fsize, inner_w - round(110 * ui_scale));
+    cy += line_h + pad * 0.5;
+
+    // --- Поле комментария тестера (фича COMMENT). Клик по полю -> режим ввода (keyboard_string).
+    //   Многострочный текст; уходит в opts.comment при отправке. Рамка акцентом, если в фокусе.
+    draw_set_colour(FASTLOGS_COL_LOG);
+    fastlogs_ui_text(inner_x, cy, "Комментарий (опишите проблему):", fsize);
+    cy += line_h;
+    var cmt_y1 = cy;
+    var cmt_y2 = cy + comment_h;
+    // Фон поля.
+    draw_set_colour(FASTLOGS_COL_BTN);
+    draw_set_alpha(1);
+    draw_rectangle(inner_x, cmt_y1, inner_x + inner_w, cmt_y2, false);
+    // Рамка: акцент если редактируем, иначе обычная.
+    draw_set_colour(ui.comment_editing ? FASTLOGS_COL_ACCENT : FASTLOGS_COL_BTN_HOVER);
+    draw_rectangle(inner_x, cmt_y1, inner_x + inner_w, cmt_y2, true);
+    // Текст комментария или подсказка. Многострочно (draw_text переносит по "\n").
+    var cmt = ui.comment_text;
+    if (cmt == "") {
+        draw_set_colour(FASTLOGS_COL_LOG);
+        fastlogs_ui_text(inner_x + pad * 0.5, cmt_y1 + pad * 0.5, ui.comment_editing ? "Печатайте... (Enter - новая строка)" : "Нажмите, чтобы ввести", fsize);
+    } else {
+        draw_set_colour(FASTLOGS_COL_TEXT);
+        // Курсор-индикатор в режиме ввода (мигание по таймеру кадров).
+        var cursor = (ui.comment_editing && ((current_time div 500) mod 2 == 0)) ? "_" : "";
+        // draw_text сам рисует многострочно по "\n"; масштаб - через transformed.
+        draw_text_transformed(inner_x + pad * 0.5, cmt_y1 + pad * 0.5, cmt + cursor, fsize, fsize, 0);
+    }
+    // Зона клика всего поля -> фокус ввода.
+    fastlogs_ui_register_hit(ui, inner_x, cmt_y1, inner_x + inner_w, cmt_y2, "comment_focus");
+    cy = cmt_y2 + pad;
 
     // --- Кнопка "Отправить" + тоггл "Скриншот" (крупная зона).
     var half = inner_w / 2;
@@ -257,6 +375,10 @@ function fastlogs_ui_draw() {
     // Применить накопленный ввод по зонам этого кадра (после того как все hit-rects собраны).
     if (ui.pressed) {
         var hid = fastlogs_ui_hit_test(ui, ui.px, ui.py);
+        // Клик мимо поля комментария снимает фокус ввода (чтобы печать не уходила «в никуда»).
+        if (ui.comment_editing && hid != "comment_focus") {
+            fastlogs_comment_set_editing(false);
+        }
         if (hid != "") fastlogs_ui_action(hid, ui);
         ui.pressed = false; // потребили
     }
@@ -350,8 +472,23 @@ function fastlogs_ui_action(id, ui) {
         case "settings_toggle": ui.settings_open = !ui.settings_open; break;
         case "settings_close":  ui.settings_open = false; break;
 
+        case "comment_focus":
+            // Клик по полю комментария -> включить режим ввода (keyboard_string).
+            fastlogs_comment_set_editing(true);
+            break;
+
         case "send":
-            if (script_exists(asset_get_index("fastlogs_send"))) fastlogs_send();
+            // Передаём введённый комментарий в отправку (opts.comment). Пустой не кладём -
+            //   payload сам опустит, но не загромождаем opts. Снимаем фокус ввода.
+            fastlogs_comment_set_editing(false);
+            if (script_exists(asset_get_index("fastlogs_send"))) {
+                var send_opts = {};
+                var cmt_send = fastlogs_comment_get();
+                if (is_string(cmt_send) && string_length(cmt_send) > 0) {
+                    send_opts.comment = cmt_send;
+                }
+                fastlogs_send(send_opts);
+            }
             break;
 
         case "copy":
@@ -538,4 +675,15 @@ function fastlogs_ui_last_url_safe() {
 function fastlogs_ui_is_recording_safe() {
     if (script_exists(asset_get_index("fastlogs_is_recording"))) return fastlogs_is_recording();
     return false;
+}
+
+/// @returns {string} имя тестера с учётом runtime-override (fastlogs_init({tester})), иначе макрос
+function fastlogs_ui_tester_safe() {
+    // __fastlogs_cfg (core) учитывает override из fastlogs_init; если core ещё не подключён -
+    //   падаем на сам макрос FASTLOGS_TESTER.
+    var t = FASTLOGS_TESTER;
+    if (script_exists(asset_get_index("__fastlogs_cfg"))) {
+        t = __fastlogs_cfg("tester", FASTLOGS_TESTER);
+    }
+    return is_string(t) ? t : "";
 }

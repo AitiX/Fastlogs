@@ -51,7 +51,10 @@ function __fastlogs_http_state() {
 // fastlogs_send([opts]) -> bool
 // Собирает payload и ставит POST-запрос. true если запрос (или захват скриншота под него)
 //   поставлен; false если no-op (выключено / нет endpoint / уже идёт отправка).
-// opts (опц., struct): title, retentionDays, screenshot, extraDevice (см. payload).
+// opts (опц., struct): title, comment, retentionDays, screenshot, extraDevice (см. payload).
+//   comment (string<=4000) - свободное описание проблемы тестером; уходит в поле comment.
+//     opts целиком пробрасывается в payload (в т.ч. через сохранённый st.__http_pending_opts
+//     на пути со скриншотом), так что comment доносится до тела автоматически.
 // =====================================================================================
 function fastlogs_send(opts = undefined) {
     if (!FASTLOGS_ENABLED) { return false; }
