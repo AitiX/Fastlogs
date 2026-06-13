@@ -53,6 +53,7 @@ namespace PlayJoy.FastLogs
         private const string KeyAppId = Prefix + "appId";
         private const string KeyCaptureShot = Prefix + "captureScreenshot";
         private const string KeyIncludeSensitive = Prefix + "includeSensitive";
+        private const string KeyScrubPii = Prefix + "scrubPii";
         private const string KeyTriggerKind = Prefix + "triggerKind";
         private const string KeyRetention = Prefix + "retentionDays";
         private const string KeyRingCapacity = Prefix + "ringCapacity";
@@ -67,6 +68,7 @@ namespace PlayJoy.FastLogs
         private string _appId = string.Empty;
         private bool _captureShot;
         private bool _includeSensitive;
+        private bool _scrubPii = true;
         private TriggerKind _triggerKind = TriggerKind.KeyCombo;
         private string _retentionText = "0";
         private string _ringCapacityText = "1000";
@@ -99,6 +101,7 @@ namespace PlayJoy.FastLogs
                 _appId = _config.Server.AppId ?? string.Empty;
                 _captureShot = _config.Screenshot.CaptureByDefault;
                 _includeSensitive = _config.Diagnostics.IncludeSensitive;
+                _scrubPii = _config.Diagnostics.ScrubPii;
                 _retentionText = _config.Server.RetentionDaysOverride.ToString();
                 _ringCapacityText = _config.Capture.RingCapacity.ToString();
                 _testerName = _config.UI.TesterName ?? string.Empty;
@@ -111,6 +114,7 @@ namespace PlayJoy.FastLogs
             _appId = PlayerPrefs.GetString(KeyAppId, _appId);
             _captureShot = PlayerPrefs.GetInt(KeyCaptureShot, _captureShot ? 1 : 0) != 0;
             _includeSensitive = PlayerPrefs.GetInt(KeyIncludeSensitive, _includeSensitive ? 1 : 0) != 0;
+            _scrubPii = PlayerPrefs.GetInt(KeyScrubPii, _scrubPii ? 1 : 0) != 0;
             _triggerKind = (TriggerKind)PlayerPrefs.GetInt(KeyTriggerKind, (int)_triggerKind);
             _retentionText = PlayerPrefs.GetInt(KeyRetention, ParseIntOr(_retentionText, 0)).ToString();
             _ringCapacityText = PlayerPrefs.GetInt(KeyRingCapacity, ParseIntOr(_ringCapacityText, 1000)).ToString();
@@ -135,6 +139,7 @@ namespace PlayJoy.FastLogs
             _config.Server.AppId = _appId ?? string.Empty;
             _config.Screenshot.CaptureByDefault = _captureShot;
             _config.Diagnostics.IncludeSensitive = _includeSensitive;
+            _config.Diagnostics.ScrubPii = _scrubPii;
             _config.Server.RetentionDaysOverride = Mathf.Max(0, ParseIntOr(_retentionText, 0));
             _config.Capture.RingCapacity = Mathf.Max(1, ParseIntOr(_ringCapacityText, 1000));
             _config.UI.TesterName = _testerName ?? string.Empty;
@@ -150,6 +155,7 @@ namespace PlayJoy.FastLogs
             PlayerPrefs.SetString(KeyAppId, _appId ?? string.Empty);
             PlayerPrefs.SetInt(KeyCaptureShot, _captureShot ? 1 : 0);
             PlayerPrefs.SetInt(KeyIncludeSensitive, _includeSensitive ? 1 : 0);
+            PlayerPrefs.SetInt(KeyScrubPii, _scrubPii ? 1 : 0);
             PlayerPrefs.SetInt(KeyTriggerKind, (int)_triggerKind);
             PlayerPrefs.SetInt(KeyRetention, Mathf.Max(0, ParseIntOr(_retentionText, 0)));
             PlayerPrefs.SetInt(KeyRingCapacity, Mathf.Max(1, ParseIntOr(_ringCapacityText, 1000)));
@@ -191,9 +197,10 @@ namespace PlayJoy.FastLogs
         /// <summary>Rough pixel height the panel needs (so the overlay can size itself).</summary>
         public float EstimateHeight(float scale)
         {
-            // ~17 rows of controls at ~30pt each, plus section labels. Added the
-            // auto-send toggle, quick-send toggle and (conditional) key picker row.
-            float rows = _quickSendKeyboard ? 560f : 525f;
+            // ~18 rows of controls at ~30pt each, plus section labels. Added the
+            // auto-send toggle, scrub-PII toggle, quick-send toggle and (conditional)
+            // key picker row.
+            float rows = _quickSendKeyboard ? 595f : 560f;
             return rows * scale;
         }
 
@@ -240,6 +247,9 @@ namespace PlayJoy.FastLogs
 
             bool newSensitive = GUILayout.Toggle(_includeSensitive, " Include sensitive device info", GUILayout.Height(lineH));
             if (newSensitive != _includeSensitive) { _includeSensitive = newSensitive; changed = true; }
+
+            bool newScrub = GUILayout.Toggle(_scrubPii, " Scrub PII (emails, IPs, tokens)", GUILayout.Height(lineH));
+            if (newScrub != _scrubPii) { _scrubPii = newScrub; changed = true; }
 
             bool newCopyOnSend = GUILayout.Toggle(_copyLinkOnSend, " Copy link on send", GUILayout.Height(lineH));
             if (newCopyOnSend != _copyLinkOnSend) { _copyLinkOnSend = newCopyOnSend; changed = true; }

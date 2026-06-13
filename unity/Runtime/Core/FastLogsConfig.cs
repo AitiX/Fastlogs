@@ -158,8 +158,11 @@ namespace PlayJoy.FastLogs
         [Serializable]
         public sealed class DiagnosticsSection
         {
-            [Tooltip("Include potentially identifying fields (device name, urls, identifiers). Off by default.")]
+            [Tooltip("Include potentially identifying fields (device name, urls, identifiers). Off by default (privacy-by-default).")]
             public bool IncludeSensitive = false;
+
+            [Tooltip("Scrub PII (emails, IPs, bearer tokens, long digit runs) from the log text, context values and breadcrumb messages before upload. ON by default (privacy-by-default). Patterns are extensible via PiiScrubber.AddPattern.")]
+            public bool ScrubPii = true;
         }
 
         [Serializable]
