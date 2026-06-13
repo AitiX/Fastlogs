@@ -62,6 +62,12 @@ namespace PlayJoy.FastLogs
         private bool _lastSendIncludeScreenshot;
         private string _lastSendTitle;
         private string _lastSendComment;
+        private bool _lastSendAttachQueued; // did this send attach the manual screenshot queue?
+
+        // Screenshots captured in code via CaptureScreenshot(), queued for the next
+        // user-initiated send and cleared once it resolves. Capped (oldest dropped).
+        private const int MaxQueuedScreenshots = 8;
+        private readonly List<string> _queuedShots = new List<string>();
 
         // ---- Retry-until-success state (outer loop, on top of the uploader's own
         //      immediate retries). At most ONE pending retry exists at a time. ----
@@ -286,7 +292,7 @@ namespace PlayJoy.FastLogs
         private void OnToastRetryRequested()
         {
             // Re-run the last send with the same parameters.
-            BeginSend(_lastSendIncludeScreenshot, _lastSendTitle, _lastSendComment);
+            BeginSend(_lastSendIncludeScreenshot, _lastSendTitle, _lastSendComment, _lastSendAttachQueued);
         }
 
         // ---- Quick-send (send immediately, without opening the overlay) ----
@@ -332,7 +338,7 @@ namespace PlayJoy.FastLogs
                 // A user-initiated send is unrelated to any pending crash report; drop
                 // ownership so its success does not delete a leftover crash file.
                 ForgetPendingCrashOwnership();
-                BeginSend(shot, null, null);
+                BeginSend(shot, null, null, attachQueuedShots: true);
             }
             catch (Exception e)
             {
@@ -806,6 +812,60 @@ namespace PlayJoy.FastLogs
             }
         }
 
+        // ---- Screenshot queue (capture several in code, send them together) ----
+
+        /// <summary>
+        /// Capture the current frame now and add it to a queue that rides with the next
+        /// user-initiated send. Lets game code take several screenshots before sending.
+        /// Fire-and-forget (the grab is end-of-frame async); the FastLogs overlay is not
+        /// included in the shot. The queue is capped (oldest dropped) and cleared once a
+        /// send that carried it resolves.
+        /// </summary>
+        public void CaptureScreenshot()
+        {
+            if (_screenshot == null)
+            {
+                return;
+            }
+            FlogTask<byte[]> shotTask = null;
+            try { shotTask = _screenshot.CaptureAsync(ScreenshotMaxDimension()); }
+            catch (Exception e) { FlogLog.Exception(e); return; }
+            if (shotTask == null)
+            {
+                return;
+            }
+            try { StartCoroutine(CollectScreenshot(shotTask)); }
+            catch (Exception e) { FlogLog.Exception(e); }
+        }
+
+        private IEnumerator CollectScreenshot(FlogTask<byte[]> shotTask)
+        {
+            while (!shotTask.IsCompleted)
+            {
+                yield return null;
+            }
+            if (shotTask.IsFaulted || shotTask.Result == null || shotTask.Result.Length == 0)
+            {
+                yield break;
+            }
+            string b64;
+            try { b64 = Convert.ToBase64String(shotTask.Result); }
+            catch (Exception e) { FlogLog.Exception(e); yield break; }
+
+            // Cap the queue: drop the oldest so the most recent shots survive.
+            if (_queuedShots.Count >= MaxQueuedScreenshots)
+            {
+                _queuedShots.RemoveAt(0);
+            }
+            _queuedShots.Add(b64);
+        }
+
+        /// <summary>Drop all queued screenshots without sending them.</summary>
+        public void ClearScreenshots()
+        {
+            _queuedShots.Clear();
+        }
+
         // ---- Send pipeline ----
 
         private void OnOverlaySendRequested(bool includeScreenshot, string title, string comment)
@@ -813,14 +873,14 @@ namespace PlayJoy.FastLogs
             // A manual overlay send is a fresh, user-initiated report; detach it from any
             // pending crash file so its success cannot delete a leftover crash report.
             ForgetPendingCrashOwnership();
-            BeginSend(includeScreenshot, title, comment);
+            BeginSend(includeScreenshot, title, comment, attachQueuedShots: true);
         }
 
         /// <summary>
         /// Kick off a send and return an awaitable result. Never throws; failures
         /// surface through the returned task and OnUploaded.
         /// </summary>
-        public FlogTask<UploadResultDto> BeginSend(bool includeScreenshot, string title, string comment)
+        public FlogTask<UploadResultDto> BeginSend(bool includeScreenshot, string title, string comment, bool attachQueuedShots = false)
         {
             var task = FlogTask.Create<UploadResultDto>();
 
@@ -849,6 +909,7 @@ namespace PlayJoy.FastLogs
             _lastSendIncludeScreenshot = includeScreenshot;
             _lastSendTitle = title;
             _lastSendComment = comment;
+            _lastSendAttachQueued = attachQueuedShots;
 
             if (_uploader == null)
             {
@@ -863,7 +924,7 @@ namespace PlayJoy.FastLogs
 
             try
             {
-                StartCoroutine(SendRoutine(includeScreenshot, title, comment, task));
+                StartCoroutine(SendRoutine(includeScreenshot, title, comment, attachQueuedShots, task));
             }
             catch (Exception e)
             {
@@ -876,7 +937,7 @@ namespace PlayJoy.FastLogs
             return task;
         }
 
-        private IEnumerator SendRoutine(bool includeScreenshot, string title, string comment, FlogTask<UploadResultDto> task)
+        private IEnumerator SendRoutine(bool includeScreenshot, string title, string comment, bool attachQueuedShots, FlogTask<UploadResultDto> task)
         {
             _isBusy = true;
             UploadResultDto result;
@@ -903,11 +964,22 @@ namespace PlayJoy.FastLogs
                 }
             }
 
-            // 2) Build the report off the current diagnostics + log text.
+            // 2) Gather screenshots: the queued ones (CaptureScreenshot) for a
+            //    user-initiated send, plus the optional live shot captured above.
+            List<string> shots = null;
+            bool haveQueued = attachQueuedShots && _queuedShots.Count > 0;
+            if (haveQueued || !string.IsNullOrEmpty(screenshotBase64))
+            {
+                shots = new List<string>(_queuedShots.Count + 1);
+                if (haveQueued) shots.AddRange(_queuedShots);
+                if (!string.IsNullOrEmpty(screenshotBase64)) shots.Add(screenshotBase64);
+            }
+
+            // 3) Build the report off the current diagnostics + log text.
             LogReportDto report = null;
             try
             {
-                report = BuildReport(title, comment, screenshotBase64);
+                report = BuildReport(title, comment, shots);
             }
             catch (Exception e)
             {
@@ -968,6 +1040,10 @@ namespace PlayJoy.FastLogs
             // failure, Retry.
             if (result.Success)
             {
+                // The queued screenshots rode with this send (if it attached them); they
+                // are now delivered, so drop them.
+                if (_lastSendAttachQueued) _queuedShots.Clear();
+
                 // FEATURE #1: this send succeeded, so drop its persisted crash file (if
                 // this send owned one) and release ownership.
                 if (!string.IsNullOrEmpty(_pendingCrashFilePath))
@@ -1011,6 +1087,10 @@ namespace PlayJoy.FastLogs
                 // Clearing the field here prevents a later, unrelated success from
                 // deleting a now-stale file and prevents the drain from double-owning it.
                 _pendingCrashFilePath = null;
+
+                // Terminal failure consumes the queued screenshots too (this send is
+                // done; keep them only across transient retries, handled above).
+                if (_lastSendAttachQueued) _queuedShots.Clear();
 
                 ShowToast(ToastKind.Error, "FastLogs error: " + result.Error, null, 0f, true);
 
@@ -1142,7 +1222,7 @@ namespace PlayJoy.FastLogs
             // BeginSend below is recognised as the retry loop continuing (it must NOT
             // reset the attempt counter), not an external replacement.
             _retryCoroutine = null;
-            BeginSend(_lastSendIncludeScreenshot, _lastSendTitle, _lastSendComment);
+            BeginSend(_lastSendIncludeScreenshot, _lastSendTitle, _lastSendComment, _lastSendAttachQueued);
         }
 
         /// <summary>
@@ -1194,7 +1274,7 @@ namespace PlayJoy.FastLogs
 
         // ---- Report assembly ----
 
-        private LogReportDto BuildReport(string title, string comment, string screenshotBase64)
+        private LogReportDto BuildReport(string title, string comment, List<string> screenshots)
         {
             bool includeSensitive = _config != null && _config.Diagnostics.IncludeSensitive;
             bool scrubPii = _config == null || _config.Diagnostics.ScrubPii; // default ON
@@ -1250,7 +1330,7 @@ namespace PlayJoy.FastLogs
                 LogText = logText,
                 LogEncoding = encoding,
                 Device = device,
-                ScreenshotPngBase64 = string.IsNullOrEmpty(screenshotBase64) ? null : screenshotBase64,
+                ScreenshotsPngBase64 = (screenshots != null && screenshots.Count > 0) ? screenshots : null,
                 RetentionDays = retention,
                 Title = string.IsNullOrEmpty(title) ? null : Truncate(title, 120),
                 Comment = string.IsNullOrEmpty(comment) ? null : Truncate(comment, 4000),

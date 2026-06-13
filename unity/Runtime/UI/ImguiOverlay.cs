@@ -55,6 +55,11 @@ namespace PlayJoy.FastLogs
         private bool _visible;
         private bool _includeScreenshot;
 
+        // Raised by the screenshot capturer for the single frame it grabs, so the
+        // overlay (and its toast) never draw themselves into the captured PNG.
+        // Main-thread only (set in the capture coroutine, read in OnGUI).
+        internal static bool SuppressForCapture;
+
         // User-entered fields attached to the next report.
         private string _titleInput = string.Empty;    // single-line title (<=120 on the server side)
         private string _comment = string.Empty;       // multi-line free-form problem description
@@ -280,6 +285,13 @@ namespace PlayJoy.FastLogs
         /// </summary>
         public void OnGUI()
         {
+            // While the screenshot capturer grabs the frame, draw NOTHING (not the
+            // panel, not the toast) so the FastLogs UI never lands in the PNG.
+            if (SuppressForCapture)
+            {
+                return;
+            }
+
             // Toast is independent of the overlay's open/closed state. When the
             // overlay is closed AND no toast is active, this returns immediately:
             // no styles built, no textures, no layout, no allocations.

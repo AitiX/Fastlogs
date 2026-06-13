@@ -339,6 +339,30 @@ namespace PlayJoy.FastLogs
         }
 
         /// <summary>
+        /// Capture the current frame now and queue it for the next send, so you can take
+        /// several screenshots in code and send them together (e.g. before/after a repro).
+        /// Fire-and-forget; the FastLogs overlay is not included in the shot. The queue is
+        /// capped and cleared once a send that carried it resolves. Stripped in
+        /// retail/console (body and call sites removed).
+        /// </summary>
+        [Conditional("UNITY_EDITOR"), Conditional("DEVELOPMENT_BUILD"), Conditional("LOGSHARE_FORCE_ENABLED")]
+        public static void CaptureScreenshot()
+        {
+#if FASTLOGS_ENABLED
+            if (_runtime != null) _runtime.CaptureScreenshot();
+#endif
+        }
+
+        /// <summary>Drop all screenshots queued by CaptureScreenshot without sending them.</summary>
+        [Conditional("UNITY_EDITOR"), Conditional("DEVELOPMENT_BUILD"), Conditional("LOGSHARE_FORCE_ENABLED")]
+        public static void ClearScreenshots()
+        {
+#if FASTLOGS_ENABLED
+            if (_runtime != null) _runtime.ClearScreenshots();
+#endif
+        }
+
+        /// <summary>
         /// Build and upload a report, returning the result. Awaitable on all Unity
         /// versions (FlogTask, coroutine-driven). Optional title and comment are
         /// attached to the report (comment is the tester's free-form problem
@@ -352,7 +376,7 @@ namespace PlayJoy.FastLogs
             {
                 return FlogTask.FromResult(UploadResultDto.Fail("FastLogs is not initialized."));
             }
-            return _runtime.BeginSend(includeScreenshot, title, comment);
+            return _runtime.BeginSend(includeScreenshot, title, comment, attachQueuedShots: true);
 #else
             return FlogTask.FromResult(UploadResultDto.Disabled);
 #endif

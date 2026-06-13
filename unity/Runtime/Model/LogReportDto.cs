@@ -39,8 +39,15 @@ namespace PlayJoy.FastLogs
 
         // ---- Optional (omitted when empty) ----
 
-        /// <summary>screenshotPng - pure base64 PNG WITHOUT a "data:" prefix.</summary>
+        /// <summary>screenshotPng - pure base64 PNG WITHOUT a "data:" prefix (legacy single).</summary>
         public string ScreenshotPngBase64;
+
+        /// <summary>
+        /// screenshotsPng - several base64 PNGs (no "data:" prefix), for a report that
+        /// carries more than one screenshot (FastLogs.CaptureScreenshot queue + the live
+        /// one). Server caps the count. Omitted when null/empty.
+        /// </summary>
+        public List<string> ScreenshotsPngBase64;
 
         /// <summary>retentionDays - per-request override (server clamps).</summary>
         public int? RetentionDays;

@@ -51,62 +51,77 @@ namespace PlayJoy.FastLogs
 
         private IEnumerator CaptureRoutine(int maxDimension, FlogTask<byte[]> task)
         {
-            // Must run after the frame is rendered to grab the final image.
-            yield return new WaitForEndOfFrame();
-
-            Texture2D shot = null;
-            byte[] png = null;
-
-            // 1) Capture the full-resolution screen.
+            // Hide the FastLogs overlay/toast for the frame we grab so the tool's
+            // own UI never appears in the screenshot, then restore it. The send is
+            // usually triggered from the overlay's OnGUI, so the current frame may
+            // already have drawn the overlay; skip one frame first to guarantee an
+            // OnGUI runs with the overlay suppressed before we capture.
+            ImguiOverlay.SuppressForCapture = true;
             try
             {
-                shot = ScreenCapture.CaptureScreenshotAsTexture();
-            }
-            catch (Exception e)
-            {
-                FlogLog.Exception(e);
-                shot = null;
-            }
+                yield return null;
+                // Now run after the (overlay-free) frame is rendered.
+                yield return new WaitForEndOfFrame();
 
-            if (shot == null)
-            {
-                task.SetResult(null);
-                yield break;
-            }
+                Texture2D shot = null;
+                byte[] png = null;
 
-            // 2) Downscale if needed (returns a NEW texture or the same one).
-            Texture2D scaled = shot;
-            bool scaledIsNew = false;
-            try
-            {
-                scaled = Downscale(shot, maxDimension, out scaledIsNew);
-            }
-            catch (Exception e)
-            {
-                FlogLog.Exception(e);
-                scaled = shot;
-                scaledIsNew = false;
-            }
+                // 1) Capture the full-resolution screen.
+                try
+                {
+                    shot = ScreenCapture.CaptureScreenshotAsTexture();
+                }
+                catch (Exception e)
+                {
+                    FlogLog.Exception(e);
+                    shot = null;
+                }
 
-            // 3) Encode PNG. EncodeToPNG must run on the main thread (it is here).
-            try
-            {
-                png = scaled != null ? scaled.EncodeToPNG() : null;
-            }
-            catch (Exception e)
-            {
-                FlogLog.Exception(e);
-                png = null;
-            }
+                if (shot == null)
+                {
+                    task.SetResult(null);
+                    yield break;
+                }
 
-            // 4) Cleanup textures we created.
-            if (scaledIsNew && scaled != null)
-            {
-                UnityEngine.Object.Destroy(scaled);
-            }
-            UnityEngine.Object.Destroy(shot);
+                // 2) Downscale if needed (returns a NEW texture or the same one).
+                Texture2D scaled = shot;
+                bool scaledIsNew = false;
+                try
+                {
+                    scaled = Downscale(shot, maxDimension, out scaledIsNew);
+                }
+                catch (Exception e)
+                {
+                    FlogLog.Exception(e);
+                    scaled = shot;
+                    scaledIsNew = false;
+                }
 
-            task.SetResult(png != null && png.Length > 0 ? png : null);
+                // 3) Encode PNG. EncodeToPNG must run on the main thread (it is here).
+                try
+                {
+                    png = scaled != null ? scaled.EncodeToPNG() : null;
+                }
+                catch (Exception e)
+                {
+                    FlogLog.Exception(e);
+                    png = null;
+                }
+
+                // 4) Cleanup textures we created.
+                if (scaledIsNew && scaled != null)
+                {
+                    UnityEngine.Object.Destroy(scaled);
+                }
+                UnityEngine.Object.Destroy(shot);
+
+                task.SetResult(png != null && png.Length > 0 ? png : null);
+            }
+            finally
+            {
+                // Always restore the overlay, even on early-out / exception.
+                ImguiOverlay.SuppressForCapture = false;
+            }
         }
 
         /// <summary>

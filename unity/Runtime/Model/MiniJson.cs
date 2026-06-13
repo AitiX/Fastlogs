@@ -58,6 +58,15 @@ namespace PlayJoy.FastLogs
 
             // Optional fields - omitted when empty.
             w.Field("screenshotPng", report.ScreenshotPngBase64);
+
+            // Optional screenshots array (several PNGs) - omitted when null/empty.
+            if (report.ScreenshotsPngBase64 != null && report.ScreenshotsPngBase64.Count > 0)
+            {
+                w.Key("screenshotsPng");
+                WriteStringArray(sb, report.ScreenshotsPngBase64);
+                w.MarkWritten();
+            }
+
             w.Field("retentionDays", report.RetentionDays);
             w.Field("title", report.Title);
             w.Field("comment", report.Comment);
@@ -81,6 +90,18 @@ namespace PlayJoy.FastLogs
 
             w.EndObject();
             return sb.ToString();
+        }
+
+        // Serialize a list of strings as a JSON array (null elements -> "").
+        private static void WriteStringArray(StringBuilder sb, List<string> values)
+        {
+            sb.Append('[');
+            for (int i = 0; i < values.Count; i++)
+            {
+                if (i > 0) sb.Append(',');
+                AppendString(sb, values[i] ?? string.Empty);
+            }
+            sb.Append(']');
         }
 
         // Serialize a string->string map as a JSON object. Null values are written as
