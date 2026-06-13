@@ -85,6 +85,22 @@ function parseDevice(row) {
   }
 }
 
+// Parse a stored JSON column into a value, returning `fallback` on
+// absence/parse error or when the parsed value is not the expected shape.
+// `expectArray` selects between array and plain-object validation.
+function parseJsonColumn(text, expectArray, fallback) {
+  if (!text) return fallback;
+  try {
+    const v = JSON.parse(text);
+    if (expectArray) {
+      return Array.isArray(v) ? v : fallback;
+    }
+    return (v && typeof v === 'object' && !Array.isArray(v)) ? v : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
 // Shape the public JSON view of a log row (used by /api/logs/:id and the
 // inline data island). Does not include the log text; callers add it.
 function publicLogObject(row) {
@@ -104,6 +120,11 @@ function publicLogObject(row) {
     logBytes: row.log_bytes,
     hasScreenshot: row.has_shot === 1,
     device: parseDevice(row),
+    // Structured context (key->value object) and breadcrumbs (array of
+    // { t?, m, lvl? }). Always present so clients have a stable shape: an
+    // empty object / empty array when the log carried none.
+    context: parseJsonColumn(row.context_json, false, {}),
+    breadcrumbs: parseJsonColumn(row.breadcrumbs_json, true, []),
     links: linksFor(row.id, row.has_shot === 1),
   };
 }
@@ -117,5 +138,6 @@ module.exports = {
   notFound,
   notFoundJson,
   parseDevice,
+  parseJsonColumn,
   publicLogObject,
 };

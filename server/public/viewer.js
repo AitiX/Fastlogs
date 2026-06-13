@@ -25,7 +25,9 @@
 //     network?:     { ... },
 //     build?:       { ... },
 //     web?:         { ... },
-//   }
+//   },
+//   context:      { [key: string]: string },   // empty {} when none
+//   breadcrumbs:  [ { t?: string, m: string, lvl?: 'info'|'warn'|'error' } ] // empty [] when none
 // }
 //
 // Known device group order shown first, extras appended after.
@@ -198,6 +200,86 @@
       groupEl.appendChild(toggle);
       groupEl.appendChild(body);
       deviceGroupsEl.appendChild(groupEl);
+    });
+  }
+
+  // ---- Context (key->value map) ----
+
+  var context = data.context || {};
+  var contextKeys = Object.keys(context);
+  var contextPanel = document.getElementById('context-panel');
+  if (contextKeys.length > 0) {
+    contextPanel.style.display = '';
+    var contextHeader = document.getElementById('context-panel-header');
+    var contextBody = document.getElementById('context-body');
+
+    contextKeys.forEach(function (k) {
+      var row = document.createElement('div');
+      row.className = 'ctx-kv';
+
+      var keyEl = document.createElement('span');
+      keyEl.className = 'ctx-key';
+      keyEl.textContent = k;
+
+      var valEl = document.createElement('span');
+      valEl.className = 'ctx-val';
+      var v = context[k];
+      valEl.textContent = (typeof v === 'object') ? JSON.stringify(v) : String(v);
+
+      row.appendChild(keyEl);
+      row.appendChild(valEl);
+      contextBody.appendChild(row);
+    });
+
+    contextHeader.addEventListener('click', function () {
+      contextPanel.classList.toggle('open');
+    });
+  }
+
+  // ---- Breadcrumbs (event timeline) ----
+
+  var breadcrumbs = data.breadcrumbs || [];
+  var breadcrumbsPanel = document.getElementById('breadcrumbs-panel');
+  if (breadcrumbs.length > 0) {
+    breadcrumbsPanel.style.display = '';
+    var bcHeader = document.getElementById('breadcrumbs-panel-header');
+    var bcBody = document.getElementById('breadcrumbs-body');
+    document.getElementById('breadcrumbs-count').textContent =
+      '(' + breadcrumbs.length + ')';
+
+    breadcrumbs.forEach(function (crumb) {
+      if (!crumb || typeof crumb !== 'object') return;
+      var lvl = crumb.lvl === 'warn' || crumb.lvl === 'error' ? crumb.lvl : 'info';
+
+      var row = document.createElement('div');
+      row.className = 'bc-item bc-' + lvl;
+
+      var timeEl = document.createElement('span');
+      timeEl.className = 'bc-time';
+      if (crumb.t) {
+        var label = crumb.t;
+        try { label = new Date(crumb.t).toLocaleTimeString(); } catch (e) { label = crumb.t; }
+        timeEl.textContent = label;
+        timeEl.title = crumb.t;
+      } else {
+        timeEl.textContent = '';
+      }
+
+      var dotEl = document.createElement('span');
+      dotEl.className = 'bc-dot bc-dot-' + lvl;
+
+      var msgEl = document.createElement('span');
+      msgEl.className = 'bc-msg';
+      msgEl.textContent = crumb.m != null ? String(crumb.m) : '';
+
+      row.appendChild(timeEl);
+      row.appendChild(dotEl);
+      row.appendChild(msgEl);
+      bcBody.appendChild(row);
+    });
+
+    bcHeader.addEventListener('click', function () {
+      breadcrumbsPanel.classList.toggle('open');
     });
   }
 
