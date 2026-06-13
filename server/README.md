@@ -45,13 +45,24 @@ See `.env.example` for inline docs. Full list:
 | `MAX_SCREENSHOT_BYTES` | `2097152` | Max decoded PNG screenshot (~2 MB) |
 | `MAX_LOG_BYTES` | `20971520` | Max decompressed log text (~20 MB) |
 | `ADMIN_TOKEN` | _(none)_ | Admin: delete, manage apps (and unpin when `UNPIN_REQUIRES_ADMIN=1`). Empty disables admin auth (dev) |
-| `VIEWER_TOKEN` | _(none)_ | Team viewer token for the catalog `/browse`. Empty leaves the catalog open (dev) |
+| `VIEWER_TOKEN` | _(none)_ | Team viewer token for the catalog `/browse`. Empty CLOSES the catalog (fail-closed): `/browse` returns 401 for everyone except the admin token |
 | `TEAM_INGEST_TOKEN` | _(none)_ | Shared master ingest token valid for ANY app (one secret instead of per-app tokens) |
 | `ALLOW_AUTO_REGISTER` | `0` | With the team token, an unknown `appId` self-registers (tokenless) on first ingest. Requires `TEAM_INGEST_TOKEN` |
 | `UNPIN_REQUIRES_ADMIN` | `0` | `0` = anyone with the link can unpin (like pin); `1` = unpinning requires the admin token. Pinning is always open |
 | `IP_SALT` | _(none)_ | Salt for IP hashing (set a random value) |
 | `TRUST_PROXY` | `1` | Trust `X-Forwarded-For` / `X-Real-IP` from nginx for the real client IP (rate limit + `ip_hash`). Set `0` only if Node is exposed directly |
 | `CORS_ALLOW_ORIGIN` | `*` | Allowed CORS origin (`*` for any) |
+| `STATS_TOP_N` | `5` | How many largest logs to list per app on the catalog dashboard |
+| `TRIAGE_REQUIRES_ADMIN` | `0` | `0` = setting log status/tags is open by link (like pin); `1` = requires the admin token |
+| `TRIAGE_TAG_MAX_LEN` | `32` | Max chars per tag (longer tags are truncated, not rejected) |
+| `TRIAGE_TAG_MAX_COUNT` | `20` | Max tags kept per log (extras dropped after dedupe) |
+| `CRASH_SIG_TOP_K` | `8` | Top normalized stack frames folded into a crash signature (higher = finer grouping) |
+| `CRASH_RECOMPUTE_BATCH` | `200` | Max pre-feature logs the crashes view backfills with a signature per request. `0` disables the lazy backfill |
+| `REDMINE_URL` | _(none)_ | Redmine base URL. Empty disables the "create issue from log" feature (button hidden, endpoint 503) |
+| `REDMINE_API_KEY` | _(none)_ | Redmine REST API key (`X-Redmine-API-Key`). Server-side only. Empty also disables the feature |
+| `REDMINE_PROJECT_ID` | _(none)_ | Redmine project id/identifier. REQUIRED for issue creation (with URL+key set but this empty, the endpoint returns 502) |
+| `REDMINE_TRACKER_ID` | _(none)_ | Optional numeric tracker id; empty uses the project default |
+| `REDMINE_TIMEOUT_MS` | `10000` | Per-request timeout (ms) for the outbound Redmine call |
 
 ## Adding an app
 
@@ -73,6 +84,19 @@ The ingest token is shown **once** and never stored in plaintext. Distribute it 
 On each successful ingest the server optionally forwards a payload (see CONTRACT.md section 5) to configured sinks. Copy `config/sinks.example.json` to `config/sinks.json` and fill in real webhook URLs.
 
 Supported sink types: `slack`, `discord`, `webhook` (generic), `googlesheet`, `confluence`.
+
+## Catalog features
+
+The catalog (`/browse`, viewer-token gated) groups and triages logs:
+
+- **Crashes** (`/browse/:appId/crashes`): logs are grouped by a normalized stack signature (computed at ingest from the error/exception line plus the top stack frames). Each group shows the count, distinct testers, versions, and a "NEW in `<version>`" / "REGRESSION in `<version>`" badge when a crash first appears in - or returns to - the latest version.
+- **Size dashboard**: per-project and per-version storage totals, pinned counts, and the largest logs.
+- **Status + tags**: each log has a triage status (new / triaged / in_progress / fixed / wontfix) and free-form tags, set from the viewer page and filtered in the catalog. Open by link by default (set `TRIAGE_REQUIRES_ADMIN=1` to restrict). Triage does not affect retention.
+- **Engine**: the catalog shows each project's engine (Unity / GameMaker), detected from the log device info.
+
+## Redmine (create issue from log)
+
+Set `REDMINE_URL`, `REDMINE_API_KEY`, and `REDMINE_PROJECT_ID` to enable a "+ Redmine issue" button on the log viewer. It creates a Redmine issue (POST `/issues.json` with `X-Redmine-API-Key`) that links back to the log, and stores the issue id/url so a second click returns the existing issue (idempotent). The endpoint is viewer-token gated. Leaving `REDMINE_URL` or `REDMINE_API_KEY` empty disables the feature (the button is hidden).
 
 ## Deploying
 
