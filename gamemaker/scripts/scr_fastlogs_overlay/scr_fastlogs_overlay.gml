@@ -46,6 +46,7 @@ function fastlogs_ui_state() {
             cfg_screenshot:  FASTLOGS_SCREENSHOT_DEFAULT,
             cfg_autosend:    false,                       // авто-отправка по кнопке (UI-уровень)
             cfg_ring_size:   FASTLOGS_RING_SIZE,          // ёмкость буфера (показ/правка)
+            cfg_scrub_pii:   FASTLOGS_SCRUB_PII,          // чистка PII (#3); ДЕФОЛТ приватно (true)
         };
     }
     return global.__fastlogs_ui;
@@ -165,18 +166,34 @@ function fastlogs_ui_settings_load() {
         ui.cfg_screenshot = (ini_read_real("fastlogs", "screenshot", FASTLOGS_SCREENSHOT_DEFAULT ? 1 : 0) >= 1);
         ui.cfg_autosend   = (ini_read_real("fastlogs", "autosend",   0) >= 1);
         ui.cfg_ring_size  = ini_read_real("fastlogs", "ring_size",   FASTLOGS_RING_SIZE);
+        // Чистка PII (#3): дефолт приватный (FASTLOGS_SCRUB_PII). Сохранённое значение перекрывает.
+        ui.cfg_scrub_pii  = (ini_read_real("fastlogs", "scrub_pii",  FASTLOGS_SCRUB_PII ? 1 : 0) >= 1);
         ini_close();
     } catch (_e) {
         // На платформах без ini-записи - тихо остаёмся на дефолтах.
         ui.cfg_screenshot = FASTLOGS_SCREENSHOT_DEFAULT;
         ui.cfg_autosend   = false;
         ui.cfg_ring_size  = FASTLOGS_RING_SIZE;
+        ui.cfg_scrub_pii  = FASTLOGS_SCRUB_PII;
     }
     ui.settings_loaded = true;
     // Применить подгруженный тоггл скриншота к рантайму через публичный сеттер.
     if (script_exists(asset_get_index("fastlogs_set_screenshot"))) {
         fastlogs_set_screenshot(ui.cfg_screenshot);
     }
+    // Применить подгруженный тоггл чистки PII к рантайм-конфигу (#3), чтобы payload его читал.
+    fastlogs_ui_apply_scrub_pii(ui.cfg_scrub_pii);
+}
+
+/// Применить тоггл чистки PII к рантайм-конфигу (st.cfg.scrubPii), чтобы fastlogs_redact его учёл.
+///   Пишем напрямую в общий cfg через тот же механизм, что и fastlogs_init({scrubPii}).
+/// @param {bool} on
+function fastlogs_ui_apply_scrub_pii(on) {
+    if (!FASTLOGS_ENABLED) return;
+    if (!script_exists(asset_get_index("__fastlogs_state"))) return;
+    var st = __fastlogs_state();
+    if (!is_struct(st.cfg)) st.cfg = {};
+    st.cfg.scrubPii = bool(on);
 }
 
 function fastlogs_ui_settings_save() {
@@ -188,6 +205,7 @@ function fastlogs_ui_settings_save() {
         ini_write_real("fastlogs", "screenshot", ui.cfg_screenshot ? 1 : 0);
         ini_write_real("fastlogs", "autosend",   ui.cfg_autosend ? 1 : 0);
         ini_write_real("fastlogs", "ring_size",  ui.cfg_ring_size);
+        ini_write_real("fastlogs", "scrub_pii",  ui.cfg_scrub_pii ? 1 : 0);   // чистка PII (#3)
         ini_close();
     } catch (_e) {
         // Запись недоступна (консоль/песочница) - игнорируем, настройки живут только в сессии.
@@ -469,7 +487,7 @@ function fastlogs_ui_draw() {
 // =====================================================================================
 function fastlogs_ui_draw_settings(gw, gh, ui_scale, btn_h, pad, fsize, ui) {
     var panel_w = clamp(round(gw * 0.5), 420, gw - pad * 2);
-    var panel_h = btn_h * 7 + pad * 9;
+    var panel_h = btn_h * 8 + pad * 10;     // +1 ряд под тоггл "Чистка PII" (#3)
     var x1 = gw - panel_w - pad;            // справа
     var y1 = pad;
     fastlogs_ui_panel_bg(x1, y1, x1 + panel_w, y1 + panel_h);
@@ -507,6 +525,10 @@ function fastlogs_ui_draw_settings(gw, gh, ui_scale, btn_h, pad, fsize, ui) {
 
     // Тоггл "Autosend" (UI-уровень: разрешить авто-отправку - например при исключении).
     fastlogs_ui_toggle(ix, cy, ix + iw, cy + btn_h, "Autosend", ui.cfg_autosend, "set_toggle_autosend", fsize, ui);
+    cy += btn_h + pad;
+
+    // Тоггл "Чистка PII" (#3). ДЕФОЛТ приватно (ON). ON -> email/IP/токены/длинные цифры -> [redacted].
+    fastlogs_ui_toggle(ix, cy, ix + iw, cy + btn_h, "Чистка PII (приватность)", ui.cfg_scrub_pii, "set_toggle_scrub_pii", fsize, ui);
     cy += btn_h + pad;
 
     // Start/Stop Recording с индикатором.
@@ -594,6 +616,13 @@ function fastlogs_ui_action(id, ui) {
 
         case "set_toggle_autosend":
             ui.cfg_autosend = !ui.cfg_autosend;
+            fastlogs_ui_settings_save();
+            break;
+
+        case "set_toggle_scrub_pii":
+            // Чистка PII (#3): тоггл -> применяем к рантайм-конфигу + персист ini.
+            ui.cfg_scrub_pii = !ui.cfg_scrub_pii;
+            fastlogs_ui_apply_scrub_pii(ui.cfg_scrub_pii);
             fastlogs_ui_settings_save();
             break;
 

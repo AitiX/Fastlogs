@@ -51,6 +51,11 @@ function fastlogs_build_payload(opts = undefined) {
         // Пометка об усечении (контракт: усечён по MAX_LOG_BYTES с пометкой).
         log_text += "\n...[FastLogs] logText truncated at " + string(FASTLOGS_MAX_LOG_BYTES) + " bytes...";
     }
+    // PII (#3): чистим logText ПОСЛЕ усечения (меньше текста сканировать) и до отправки.
+    //   fastlogs_redact сам гейтится по FASTLOGS_SCRUB_PII/override (выкл -> возвращает как есть).
+    if (script_exists(asset_get_index("fastlogs_redact"))) {
+        log_text = fastlogs_redact(log_text);
+    }
 
     // --- device ---
     var extra_device = variable_struct_exists(opts, "extraDevice") ? opts.extraDevice : undefined;
@@ -73,9 +78,14 @@ function fastlogs_build_payload(opts = undefined) {
 
     // --- screenshotPng (ОПЦ.): чистый base64 PNG без data: ---
     // Захват уже инициирован http-слоем; здесь читаем результат. Если ещё/неуспешно - опускаем.
-    var b64 = fastlogs_screenshot_base64();               // screenshot-скрипт ("" если нет)
-    if (is_string(b64) && string_length(b64) > 0) {
-        body.screenshotPng = b64;
+    //   opts.screenshot==false (явно) -> НЕ кладём скриншот даже если в кэше остался прошлый
+    //   (важно для краш-отчёта #1: screenshot:false -> чистый отчёт без тяжёлого PNG).
+    var allow_shot = !(variable_struct_exists(opts, "screenshot") && opts.screenshot == false);
+    if (allow_shot) {
+        var b64 = fastlogs_screenshot_base64();           // screenshot-скрипт ("" если нет)
+        if (is_string(b64) && string_length(b64) > 0) {
+            body.screenshotPng = b64;
+        }
     }
 
     // --- retentionDays (ОПЦ.) ---
@@ -109,6 +119,57 @@ function fastlogs_build_payload(opts = undefined) {
     if (is_string(tester) && string_length(tester) > 0) {
         if (string_length(tester) > 120) { tester = string_copy(tester, 1, 120); }
         body.tester = tester;
+    }
+
+    // --- context (ОПЦ., object string->string; фича #2): едет с КАЖДЫМ отчётом ---
+    // Контракт: пустое опускать. Значения чистим redaction (#3). Сервер капает ~4KB суммарно.
+    if (script_exists(asset_get_index("fastlogs_context_snapshot"))) {
+        var ctx = fastlogs_context_snapshot();            // НОВЫЙ struct-копия (можно мутировать)
+        if (is_struct(ctx) && variable_struct_names_count(ctx) > 0) {
+            var do_scrub = script_exists(asset_get_index("fastlogs_redact"));
+            var cnames = variable_struct_get_names(ctx);
+            for (var ci = 0; ci < array_length(cnames); ci++) {
+                var ck = cnames[ci];
+                var cv = variable_struct_get(ctx, ck);
+                cv = is_string(cv) ? cv : string(cv);
+                if (do_scrub) { cv = fastlogs_redact(cv); }   // чистим ЗНАЧЕНИЯ контекста
+                variable_struct_set(ctx, ck, cv);
+            }
+            // Компакт уберёт пустые значения (контракт: не слать пустые).
+            var ctx_c = fastlogs_struct_compact(ctx);
+            if (is_struct(ctx_c) && variable_struct_names_count(ctx_c) > 0) {
+                body.context = ctx_c;
+            }
+        }
+    }
+
+    // --- breadcrumbs (ОПЦ., массив {t,m,lvl}; фича #2): катящийся буфер последних N ---
+    // Контракт: пустое опускать; lvl in info|warn|error (опц.). Тексты m чистим redaction (#3).
+    //   Сервер капает 100 шт и ~16KB (клиент уже держит кап FASTLOGS_BREADCRUMB_MAX).
+    if (script_exists(asset_get_index("fastlogs_breadcrumbs_snapshot"))) {
+        var crumbs = fastlogs_breadcrumbs_snapshot();     // массив НОВЫХ копий (можно мутировать)
+        if (is_array(crumbs) && array_length(crumbs) > 0) {
+            var do_scrub2 = script_exists(asset_get_index("fastlogs_redact"));
+            var out_crumbs = [];
+            for (var bi = 0; bi < array_length(crumbs); bi++) {
+                var cr = crumbs[bi];
+                if (!is_struct(cr)) continue;
+                var item = {};
+                var ct = variable_struct_exists(cr, "t")   ? cr.t   : "";
+                var cm = variable_struct_exists(cr, "m")   ? cr.m   : "";
+                var cl = variable_struct_exists(cr, "lvl") ? cr.lvl : "";
+                if (do_scrub2) { cm = fastlogs_redact(string(cm)); }
+                // Контракт: m обязателен у элемента; t и lvl опциональны. Без m крошку НЕ шлём.
+                if (!is_string(cm) || string_length(cm) == 0) continue;
+                if (is_string(ct) && string_length(ct) > 0) item.t = ct;   // порядок: t, m, lvl
+                item.m = cm;
+                if (is_string(cl) && string_length(cl) > 0) item.lvl = cl;
+                array_push(out_crumbs, item);
+            }
+            if (array_length(out_crumbs) > 0) {
+                body.breadcrumbs = out_crumbs;
+            }
+        }
     }
 
     return body;

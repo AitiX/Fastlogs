@@ -126,6 +126,59 @@ no-op при `!FASTLOGS_ENABLED`.
 
 ---
 
+## Контекст и breadcrumbs (фича #2)
+
+Едут с **каждым** отчётом (поля `context` / `breadcrumbs` в payload; пустые опускаются).
+
+### `fastlogs_set_context(key, value)`
+Задать пару контекста (object string->string). `key`/`value` приводятся к строке, усекаются
+(`FASTLOGS_CONTEXT_KEY_MAX`=64 / `FASTLOGS_CONTEXT_VAL_MAX`=512). Пустой `key` игнорируется.
+Значения чистятся redaction (#3) при сборке payload. no-op при `!FASTLOGS_ENABLED`.
+
+### `fastlogs_remove_context(key)` / `fastlogs_clear_context()`
+Удалить одну пару / очистить весь контекст.
+
+### `fastlogs_breadcrumb(msg, [level])`
+Добавить хлебную крошку в катящийся буфер (кап `FASTLOGS_BREADCRUMB_MAX`=100, кольцо).
+`level` (опц.): `"info"|"warn"|"error"` или `FASTLOGS_LEVEL_*` (деф. `"info"`). Время крошки
+(`t`, UTC ISO-8601) фиксируется в момент вызова. `m` усекается до 512. Тексты чистятся
+redaction (#3) при сборке payload. ПЕРФ: запись O(1), без аллокаций в кадре (переиспользование слота).
+
+### `fastlogs_clear_breadcrumbs()`
+Очистить буфер крошек.
+
+---
+
+## Приватность / чистка PII (фича #3)
+
+**ПО УМОЛЧАНИЮ ПРИВАТНО:** `FASTLOGS_SCRUB_PII = true`. Перед отправкой `logText`, значения
+`context` и тексты `breadcrumbs` прогоняются через redaction: email / IPv4 / IPv6 / Bearer-токены /
+длинные цифровые последовательности -> `"[redacted]"`. Чувствительные поля устройства уже
+опускаются; `FASTLOGS_INCLUDE_SENSITIVE = false` (явный флаг намерения). IP тестера клиент не шлёт.
+
+- Тоггл в оверлее (панель настроек, "Чистка PII (приватность)") с персистом в ini.
+- Runtime-override: `fastlogs_init({ scrubPii: false })`.
+- `fastlogs_redact(text) -> string` - применить redaction к строке (гейтится по настройке).
+- `fastlogs_redact_rules_set(rules)` - заменить набор правил (расширяемость);
+  `fastlogs_redact_default_rules()` - дефолтный набор `[{name,matcher}]`.
+
+> **ВАЖНО:** GameMaker НЕ имеет нативного runtime-regex. Правила реализованы ручными
+> GML-сканерами строк (regex-эквиваленты), без внешних extension'ов. См. `scr_fastlogs_util`.
+
+---
+
+## Персист краш-отчёта + досыл при старте (фича #1)
+
+При авто-отправке по краху (необработанное исключение) отчёт **сначала синхронно пишется** в
+дисковую очередь (`game_save_id`/`<persist>/pending/*.json`), **затем** делается попытка отправки;
+на успех файл удаляется. На старте (`fastlogs_init`) очередь сканируется и неотправленные
+отчёты досылаются - так жёсткий краш, убивший процесс до завершения HTTP, доедет на следующем
+запуске. Кап очереди `FASTLOGS_PENDING_MAX`=5; без скриншота; с `logText/counts/comment/tester/
+context/breadcrumbs`. За старт досылается не более `FASTLOGS_PENDING_RESEND_PER_START`.
+Внутренние функции: `fastlogs_pending_write/delete/resend_all` (recorder), `fastlogs_pending_send` (http).
+
+---
+
 ## Геттеры состояния
 
 ### `fastlogs_get_counts()` -> struct
@@ -147,15 +200,16 @@ no-op при `!FASTLOGS_ENABLED`.
 | Скрипт                      | Реализует |
 |-----------------------------|-----------|
 | `scr_fastlogs_config`       | макросы (ГОТОВО, не билдить) |
-| `scr_fastlogs_core`         | `fastlogs_init`, `flog`/`fastlogs_log`/`warn`/`error`, кольцо, счётчики, `fastlogs_clear`, `fastlogs_get_counts`, регистрация exception handler, константы уровней |
-| `scr_fastlogs_recorder`     | `fastlogs_record_start`/`stop`/`set`/`is_recording`, персист на диск + загрузка прошлых сессий, ротация |
+| `scr_fastlogs_context`      | контекст + breadcrumbs (#2): `fastlogs_set_context`/`remove_context`/`clear_context`, `fastlogs_breadcrumb`/`clear_breadcrumbs`, снимки для payload |
+| `scr_fastlogs_core`         | `fastlogs_init` (+ досыл pending #1), `flog`/`fastlogs_log`/`warn`/`error`, кольцо, счётчики, `fastlogs_clear`, `fastlogs_get_counts`, exception handler (+ персист pending #1), константы уровней |
+| `scr_fastlogs_recorder`     | `fastlogs_record_start`/`stop`/`set`/`is_recording`, персист на диск + загрузка прошлых сессий, ротация; pending-очередь краша (#1): `fastlogs_pending_write`/`delete`/`resend_all` |
 | `scr_fastlogs_device`       | сбор `device{}` по контракту (внутр.: `fastlogs_collect_device()`), маппинг `os_type`->platform |
-| `scr_fastlogs_payload`      | сборка JSON-тела (внутр.: `fastlogs_build_payload(...)`), `timestampUtc`, усечение `logText`, опускание пустых полей |
-| `scr_fastlogs_http`         | `fastlogs_send`, `fastlogs_is_sending`, `fastlogs_last_url`, `fastlogs_retry_is_pending`, retry-until-success (отложенный повтор на Alarm[0]), отправка/разбор ответа (Async HTTP) |
+| `scr_fastlogs_payload`      | сборка JSON-тела (внутр.: `fastlogs_build_payload(...)`), `timestampUtc`, усечение `logText`, опускание пустых полей, вложение `context`/`breadcrumbs` (#2) + redaction (#3) |
+| `scr_fastlogs_http`         | `fastlogs_send`, `fastlogs_is_sending`, `fastlogs_last_url`, `fastlogs_retry_is_pending`, retry-until-success (отложенный повтор на Alarm[0]), отправка/разбор ответа (Async HTTP), `fastlogs_pending_send` (досыл краша #1) |
 | `scr_fastlogs_overlay`      | `fastlogs_open`/`close`/`toggle`, отрисовка примитивами, обработка тап-зон |
 | `scr_fastlogs_input`        | опрос hotkey/мыши/тача/геймпада -> вызовы overlay/copy |
 | `scr_fastlogs_clipboard`    | `fastlogs_set_screenshot` тут НЕ реализуется; реализует copy-обёртку `clipboard_set_text` (last_url) |
-| `scr_fastlogs_util`         | UTC ISO-8601, json-escape, усечение строк, файловые/буферные хелперы |
+| `scr_fastlogs_util`         | чистка PII / redaction (#3): `fastlogs_redact`, `fastlogs_redact_rules_set`, матчеры (email/IPv4/IPv6/Bearer/длинные цифры); прочие строковые хелперы |
 
 `fastlogs_set_screenshot` - в `scr_fastlogs_core` (управляет флагом), фактический захват -
 в `scr_fastlogs_payload`/`scr_fastlogs_http` через util-хелпер.

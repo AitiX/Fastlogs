@@ -25,6 +25,7 @@
     {"id":{"name":"obj_fastlogs_controller","path":"objects/obj_fastlogs_controller/obj_fastlogs_controller.yy",},},
     {"id":{"name":"scr_fastlogs_clipboard","path":"scripts/scr_fastlogs_clipboard/scr_fastlogs_clipboard.yy",},},
     {"id":{"name":"scr_fastlogs_config","path":"scripts/scr_fastlogs_config/scr_fastlogs_config.yy",},},
+    {"id":{"name":"scr_fastlogs_context","path":"scripts/scr_fastlogs_context/scr_fastlogs_context.yy",},},
     {"id":{"name":"scr_fastlogs_core","path":"scripts/scr_fastlogs_core/scr_fastlogs_core.yy",},},
     {"id":{"name":"scr_fastlogs_device","path":"scripts/scr_fastlogs_device/scr_fastlogs_device.yy",},},
     {"id":{"name":"scr_fastlogs_http","path":"scripts/scr_fastlogs_http/scr_fastlogs_http.yy",},},
