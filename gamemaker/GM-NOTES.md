@@ -149,8 +149,21 @@
   // TODO verify точные номера прочих Async по IDE при импорте; для нас критичны 62 и 63.
 
 В этом скелете у `obj_fastlogs_controller` события:
-Create (0/0), Step (3/0), Draw GUI (8/64), Async HTTP (7/62 -> `Other_62.gml`),
-Async Save/Load (7/63 -> `Other_63.gml`).
+Create (0/0), Step (3/0), Alarm[0] (2/0 -> `Alarm_0.gml`), Draw GUI (8/64),
+Async HTTP (7/62 -> `Other_62.gml`), Async Save/Load (7/63 -> `Other_63.gml`).
+
+ПРИМЕЧАНИЕ по RETRY-UNTIL-SUCCESS (фича RETRY): отложенный повтор отправки реализован на
+`Alarm[0]` контроллера. Используемые GML-механизмы (стабильные built-in, сверить по Manual
+при импорте, online недоступен):
+- `alarm[i] = frames;` - аксессор массива alarm[0..11] инстанса. GM каждый Step сам
+  декрементирует и вызывает событие `Alarm[i]` при достижении 0. `alarm[i] = -1` выключает.
+  Счётчик в ШАГАХ (кадрах логики), поэтому секунды -> кадры по `game_get_speed(gamespeed_fps)`.
+  Tick раз в секунду (перевзвод на 1 c), а НЕ опрос в кадре. // TODO verify поведение alarm на
+  persistent-инстансе через смену комнат (ожидается: счётчик сохраняется вместе с инстансом).
+- `with (obj_fastlogs_controller) { alarm[0] = ... }` - адресуем единственный persistent-
+  контроллер из скрипта (alarm принадлежит инстансу, не скрипту). `instance_exists(obj_..)`
+  перед `with` как страховка. // TODO verify (стандартный `with`/`instance_exists`).
+- `game_get_speed(gamespeed_fps)` - уже используется в overlay (`fastlogs_ui_toast_frames_for`).
 
 ПРИМЕЧАНИЕ по скриншоту: `screen_save()` рекомендуется звать в **Draw GUI End (8/65)**
 для консистентного результата. В текущем скелете скриншот снимается из публичного API/Draw GUI;

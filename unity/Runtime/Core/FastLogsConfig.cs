@@ -40,6 +40,9 @@ namespace PlayJoy.FastLogs
         [Header("Net")]
         [SerializeField] private NetSection _net = new NetSection();
 
+        [Header("Retry")]
+        [SerializeField] private RetrySection _retry = new RetrySection();
+
         [Header("UI")]
         [SerializeField] private UiSection _ui = new UiSection();
 
@@ -55,6 +58,7 @@ namespace PlayJoy.FastLogs
         public DiagnosticsSection Diagnostics => _diagnostics;
         public TriggerConfig Trigger => _trigger;
         public NetSection Net => _net;
+        public RetrySection Retry => _retry;
         public UiSection UI => _ui;
         public EnableSection Enable => _enable;
 
@@ -171,6 +175,18 @@ namespace PlayJoy.FastLogs
 
             [Tooltip("Gzip the whole request body. Ignored on WebGL (always plain to avoid CORS preflight).")]
             public bool GzipBody = true;
+        }
+
+        [Serializable]
+        public sealed class RetrySection
+        {
+            [Tooltip("Seconds to wait before re-attempting a report that failed all immediate uploader retries. This outer loop keeps retrying the SAME report until it finally succeeds (or the attempt cap is hit). 0 = the outer retry loop is disabled (a failed send just shows the error toast with a manual Retry).")]
+            [Min(0f)]
+            public float RetryIntervalSeconds = 30f;
+
+            [Tooltip("Maximum number of outer retry attempts after the first failure. 0 = unlimited (keep retrying as long as the app is alive). Only one pending retry exists at a time; pressing Send again replaces it.")]
+            [Min(0)]
+            public int MaxRetryAttempts = 0;
         }
 
         [Serializable]

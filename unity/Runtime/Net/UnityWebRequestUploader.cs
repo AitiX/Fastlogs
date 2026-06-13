@@ -106,6 +106,10 @@ namespace PlayJoy.FastLogs
 
                 result = attemptResult.Result;
                 retryable = attemptResult.Retryable;
+                // Propagate this attempt's transient/permanent classification onto the
+                // returned result so the core's outer retry-until-success loop can act on
+                // it without re-deriving from the status code. (Success leaves it false.)
+                result.Retryable = retryable && !result.Success;
 
                 if (result.Success || !retryable || attempt == maxRetries)
                 {

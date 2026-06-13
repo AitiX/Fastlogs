@@ -12,8 +12,15 @@
 //     is_sending    : bool
 //     last_url      : string - url последнего успешного лога ("" если нет)
 //     last_status   : real   - последний http_status (0 если нет)
-//     retry_count   : real   - сколько ретраев уже сделано для текущей отправки
+//     retry_count   : real   - сколько НЕМЕДЛЕННЫХ ретраев уже сделано для текущей отправки
 //     pending_body  : string - тело текущего запроса (для ретрая)
+//   RETRY-UNTIL-SUCCESS (отложенный повтор на alarm-таймере; фича RETRY):
+//     dretry_active   : bool   - есть ли сейчас ОДНА (единственная) pending-отправка на повтор
+//     dretry_body     : string - тело отчёта, который ждёт отложенного повтора
+//     dretry_count    : real   - сколько отложенных повторов уже выполнено (для предела/счётчика)
+//     dretry_seconds  : real   - сколько секунд осталось до следующей попытки (тик alarm раз/сек)
+//   Один pending за раз: новый fastlogs_send заменяет любой текущий pending (см. fastlogs_send).
+//   Сам обратный отсчёт/перезапуск ведёт Alarm[0] контроллера (Other Alarm_0.gml), а не Step.
 //
 // ЗАВИСИМОСТИ (реальные имена - сверено по коду соседних скриптов):
 //   __fastlogs_state()                  (core) - общий global-стейт
@@ -42,6 +49,11 @@ function __fastlogs_http_state() {
             last_status  : 0,
             retry_count  : 0,
             pending_body : "",
+            // RETRY-UNTIL-SUCCESS (отложенный повтор; фича RETRY).
+            dretry_active  : false,
+            dretry_body    : "",
+            dretry_count   : 0,
+            dretry_seconds : 0,
         };
     }
     return st.http;
@@ -75,6 +87,12 @@ function fastlogs_send(opts = undefined) {
         fastlogs_send_status("info", "Отправка уже идёт...", false);
         return false;
     }
+
+    // RETRY-UNTIL-SUCCESS (фича RETRY): один pending за раз. Если в этот момент крутится
+    //   отложенный повтор (ждёт по таймеру) и пользователь жмёт Отправить заново - отменяем
+    //   старый pending и его alarm, чтобы не плодить дубликаты; эта новая отправка станет
+    //   актуальной (и при неуспехе сама поставит свежий pending).
+    fastlogs_retry_cancel();
 
     if (!is_struct(opts)) { opts = {}; }
 
@@ -243,6 +261,143 @@ function fastlogs_http_retry() {
     show_debug_message("[FastLogs] retry " + string(hs.retry_count) + "/" + string(FASTLOGS_HTTP_MAX_RETRIES));
     // Повторно используем уже собранное тело (тот же snapshot - корректно для ретрая).
     return fastlogs_http_post_internal(hs.pending_body);
+}
+
+// =====================================================================================
+// RETRY-UNTIL-SUCCESS (отложенный повтор на alarm-таймере; фича RETRY).
+// -------------------------------------------------------------------------------------
+// Идея: когда отправка финально провалилась (после немедленных ретраев аплоадера),
+//   ставим ОДИН pending-отчёт на повтор каждые FASTLOGS_RETRY_INTERVAL_SEC секунд и
+//   повторяем, пока не пройдёт успешно (либо до предела FASTLOGS_RETRY_MAX).
+// Таймер: Alarm[0] контроллера (obj_fastlogs_controller). Тикаем раз в СЕКУНДУ - это
+//   позволяет обновлять статус "Повтор через Ns..." без работы в каждом кадре и без
+//   аллокаций. Когда счётчик секунд дошёл до 0 - запускаем сам повтор.
+// Один pending за раз: планирование заменяет тело и сбрасывает счётчик секунд; повторный
+//   ручной fastlogs_send отменяет любой текущий pending (см. fastlogs_send).
+// =====================================================================================
+
+// Внутреннее: взвести Alarm[0] контроллера на ~1 секунду (тик обратного отсчёта).
+//   Переводим секунды в кадры по реальному game speed (как тост-таймер). // TODO verify
+//   alarm[]: счётчик в шагах объекта, GM сам декрементирует каждый Step и вызывает
+//   событие Alarm[0] по достижении 0 (механизм движка, НЕ опрос в нашем коде).
+function __fastlogs_retry_arm_alarm() {
+    if (!instance_exists(obj_fastlogs_controller)) { return false; }
+    var frames = 60;   // фолбэк ~1 c при 60 fps
+    if (script_exists(asset_get_index("fastlogs_ui_toast_frames_for"))) {
+        frames = fastlogs_ui_toast_frames_for(1);   // 1 секунда -> кадры по текущему fps
+    } else {
+        var fps = game_get_speed(gamespeed_fps);
+        if (is_real(fps) && fps > 0) frames = round(fps);
+    }
+    // Один взвод alarm на единственном persistent-контроллере.
+    with (obj_fastlogs_controller) { alarm[0] = frames; }
+    return true;
+}
+
+// =====================================================================================
+// fastlogs_retry_schedule(body) -> bool
+// Поставить (или ЗАМЕНИТЬ) единственный pending-отчёт на отложенный повтор. true если
+//   запланировано. no-op если отложенный повтор выключен (интервал 0) или тело пустое.
+// Вызывается из Async HTTP обработчика, когда немедленные ретраи исчерпаны/неуместны.
+// =====================================================================================
+function fastlogs_retry_schedule(body) {
+    if (!FASTLOGS_ENABLED) { return false; }
+    // Интервал 0 -> отложенный повтор выключен (поведение как раньше: ручной "Повторить").
+    if (!is_real(FASTLOGS_RETRY_INTERVAL_SEC) || FASTLOGS_RETRY_INTERVAL_SEC <= 0) { return false; }
+    if (!is_string(body) || string_length(body) == 0) { return false; }
+
+    var hs = __fastlogs_http_state();
+    // Один pending за раз: новое планирование заменяет тело и перезапускает отсчёт.
+    hs.dretry_active  = true;
+    hs.dretry_body    = body;
+    hs.dretry_seconds = FASTLOGS_RETRY_INTERVAL_SEC;
+    // dretry_count НЕ сбрасываем здесь: это продолжение серии повторов того же отчёта
+    //   (счётчик растёт по факту каждой выполненной отложенной попытки в fastlogs_retry_tick).
+
+    show_debug_message("[FastLogs] retry-until-success scheduled in " + string(FASTLOGS_RETRY_INTERVAL_SEC) + "s (attempt " + string(hs.dretry_count + 1) + ")");
+    // Поднять статус сразу, чтобы тестер видел отсчёт, не дожидаясь первого тика.
+    fastlogs_send_status("sending", "Повтор через " + string(FASTLOGS_RETRY_INTERVAL_SEC) + "s...", false);
+
+    if (!__fastlogs_retry_arm_alarm()) {
+        // Контроллера нет (не должно случаться при FASTLOGS_ENABLED) - не теряем pending,
+        //   но без таймера он не тикнет; помечаем для диагностики.
+        show_debug_message("[FastLogs] retry scheduled but controller instance missing - alarm not armed");
+    }
+    return true;
+}
+
+// =====================================================================================
+// fastlogs_retry_tick() -> void
+// Один тик обратного отсчёта отложенного повтора. Вызывается раз в СЕКУНДУ из Alarm[0]
+//   контроллера (НЕ каждый кадр). Уменьшает счётчик секунд; обновляет статус
+//   "Повтор через Ns..."; по достижении нуля запускает сам повтор (тем же телом).
+//   Перевзводит alarm на следующую секунду, пока pending активен.
+// =====================================================================================
+function fastlogs_retry_tick() {
+    if (!FASTLOGS_ENABLED) { return; }
+    var hs = __fastlogs_http_state();
+    if (!hs.dretry_active) { return; }   // нет pending - тик ничего не делает
+
+    // Если в этот момент уже идёт отправка (например, пользователь вручную нажал Отправить),
+    //   не вмешиваемся: текущий pending был отменён при ручном send. Подстраховка.
+    if (hs.is_sending) { return; }
+
+    hs.dretry_seconds -= 1;
+
+    if (hs.dretry_seconds > 0) {
+        // Ещё ждём: обновляем статус и перевзводим alarm на следующую секунду.
+        fastlogs_send_status("sending", "Повтор через " + string(hs.dretry_seconds) + "s...", false);
+        __fastlogs_retry_arm_alarm();
+        return;
+    }
+
+    // Время вышло - выполняем отложенный повтор тем же телом.
+    hs.dretry_count += 1;
+    show_debug_message("[FastLogs] retry-until-success attempt " + string(hs.dretry_count));
+
+    var body = hs.dretry_body;
+    if (!is_string(body) || string_length(body) == 0) {
+        // Тело пропало - нечего повторять, гасим pending.
+        fastlogs_retry_cancel();
+        return;
+    }
+
+    // Сбрасываем счётчик немедленных ретраев под новую попытку и шлём.
+    //   pending остаётся активным: если эта попытка снова провалится, Async-обработчик
+    //   перепланирует её снова (fastlogs_retry_schedule), продолжая серию.
+    hs.retry_count   = 0;
+    hs.pending_body  = body;
+    hs.state         = "sending";
+    fastlogs_send_status("sending", "Повтор отправки...", false);
+    fastlogs_http_post_internal(body);
+    // НЕ перевзводим alarm здесь: исход (успех/новый pending) решает Async HTTP обработчик.
+}
+
+// =====================================================================================
+// fastlogs_retry_cancel() -> void
+// Отменить текущий pending отложенный повтор (если есть) и сбросить его счётчики.
+//   Вызывается при ручном fastlogs_send (замена pending свежим) и при финальном успехе.
+// =====================================================================================
+function fastlogs_retry_cancel() {
+    if (!FASTLOGS_ENABLED) { return; }
+    var hs = __fastlogs_http_state();
+    hs.dretry_active  = false;
+    hs.dretry_body    = "";
+    hs.dretry_seconds = 0;
+    hs.dretry_count   = 0;
+    // Снять взведённый alarm контроллера, чтобы старый отсчёт не выстрелил.
+    if (instance_exists(obj_fastlogs_controller)) {
+        with (obj_fastlogs_controller) { alarm[0] = -1; }   // -1 = alarm выключен
+    }
+}
+
+// =====================================================================================
+// fastlogs_retry_is_pending() -> bool
+// true если сейчас есть отчёт, ожидающий отложенного повтора. false при !FASTLOGS_ENABLED.
+// =====================================================================================
+function fastlogs_retry_is_pending() {
+    if (!FASTLOGS_ENABLED) { return false; }
+    return bool(__fastlogs_http_state().dretry_active);
 }
 
 // =====================================================================================
