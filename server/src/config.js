@@ -117,6 +117,12 @@ const config = Object.freeze({
 
   // CORS allowed origin ("*" for any).
   corsAllowOrigin: envStr('CORS_ALLOW_ORIGIN', '*'),
+
+  // In-process retention sweep cadence (seconds) and per-pass batch size. The
+  // server deletes expired, non-pinned logs every interval so the disk stays
+  // bounded. 0 disables it (use an external cron / systemd timer instead).
+  sweepIntervalSec: envInt('SWEEP_INTERVAL_SEC', 3600),
+  sweepBatch: envInt('SWEEP_BATCH', 500),
 });
 
 module.exports = config;

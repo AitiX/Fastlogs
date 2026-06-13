@@ -19,6 +19,7 @@ const config = require('./config');
 const { Router } = require('./router');
 const { applyCors, handlePreflight } = require('./cors');
 const { sendError, sendText } = require('./util/http');
+const sweeper = require('./sweeper');
 
 // Route handlers.
 const { health } = require('./routes/health');
@@ -129,6 +130,22 @@ function onRequest(req, res) {
 
 const server = http.createServer(onRequest);
 
+// In-process retention sweep: periodically delete expired, non-pinned logs so
+// the disk does not grow unbounded. Runs once at startup, then on an interval.
+// Unref'd so it never blocks shutdown; the listening server keeps the process
+// alive. Set SWEEP_INTERVAL_SEC=0 to disable and use an external cron instead.
+let sweepTimer = null;
+function scheduleSweep() {
+  const sec = config.sweepIntervalSec;
+  if (!sec || sec <= 0) return;
+  const run = () => sweeper.sweep(undefined, config.sweepBatch)
+    .then((r) => { if (r && r.rowsDeleted) console.log(`[sweep] removed ${r.rowsDeleted} expired log(s)`); })
+    .catch((e) => console.error('[sweep] error:', (e && e.message) || e));
+  run();
+  sweepTimer = setInterval(run, sec * 1000);
+  if (sweepTimer.unref) sweepTimer.unref();
+}
+
 // Bind address. Default 127.0.0.1 so a bare-metal deploy is private behind
 // nginx. Inside a container set HOST=0.0.0.0: Docker maps only host 127.0.0.1
 // to the container, so the service stays private while remaining reachable
@@ -138,6 +155,7 @@ function start() {
   return new Promise((resolve) => {
     server.listen(config.port, config.host, () => {
       console.log(`[server] FastLogs listening on http://${config.host}:${config.port}`);
+      scheduleSweep();
       resolve(server);
     });
   });
@@ -150,6 +168,7 @@ function shutdown(signal) {
   if (shuttingDown) return;
   shuttingDown = true;
   console.log(`[server] ${signal} received, shutting down...`);
+  if (sweepTimer) clearInterval(sweepTimer);
 
   const forceTimer = setTimeout(() => {
     console.error('[server] forced shutdown (timeout)');
