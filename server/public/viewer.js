@@ -58,6 +58,12 @@
   document.title = 'FastLogs - ' + titleText;
   document.getElementById('page-title').textContent = titleText;
 
+  // ---- Comment (tester's free-text issue description) ----
+  if (data.comment) {
+    document.getElementById('comment-text').textContent = data.comment;
+    document.getElementById('comment-box').style.display = '';
+  }
+
   // Raw link
   var rawLink = document.getElementById('raw-link');
   rawLink.href = '/' + data.id + '/raw';
@@ -115,6 +121,7 @@
   if (data.timestampUtc) {
     try { metaParts.push(new Date(data.timestampUtc).toLocaleString()); } catch (e) { metaParts.push(data.timestampUtc); }
   }
+  if (data.tester) metaParts.unshift('by ' + data.tester);
   document.getElementById('counts-meta').textContent = metaParts.join(' - ');
 
   // ---- Device info ----

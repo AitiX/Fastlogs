@@ -74,6 +74,16 @@ function migrate() {
       count        INTEGER NOT NULL DEFAULT 0
     );
   `);
+
+  // Additive column migrations for databases created by an earlier version.
+  // ADD COLUMN is the safe, idempotent way to evolve the schema; guarding with
+  // table_info keeps a re-run a no-op.
+  const logCols = db.prepare('PRAGMA table_info(logs)').all();
+  for (const col of ['comment', 'tester']) {
+    if (!logCols.some((c) => c.name === col)) {
+      db.exec(`ALTER TABLE logs ADD COLUMN ${col} TEXT`);
+    }
+  }
 }
 
 migrate();
@@ -85,11 +95,11 @@ migrate();
 const stmts = {
   insertLog: db.prepare(`
     INSERT INTO logs (
-      id, app_id, platform, app_version, device_json, title, ts_utc,
+      id, app_id, platform, app_version, device_json, title, comment, tester, ts_utc,
       cnt_error, cnt_warn, cnt_log, log_bytes, has_shot, created_at,
       expires_at, pinned, ip_hash
     ) VALUES (
-      @id, @app_id, @platform, @app_version, @device_json, @title, @ts_utc,
+      @id, @app_id, @platform, @app_version, @device_json, @title, @comment, @tester, @ts_utc,
       @cnt_error, @cnt_warn, @cnt_log, @log_bytes, @has_shot, @created_at,
       @expires_at, @pinned, @ip_hash
     )

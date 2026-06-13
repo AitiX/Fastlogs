@@ -180,6 +180,10 @@ async function handleIngest(req, res) {
 
   // Optional fields.
   const title = body.title != null ? String(body.title).slice(0, 120) : null;
+  // Free-text comment from the tester (issue description). Longer than title.
+  const comment = body.comment != null ? String(body.comment).slice(0, 4000) : null;
+  // Tester name from the client settings (who submitted this report).
+  const tester = body.tester != null ? String(body.tester).slice(0, 120) : null;
   const retentionDaysRaw = body.retentionDays;
   const screenshotPng = body.screenshotPng || null;
 
@@ -285,6 +289,8 @@ async function handleIngest(req, res) {
     app_version: appVersion,
     device_json: JSON.stringify(device),
     title,
+    comment,
+    tester,
     ts_utc: timestampUtc,
     cnt_error: counts.error,
     cnt_warn: counts.warn,
