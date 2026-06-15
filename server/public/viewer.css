@@ -389,6 +389,8 @@ a:hover { color: var(--accent-h); text-decoration: underline; }
   transition: background 0.05s;
 }
 .log-line:hover { background: var(--bg3); }
+/* The whole expandable header line is clickable (not just the gutter triangle). */
+.log-line.log-expandable { cursor: pointer; }
 .log-line.hidden { display: none; }
 .log-line.error { background: var(--red-bg); }
 .log-line.error:hover { background: rgba(226,85,85,0.14); }

@@ -1102,9 +1102,11 @@
     // Expandable when there is something extra to show below the line.
     var expandable = (traceLines.length > 0) || (header !== null);
 
-    // Main entry row: line number, gutter toggle (or spacer), text.
+    // Main entry row: line number, gutter toggle (or spacer), text. Expandable
+    // rows get .log-expandable so the WHOLE line is a click target (not just the
+    // gutter triangle) + a pointer cursor.
     var row = document.createElement('div');
-    row.className = 'log-line ' + level;
+    row.className = 'log-line ' + level + (expandable ? ' log-expandable' : '');
 
     var numEl = document.createElement('span');
     numEl.className = 'log-line-num';
@@ -1214,8 +1216,17 @@
   // instead of holding per-element listeners (the previous per-toggle approach
   // lost its handlers whenever the list was re-rendered).
   logPrettyEl.addEventListener('click', function (e) {
-    var toggle = e.target.closest('.log-trace-toggle');
-    if (!toggle || !logPrettyEl.contains(toggle)) return;
+    // The WHOLE entry-header line is a toggle, not just the gutter triangle: find
+    // the clicked row, and act only if it is an expandable header (it carries a
+    // .log-trace-toggle). Stack-frame rows inside an open detail are also .log-line
+    // but have no toggle, so clicking a frame never collapses the entry.
+    var row = e.target.closest('.log-line');
+    if (!row || !logPrettyEl.contains(row)) return;
+    var toggle = row.querySelector('.log-trace-toggle');
+    if (!toggle) return; // not an expandable header (spacer row / trace frame)
+    // Don't toggle while the user is selecting text on the line (let them copy).
+    var sel = window.getSelection ? window.getSelection() : null;
+    if (sel && String(sel).length > 0) return;
     var id = toggle.dataset.expand;
     if (!id) return;
     var detail = logPrettyEl.querySelector('.log-entry-detail[data-expand-for="' + id + '"]');
