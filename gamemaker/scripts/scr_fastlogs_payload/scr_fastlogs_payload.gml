@@ -131,6 +131,21 @@ function fastlogs_build_payload(opts = undefined) {
         }
     }
 
+    // --- sentViaCode (ОПЦ., bool; батч B): TRUE -> отчёт инициирован из КОДА игры (fastlogs_send/
+    //   quick-send напрямую из кода интегратора, авто-отправка по паттерну, авто-отправка по крашу),
+    //   FALSE/опущено -> отправка из кнопки "Отправить" в оверлее (ручной send тестером). Источник -
+    //   opts.sentViaCode, который проставляют ТОЛЬКО кодовые точки входа (fastlogs_quick_send,
+    //   pattern-autosend, крэш-колбэк); оверлейный send его НЕ ставит. Поле называется РОВНО
+    //   'sentViaCode' (паритет с Unity-клиентом и сервером/вьюером). По контракту "опускать пустые":
+    //   кладём поле ТОЛЬКО когда true (сервер трактует отсутствие как false) - так payload не пухнет.
+    //   callerFile/callerLine батча B НЕ кладём: в GML нет переносимой интроспекции места вызова
+    //   (нет аналога C# CallerFilePath/CallerLineNumber). Фейковые значения слать нельзя - поля
+    //   ОПУСКАЕМ для GM-клиента осознанно (см. PUBLIC-API / decisions). Сервер/вьюер показывают
+    //   badge "code" по самому sentViaCode; file:line - бонус только для движков, где он доступен.
+    if (variable_struct_exists(opts, "sentViaCode") && opts.sentViaCode == true) {
+        body.sentViaCode = true;
+    }
+
     // --- context (ОПЦ., object string->string; фича #2): едет с КАЖДЫМ отчётом ---
     // Контракт: пустое опускать. Значения чистим redaction (#3). Сервер капает ~4KB суммарно.
     if (script_exists(asset_get_index("fastlogs_context_snapshot"))) {

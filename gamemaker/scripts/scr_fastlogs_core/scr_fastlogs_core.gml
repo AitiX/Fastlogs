@@ -555,6 +555,15 @@ function __fastlogs_build_fallback_crash_json(ex, opts = undefined) {
     try { f_sess = fastlogs_session_id(); } catch (_esid) { f_sess = ""; }
     if (is_string(f_sess) && string_length(f_sess) > 0) { body.sessionId = f_sess; }
 
+    // sentViaCode (опц., батч B) - фолбэк строит тело НАПРЯМУЮ (минуя fastlogs_build_payload),
+    //   поэтому отметку code-send проставляем здесь сами из crash_opts. Крэш-путь всегда задаёт
+    //   crash_opts.sentViaCode = true, так что захваченный фолбэк-краш тоже несёт 'sentViaCode'
+    //   (паритет со штатным телом). Кладём ТОЛЬКО когда true (контракт: опускать пустые).
+    //   callerFile/callerLine для GM не существует (нет интроспекции места вызова) -> опускаем.
+    if (variable_struct_exists(opts, "sentViaCode") && opts.sentViaCode == true) {
+        body.sentViaCode = true;
+    }
+
     return json_stringify(body);
 }
 
@@ -627,7 +636,11 @@ function __fastlogs_on_unhandled_exception(ex) {
     //   троттла - новый файл НЕ пишем (чтобы цикл крашей не заспамил outbox). Кап outbox
     //   (FASTLOGS_PENDING_MAX + TrimToCap внутри fastlogs_pending_write) бьёт по числу файлов
     //   в любом случае.
-    var crash_opts = { title: "Unhandled exception", screenshot: false };
+    // sentViaCode (батч B): авто-отправка по крашу - КОДОВЫЙ/автоматический путь (необработанное
+    //   исключение, не кнопка оверлея). Помечаем crash_opts -> body.sentViaCode = true пойдёт и в
+    //   захваченное pending-тело (fastlogs_build_payload_json ниже), и в фолбэк-отправку
+    //   fastlogs_send(crash_opts), если штатное тело не собралось.
+    var crash_opts = { title: "Unhandled exception", screenshot: false, sentViaCode: true };
     var crash_body = "";
     try {
         if (script_exists(asset_get_index("fastlogs_build_payload_json"))) {
@@ -773,8 +786,10 @@ function flog(message, level = FASTLOGS_LEVEL_LOG) {
                     try {
                         // Отправка ТЕКУЩЕЙ записи (логи берутся из кольца). Без скриншота (лёгкая
                         //   авто-отправка по маркеру). title помечает источник в каталоге вьюера.
+                        //   sentViaCode (батч B): авто-отправка по паттерну - это КОДОВЫЙ путь
+                        //   (триггерится из flog, не кнопкой оверлея) -> помечаем code-send.
                         if (script_exists(asset_get_index("fastlogs_send"))) {
-                            fastlogs_send({ title: "Auto-send (pattern)", screenshot: false });
+                            fastlogs_send({ title: "Auto-send (pattern)", screenshot: false, sentViaCode: true });
                         }
                     } catch (_eas) { /* не валим логирование */ }
                     st.in_pattern_autosend = false;

@@ -41,6 +41,16 @@ function fastlogs_ui_state() {
             //   уходит в opts.comment при отправке. Контракт: <=4000 символов.
             comment_text:    "",      // текущий введённый текст
             comment_editing: false,   // активен ли режим ввода (фокус на поле комментария)
+            // Имя тестера (батч B - ОБЯЗАТЕЛЬНО на ручном overlay-send). Редактируемое inline-поле
+            //   (тот же путь keyboard_string, что и комментарий). При входе в фокус засевается
+            //   текущим эффективным именем (config/runtime-override) - чтобы тестер увидел и при
+            //   желании поправил его, а не вводил с нуля. Введённое непустое имя применяется в
+            //   runtime-конфиг (st.cfg.tester), откуда payload его и читает. Кнопка "Отправить"
+            //   ЗАБЛОКИРОВАНА, пока имя (после trim) пустое. keyboard_string ОДИН на оба поля ->
+            //   фокус взаимоисключающий (вход в одно поле снимает фокус с другого).
+            tester_text:     "",      // текущий введённый текст имени тестера
+            tester_editing:  false,   // активен ли режим ввода (фокус на поле имени тестера)
+            tester_seeded:   false,   // засеяли ли tester_text эффективным именем из конфига (1 раз)
             // Настройки (персист ini). Значения подгружаются fastlogs_ui_settings_load().
             settings_loaded: false,
             cfg_screenshot:  FASTLOGS_SCREENSHOT_DEFAULT,
@@ -110,7 +120,12 @@ function fastlogs_comment_clear() {
 function fastlogs_comment_set_editing(on) {
     if (!FASTLOGS_ENABLED) return;
     var ui = fastlogs_ui_state();
-    ui.comment_editing = bool(on);
+    var want = bool(on);
+    if (want && variable_struct_exists(ui, "tester_editing") && ui.tester_editing) {
+        // Взаимоисключающий фокус (батч B): keyboard_string один на оба поля - уходим из имени.
+        ui.tester_editing = false;
+    }
+    ui.comment_editing = want;
     if (ui.comment_editing) {
         // keyboard_string - встроенная строка-аккумулятор ввода (учитывает backspace).
         //   Засеваем её текущим текстом, чтобы продолжить с места.
@@ -148,6 +163,113 @@ function fastlogs_comment_poll_input() {
     }
 
     ui.comment_text = s;
+}
+
+// =====================================================================================
+// ИМЯ ТЕСТЕРА (батч B). Редактируемое inline-поле имени тестера в оверлее. Обязательно для
+//   РУЧНОЙ (overlay) отправки: кнопка "Отправить" заблокирована, пока имя после trim пусто.
+//   Тот же inline-механизм keyboard_string, что и у комментария (надёжен для desktop/HTML5;
+//   на консолях обычно экранная клавиатура через get_string_async - там фичу можно не предлагать,
+//   // TODO verify keyboard_string на целевых консолях). keyboard_string ОДИН на оба поля ->
+//   фокусы взаимоисключающие (см. fastlogs_tester_set_editing / fastlogs_comment_set_editing).
+// =====================================================================================
+
+// Максимальная длина имени тестера (контракт: <=120). Локальный макрос, чтобы не трогать config.
+#macro FASTLOGS_TESTER_MAX 120
+
+/// @returns {bool} символ - пробельный (space/tab/CR/LF)? Для trim имени тестера.
+function fastlogs_char_is_ws(ch) {
+    var c = ord(ch);
+    return (c == 32 || c == 9 || c == 13 || c == 10);   // space, tab, CR, LF
+}
+
+/// Внутренний trim: срезать пробелы/табы/CR/LF по краям строки (string_trim есть не на всех
+///   рантаймах - делаем переносимо вручную). Возвращает "" для не-строк.
+function fastlogs_str_trim(str) {
+    if (!is_string(str)) return "";
+    var n = string_length(str);
+    if (n == 0) return "";
+    var a = 1;
+    while (a <= n && fastlogs_char_is_ws(string_char_at(str, a))) a++;
+    if (a > n) return "";                                   // строка из одних пробелов
+    var b = n;
+    while (b >= a && fastlogs_char_is_ws(string_char_at(str, b))) b--;
+    return string_copy(str, a, b - a + 1);
+}
+
+/// @returns {string} эффективное имя тестера для ОТПРАВКИ (после trim): введённое в оверлее имя,
+///   иначе - имя из конфига/override (fastlogs_init({tester}) / FASTLOGS_TESTER). "" если нигде нет.
+function fastlogs_tester_effective() {
+    if (!FASTLOGS_ENABLED) return "";
+    var ui = fastlogs_ui_state();
+    var t  = fastlogs_str_trim(ui.tester_text);
+    if (t != "") return t;
+    // Фолбэк на конфиг/override (тот же источник, что читает payload).
+    return fastlogs_str_trim(fastlogs_ui_tester_safe());
+}
+
+/// @returns {bool} задано ли непустое (после trim) имя тестера. Гейтит ручной overlay-send (батч B).
+function fastlogs_tester_is_set() {
+    if (!FASTLOGS_ENABLED) return false;
+    return (fastlogs_tester_effective() != "");
+}
+
+/// Войти/выйти из режима ввода имени тестера. При входе: снять фокус с комментария (keyboard_string
+///   один на оба поля), засеять keyboard_string текущим текстом, чтобы продолжить с места.
+/// @param {bool} on
+function fastlogs_tester_set_editing(on) {
+    if (!FASTLOGS_ENABLED) return;
+    var ui = fastlogs_ui_state();
+    var want = bool(on);
+    if (want) {
+        // Взаимоисключающий фокус: уходим из комментария, иначе keyboard_string «делят» оба поля.
+        if (ui.comment_editing) ui.comment_editing = false;
+        keyboard_string = ui.tester_text;   // продолжить редактирование с уже введённого
+    }
+    ui.tester_editing = want;
+}
+
+/// Опрос ввода имени тестера. Вызывать каждый Step ПОКА оверлей открыт и поле в фокусе.
+///   Накапливает символы из keyboard_string (GM сам обрабатывает печать/backspace); Enter
+///   ЗАВЕРШАЕТ ввод (имя однострочное, не как многострочный комментарий); обрезает до
+///   FASTLOGS_TESTER_MAX. После каждого опроса синхронизирует runtime-конфиг (st.cfg.tester),
+///   чтобы payload (fastlogs_build_payload) брал актуальное имя без отдельного «сохранить».
+function fastlogs_tester_poll_input() {
+    if (!FASTLOGS_ENABLED) return;
+    var ui = fastlogs_ui_state();
+    if (!ui.open || !ui.tester_editing) return;
+
+    // Базовый текст = текущий keyboard_string (печать + backspace обрабатывает GM сам).
+    var s = is_string(keyboard_string) ? keyboard_string : "";
+
+    // Enter завершает ввод имени (однострочное поле). Не дописываем "\n" (в отличие от комментария).
+    if (keyboard_check_pressed(vk_enter)) {
+        fastlogs_tester_set_editing(false);
+    }
+
+    // Лимит длины (контракт <=120). Режем аккумулятор, чтобы UI и отправка совпадали.
+    if (string_length(s) > FASTLOGS_TESTER_MAX) {
+        s = string_copy(s, 1, FASTLOGS_TESTER_MAX);
+        keyboard_string = s;
+    }
+
+    ui.tester_text = s;
+    // Синхронизировать runtime-конфиг, откуда payload читает tester (__fastlogs_cfg("tester")).
+    //   Пишем именно ВВЕДЁННОЕ имя (с trim): пустое -> в cfg не пишем, оставляя фолбэк на FASTLOGS_TESTER.
+    fastlogs_tester_apply_to_cfg();
+}
+
+/// Применить введённое имя тестера к рантайм-конфигу (st.cfg.tester), откуда его читает payload.
+///   Пишем только НЕПУСТОЕ (после trim) имя; пустое -> ключ не трогаем (фолбэк на конфиг/макрос).
+function fastlogs_tester_apply_to_cfg() {
+    if (!FASTLOGS_ENABLED) return;
+    if (!script_exists(asset_get_index("__fastlogs_state"))) return;
+    var ui = fastlogs_ui_state();
+    var t  = fastlogs_str_trim(ui.tester_text);
+    if (t == "") return;   // не перетираем конфиг/override пустым - пусть остаётся прежний источник
+    var st = __fastlogs_state();
+    if (!is_struct(st.cfg)) st.cfg = {};
+    st.cfg.tester = t;
 }
 
 // =====================================================================================
@@ -348,10 +470,13 @@ function fastlogs_ui_draw() {
     var y  = panel_y;
 
     // Высоту панели посчитаем как сумму строк ниже; для простоты рисуем фон достаточной высоты.
-    // +1 строка под "Тестер:" (line_h) и +поле комментария (comment_h) к исходным 5 рядам кнопок.
+    // Ряды: заголовок, счётчики, РЕДАКТИРУЕМОЕ поле "Тестер" (btn_h, батч B), подпись+поле
+    //   комментария (line_h + comment_h), Отправить/Скриншот, URL/Копировать, REC/Clear.
     var line_h    = round(28 * ui_scale);          // высота однострочной подписи
     var comment_h = btn_h * 2;                      // высота многострочного поля комментария
-    var panel_h = btn_h * 5 + pad * 9 + line_h + comment_h;
+    // 6 рядов высотой btn_h (счётчики + Тестер-поле + 4 ряда кнопок ниже) + поле комментария +
+    //   подпись комментария (line_h) + вертикальные отступы. Запас по pad намеренный.
+    var panel_h = btn_h * 6 + pad * 10 + line_h + comment_h;
     fastlogs_ui_panel_bg(x1, y, x1 + panel_w, y + panel_h);
 
     var inner_x = x1 + pad;
@@ -376,15 +501,49 @@ function fastlogs_ui_draw() {
     fastlogs_ui_counter(inner_x + third * 2, cy, third - pad, btn_h, "L", counts.log,   FASTLOGS_COL_LOG,   fsize);
     cy += btn_h + pad;
 
-    // --- Имя тестера (из конфига FASTLOGS_TESTER / runtime-override). Read-only показ.
-    //   Помогает тестеру убедиться, что его имя уйдёт с отчётом (фича TESTER).
-    var tester_name = fastlogs_ui_tester_safe();
-    draw_set_colour(FASTLOGS_COL_LOG);
-    fastlogs_ui_text(inner_x, cy, "Тестер:", fsize);
-    draw_set_colour(FASTLOGS_COL_TEXT);
-    var tester_shown = (tester_name == "") ? "(не задан в конфиге)" : tester_name;
-    fastlogs_ui_text_clipped(inner_x + round(110 * ui_scale), cy, tester_shown, fsize, inner_w - round(110 * ui_scale));
-    cy += line_h + pad * 0.5;
+    // --- Имя тестера (батч B): РЕДАКТИРУЕМОЕ поле. ОБЯЗАТЕЛЬНО для ручной отправки - кнопка
+    //   "Отправить" заблокирована, пока имя пустое. Клик по полю -> режим ввода (keyboard_string).
+    //   Засев: при первом показе подставляем эффективное имя из конфига/override, чтобы тестер
+    //   увидел/поправил, а не вводил заново. Введённое имя применяется в st.cfg.tester (poll),
+    //   откуда payload его и берёт. Источник истины для гейта/отправки - fastlogs_tester_effective().
+    if (!ui.tester_seeded) {
+        // Один раз засеять поле эффективным именем из конфига (если оно там задано и поле пусто).
+        var seed = fastlogs_str_trim(fastlogs_ui_tester_safe());
+        if (seed != "" && fastlogs_str_trim(ui.tester_text) == "") {
+            ui.tester_text = seed;
+            keyboard_string = ui.tester_text;   // синхрон, чтобы правка началась с засеянного
+        }
+        ui.tester_seeded = true;
+    }
+    var tester_set = (fastlogs_tester_effective() != "");
+    // Подпись: красным помечаем обязательность, если имя ещё не задано.
+    draw_set_colour(tester_set ? FASTLOGS_COL_LOG : FASTLOGS_COL_ERROR);
+    fastlogs_ui_text(inner_x, cy + btn_h * 0.5 - 8 * fsize, tester_set ? "Тестер:" : "Тестер (обязательно):", fsize);
+    var tlabel_w = round(220 * ui_scale);
+    var tfx1 = inner_x + tlabel_w;
+    var tfy1 = cy;
+    var tfy2 = cy + btn_h;
+    // Фон поля имени.
+    draw_set_colour(FASTLOGS_COL_BTN);
+    draw_set_alpha(1);
+    draw_rectangle(tfx1, tfy1, inner_x + inner_w, tfy2, false);
+    // Рамка: акцент если редактируем; красная если имя пустое (визуальный сигнал обязательности);
+    //   иначе обычная.
+    draw_set_colour(ui.tester_editing ? FASTLOGS_COL_ACCENT : (tester_set ? FASTLOGS_COL_BTN_HOVER : FASTLOGS_COL_ERROR));
+    draw_rectangle(tfx1, tfy1, inner_x + inner_w, tfy2, true);
+    // Текст имени или подсказка.
+    var tname = ui.tester_text;
+    if (tname == "") {
+        draw_set_colour(FASTLOGS_COL_LOG);
+        fastlogs_ui_text_clipped(tfx1 + pad * 0.5, tfy1 + btn_h * 0.5 - 8 * fsize, ui.tester_editing ? "Печатайте имя... (Enter - готово)" : "Нажмите, чтобы ввести имя", fsize, inner_w - tlabel_w - pad);
+    } else {
+        draw_set_colour(FASTLOGS_COL_TEXT);
+        var tcursor = (ui.tester_editing && ((current_time div 500) mod 2 == 0)) ? "_" : "";
+        fastlogs_ui_text_clipped(tfx1 + pad * 0.5, tfy1 + btn_h * 0.5 - 8 * fsize, tname + tcursor, fsize, inner_w - tlabel_w - pad);
+    }
+    // Зона клика поля -> фокус ввода имени.
+    fastlogs_ui_register_hit(ui, tfx1, tfy1, inner_x + inner_w, tfy2, "tester_focus");
+    cy += btn_h + pad;
 
     // --- Поле комментария тестера (фича COMMENT). Клик по полю -> режим ввода (keyboard_string).
     //   Многострочный текст; уходит в opts.comment при отправке. Рамка акцентом, если в фокусе.
@@ -417,14 +576,29 @@ function fastlogs_ui_draw() {
     cy = cmt_y2 + pad;
 
     // --- Кнопка "Отправить" + тоггл "Скриншот" (крупная зона).
+    //   Батч B: пока имя тестера не задано (после trim), кнопка ЗАБЛОКИРОВАНА (серая, без зоны
+    //   клика) - ручной overlay-send требует имени. Подсказка - под кнопкой. Код/крэш-send этим
+    //   гейтом НЕ затронуты (они идут не через эту зону). "send" регистрируется в hit ТОЛЬКО когда
+    //   разрешено -> даже при гонке клика действие не выполнится без имени.
     var half = inner_w / 2;
     var sending = fastlogs_ui_is_sending_safe();
-    var send_label = sending ? "Отправка..." : "Отправить";
-    fastlogs_ui_button(inner_x, cy, inner_x + half - pad, cy + btn_h, send_label, "send", fsize, ui);
+    var send_allowed = fastlogs_tester_is_set();
+    var send_label = sending ? "Отправка..." : (send_allowed ? "Отправить" : "Отправить (нужно имя)");
+    if (send_allowed) {
+        fastlogs_ui_button(inner_x, cy, inner_x + half - pad, cy + btn_h, send_label, "send", fsize, ui);
+    } else {
+        fastlogs_ui_button_disabled(inner_x, cy, inner_x + half - pad, cy + btn_h, send_label, fsize);
+    }
 
     var shot_on = ui.cfg_screenshot;
     fastlogs_ui_toggle(inner_x + half, cy, inner_x + inner_w, cy + btn_h, "Скриншот", shot_on, "toggle_screenshot", fsize, ui);
     cy += btn_h + pad;
+
+    // Подсказка под кнопкой, если отправка заблокирована из-за пустого имени тестера (батч B).
+    if (!send_allowed) {
+        draw_set_colour(FASTLOGS_COL_ERROR);
+        fastlogs_ui_text(inner_x, cy - pad + 2, "Введите имя тестера, чтобы отправить", fsize);
+    }
 
     // --- Область URL + кнопка "Копировать".
     var url = fastlogs_ui_last_url_safe();
@@ -470,6 +644,10 @@ function fastlogs_ui_draw() {
         // Клик мимо поля комментария снимает фокус ввода (чтобы печать не уходила «в никуда»).
         if (ui.comment_editing && hid != "comment_focus") {
             fastlogs_comment_set_editing(false);
+        }
+        // Аналогично для поля имени тестера (батч B): клик мимо него снимает фокус.
+        if (ui.tester_editing && hid != "tester_focus") {
+            fastlogs_tester_set_editing(false);
         }
         if (hid != "") fastlogs_ui_action(hid, ui);
         ui.pressed = false; // потребили
@@ -570,13 +748,35 @@ function fastlogs_ui_action(id, ui) {
 
         case "comment_focus":
             // Клик по полю комментария -> включить режим ввода (keyboard_string).
+            //   set_editing комментария снимает фокус с поля имени (взаимоисключающий keyboard_string).
             fastlogs_comment_set_editing(true);
             break;
 
+        case "tester_focus":
+            // Клик по полю имени тестера -> включить режим ввода (батч B).
+            //   set_editing имени снимает фокус с комментария (взаимоисключающий keyboard_string).
+            if (script_exists(asset_get_index("fastlogs_tester_set_editing"))) {
+                fastlogs_tester_set_editing(true);
+            }
+            break;
+
         case "send":
-            // Передаём введённый комментарий в отправку (opts.comment). Пустой не кладём -
-            //   payload сам опустит, но не загромождаем opts. Снимаем фокус ввода.
+            // РУЧНОЙ overlay-send (батч B): ОБЯЗАТЕЛЬНО имя тестера. В норме кнопка без имени
+            //   заблокирована (нет hit-rect "send"), но держим финальный guard на случай гонки.
+            //   sentViaCode тут НЕ ставим - это ручная отправка из UI (payload опустит поле).
+            //   Снимаем фокус полей ввода и применяем введённое имя в конфиг перед сборкой payload.
             fastlogs_comment_set_editing(false);
+            if (script_exists(asset_get_index("fastlogs_tester_set_editing"))) {
+                fastlogs_tester_set_editing(false);
+            }
+            if (script_exists(asset_get_index("fastlogs_tester_apply_to_cfg"))) {
+                fastlogs_tester_apply_to_cfg();   // зафиксировать введённое имя в st.cfg.tester
+            }
+            if (!fastlogs_tester_is_set()) {
+                // Имя так и не задано - не отправляем, подсказываем (на случай обхода блокировки кнопки).
+                fastlogs_ui_toast("Введите имя тестера");
+                break;
+            }
             if (script_exists(asset_get_index("fastlogs_send"))) {
                 var send_opts = {};
                 var cmt_send = fastlogs_comment_get();
@@ -699,6 +899,24 @@ function fastlogs_ui_button(x1, y1, x2, y2, label, id, scale, ui) {
     draw_set_halign(fa_left);
     draw_set_valign(fa_top);
     fastlogs_ui_register_hit(ui, x1, y1, x2, y2, id);
+}
+
+/// Заблокированная (неактивная) кнопка: серый фон, приглушённый текст, БЕЗ регистрации зоны клика
+///   (батч B). Не передаёт id и ui - так клик по ней не вызывает действия (нет hit-rect), даже
+///   если указатель попал в её прямоугольник в этом кадре.
+function fastlogs_ui_button_disabled(x1, y1, x2, y2, label, scale) {
+    draw_set_colour(FASTLOGS_COL_BTN);
+    draw_set_alpha(0.5);
+    draw_rectangle(x1, y1, x2, y2, false);
+    draw_set_alpha(1);
+    draw_set_colour(FASTLOGS_COL_BTN_HOVER);
+    draw_rectangle(x1, y1, x2, y2, true);
+    draw_set_colour(FASTLOGS_COL_LOG);   // приглушённый текст
+    draw_set_halign(fa_center);
+    draw_set_valign(fa_middle);
+    fastlogs_ui_text((x1 + x2) * 0.5, (y1 + y2) * 0.5, label, scale);
+    draw_set_halign(fa_left);
+    draw_set_valign(fa_top);
 }
 
 /// Тоггл (вкл/выкл) с цветовой индикацией состояния.

@@ -196,6 +196,9 @@ function fastlogs_quick_send(opts = undefined) {
 
     // Тег быстрой отправки в title (если интегратор не задал свой) - помогает различать в каталоге.
     if (!variable_struct_exists(opts, "title")) { opts.title = "Quick send"; }
+    // sentViaCode (батч B): quick-send всегда инициируется КОДОМ (хоткей/жест/интегратор), НЕ
+    //   кнопкой оверлея -> помечаем как code-send (payload положит body.sentViaCode = true).
+    opts.sentViaCode = true;
     return fastlogs_send(opts);
 }
 

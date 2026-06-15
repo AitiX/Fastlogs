@@ -26,16 +26,28 @@ function fastlogs_input_poll() {
     if (!FASTLOGS_ENABLED) return;
     var ui = fastlogs_ui_state();
 
-    // --- 0) Ввод комментария тестера (фича COMMENT): когда поле в фокусе, клавиатура
-    //   принадлежит полю. Накапливаем символы и НЕ даём хоткею-тогглу/жестам перехватить ввод
-    //   (иначе печать буквы хоткея закрыла бы оверлей). Esc - выйти из режима ввода.
-    var editing = variable_struct_exists(ui, "comment_editing") ? ui.comment_editing : false;
-    if (editing) {
-        if (script_exists(asset_get_index("fastlogs_comment_poll_input"))) {
-            fastlogs_comment_poll_input();
+    // --- 0) Ввод текстовых полей оверлея (комментарий тестера - фича COMMENT; имя тестера -
+    //   батч B): когда любое поле в фокусе, клавиатура принадлежит полю. Накапливаем символы и
+    //   НЕ даём хоткею-тогглу/жестам перехватить ввод (иначе печать буквы хоткея закрыла бы
+    //   оверлей). Esc - выйти из режима ввода. keyboard_string ОДИН на оба поля, но фокусы
+    //   взаимоисключающие (set_editing одного снимает другое) -> опрашиваем то, что в фокусе.
+    var editing_comment = variable_struct_exists(ui, "comment_editing") ? ui.comment_editing : false;
+    var editing_tester  = variable_struct_exists(ui, "tester_editing")  ? ui.tester_editing  : false;
+    if (editing_comment || editing_tester) {
+        if (editing_tester) {
+            if (script_exists(asset_get_index("fastlogs_tester_poll_input"))) {
+                fastlogs_tester_poll_input();
+            }
+        } else {
+            if (script_exists(asset_get_index("fastlogs_comment_poll_input"))) {
+                fastlogs_comment_poll_input();
+            }
         }
         if (keyboard_check_pressed(vk_escape)) {
-            if (script_exists(asset_get_index("fastlogs_comment_set_editing"))) {
+            // Снять фокус с того поля, что было активно.
+            if (editing_tester && script_exists(asset_get_index("fastlogs_tester_set_editing"))) {
+                fastlogs_tester_set_editing(false);
+            } else if (script_exists(asset_get_index("fastlogs_comment_set_editing"))) {
                 fastlogs_comment_set_editing(false);
             }
         }
