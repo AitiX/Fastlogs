@@ -154,6 +154,9 @@ namespace PlayJoy.FastLogs
 
             [Tooltip("Capture a screenshot with auto-sent crash reports. Off by default (a crashed frame is rarely useful and capture costs a frame).")]
             public bool IncludeScreenshot = false;
+
+            [Tooltip("Regex patterns matched against EVERY captured log line (any level, not just exceptions). When a line matches, a report is auto-sent, reusing the same throttle/cap as crash auto-sends (MinSecondsBetweenAutoSends + MaxAutoSendsPerSession), so a chatty match cannot spam the server. Empty by default (no pattern auto-send). Invalid patterns are skipped with a one-time warning. Read ONCE at FastLogs.Init (same as AutoSendOnException); changing it at runtime takes effect only after a re-Init.")]
+            public string[] AutoSendPatterns = new string[0];
         }
 
         [Serializable]

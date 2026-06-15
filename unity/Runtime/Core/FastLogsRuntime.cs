@@ -67,6 +67,10 @@ namespace PlayJoy.FastLogs
         private bool _isBusy;
         private UploadResultDto _lastResult = UploadResultDto.Disabled;
 
+        // WebGL <input type=file> bridge (feature #7), created lazily on first pick and
+        // torn down with the runtime. Null until first used / on non-WebGL platforms.
+        private WebFilePicker _webFilePicker;
+
         // ---- Context & breadcrumbs (feature #2) ----
         private FastLogsCrumbStore _crumbs;
 
@@ -109,6 +113,11 @@ namespace PlayJoy.FastLogs
         // specific log can be awaited + grabbed on the server. Null = none.
         private string _correlationCode;
 
+        // Per-run session id: one GUID generated at Init, attached to EVERY report of this
+        // process run, so the server can group reports from the same play session. Stays
+        // constant for the lifetime of the runtime.
+        private string _sessionId;
+
         // ---- Retry-until-success state (outer loop, on top of the uploader's own
         //      immediate retries). At most ONE pending retry exists at a time. ----
         private Coroutine _retryCoroutine; // non-null while a retry is scheduled/counting down; null = none pending
@@ -127,6 +136,14 @@ namespace PlayJoy.FastLogs
         private float _lastCapturedUnscaled = float.NegativeInfinity;
         private int _lastCapturedStackHash;       // 0 = none yet
         private bool _inAutoSendDispatch;         // re-entrancy guard (our own logged exceptions must not re-trigger)
+
+        // ---- Auto-send-on-pattern state (feature #9) ----
+        // Regex patterns (AutoSendSection.AutoSendPatterns) compiled once at Init and
+        // matched against every captured log line. A match triggers an auto-send that
+        // reuses the SAME throttle/cap/dedup as the crash path (above), so a chatty
+        // match cannot spam the server. Empty/null = the feature is off. Invalid
+        // patterns are dropped at compile time with one warning.
+        private System.Text.RegularExpressions.Regex[] _autoSendPatterns;
 
         // ---- Loop guard (per CODE call site) ----
         // Catches a single code call site (FastLogs.Send / SendAsync / SendSceneContext)
@@ -164,6 +181,11 @@ namespace PlayJoy.FastLogs
         {
             _config = config;
             _services = services;
+
+            // Per-run session id (feature #9): one GUID for this process run, stamped on
+            // every report so the server can group a single play session's reports. "N"
+            // gives a compact 32-hex-char form with no separators.
+            _sessionId = Guid.NewGuid().ToString("N");
 
             if (_services != null)
             {
@@ -230,7 +252,12 @@ namespace PlayJoy.FastLogs
                 catch (Exception e) { FlogLog.Exception(e); }
             }
 
-            // Auto-send-on-exception: hook the (main-thread) log callback once.
+            // Auto-send-on-pattern (feature #9): compile the configured regex patterns once,
+            // before hooking, so the per-line callback only does a cheap IsMatch.
+            CompileAutoSendPatterns();
+
+            // Auto-send (on exception and/or on pattern): hook the (main-thread) log
+            // callback once.
             HookAutoSend();
 
             FlogLog.Info("Runtime initialized.");
@@ -271,6 +298,15 @@ namespace PlayJoy.FastLogs
             SafeDispose(_quickSendTrigger);
             SafeDispose(_triggerSource);
             SafeDispose(_logSource);
+
+            // Tear down the WebGL file picker host (resolves any in-flight pick).
+            if (_webFilePicker != null)
+            {
+                try { _webFilePicker.Shutdown(); }
+                catch (Exception e) { FlogLog.Exception(e); }
+                _webFilePicker = null;
+            }
+
             FlogLog.Info("Runtime destroyed.");
         }
 
@@ -747,7 +783,11 @@ namespace PlayJoy.FastLogs
             {
                 return;
             }
-            if (_config == null || _config.AutoSend == null || !_config.AutoSend.AutoSendOnException)
+            // Hook when EITHER auto-send-on-exception is on OR there is at least one
+            // compiled auto-send pattern; otherwise the callback would be dead weight.
+            bool wantExceptions = _config != null && _config.AutoSend != null && _config.AutoSend.AutoSendOnException;
+            bool wantPatterns = _autoSendPatterns != null && _autoSendPatterns.Length > 0;
+            if (!wantExceptions && !wantPatterns)
             {
                 return;
             }
@@ -755,6 +795,40 @@ namespace PlayJoy.FastLogs
             // so we can safely touch runtime state and start a coroutine from here.
             Application.logMessageReceived += OnLogMessageForAutoSend;
             _autoSendHooked = true;
+        }
+
+        // Compile the configured auto-send regex patterns once. Invalid patterns are
+        // skipped with a single warning naming them, so one bad entry does not disable
+        // the rest. Null/empty config leaves _autoSendPatterns null (feature off).
+        private void CompileAutoSendPatterns()
+        {
+            _autoSendPatterns = null;
+            string[] raw = _config != null && _config.AutoSend != null ? _config.AutoSend.AutoSendPatterns : null;
+            if (raw == null || raw.Length == 0)
+            {
+                return;
+            }
+
+            var compiled = new List<System.Text.RegularExpressions.Regex>(raw.Length);
+            for (int i = 0; i < raw.Length; i++)
+            {
+                string pattern = raw[i];
+                if (string.IsNullOrEmpty(pattern))
+                {
+                    continue;
+                }
+                try
+                {
+                    compiled.Add(new System.Text.RegularExpressions.Regex(
+                        pattern, System.Text.RegularExpressions.RegexOptions.CultureInvariant));
+                }
+                catch (Exception e)
+                {
+                    FlogLog.Warn("FastLogs: ignoring invalid AutoSendPattern '" + pattern + "': " + e.Message);
+                }
+            }
+
+            _autoSendPatterns = compiled.Count > 0 ? compiled.ToArray() : null;
         }
 
         private void UnhookAutoSend()
@@ -769,25 +843,49 @@ namespace PlayJoy.FastLogs
 
         private void OnLogMessageForAutoSend(string condition, string stackTrace, LogType type)
         {
-            // Only unhandled exceptions trigger an auto-send.
-            if (type != LogType.Exception)
-            {
-                return;
-            }
-
-            // Re-entrancy guard: any exception logged by FastLogs' own send pipeline
-            // (e.g. via FlogLog.Exception) arrives here too; never auto-send for that.
+            // Re-entrancy guard: any log raised by FastLogs' own send pipeline (e.g. via
+            // FlogLog.*) arrives here too; never auto-send for that. Guards both paths.
             if (_inAutoSendDispatch)
             {
                 return;
             }
 
-            // Re-check the live toggle (it may have been turned off via settings).
-            if (_config == null || _config.AutoSend == null || !_config.AutoSend.AutoSendOnException)
+            // Ignore FastLogs' OWN diagnostic lines: FlogLog routes Info/Warn/Error
+            // through Debug.Log* with the "[FastLogs] " prefix, so those reach this
+            // callback too. Without this, a broad user pattern could match a line FastLogs
+            // emits DURING/AFTER a send (outside the _inAutoSendDispatch window) and start a
+            // self-sustaining send loop when the shared throttle/cap are configured to 0.
+            if (!string.IsNullOrEmpty(condition) && condition.StartsWith(FlogLog.Prefix, StringComparison.Ordinal))
             {
                 return;
             }
 
+            if (_config == null || _config.AutoSend == null)
+            {
+                return;
+            }
+
+            // Unhandled exceptions take the crash path (durable capture + gated delivery).
+            // Re-check the live toggle (it may have been turned off via settings).
+            if (type == LogType.Exception)
+            {
+                if (_config.AutoSend.AutoSendOnException)
+                {
+                    HandleExceptionAutoSend(condition, stackTrace);
+                }
+                return;
+            }
+
+            // Any other level: auto-send only if a configured pattern matches the line.
+            if (MatchesAutoSendPattern(condition))
+            {
+                HandlePatternAutoSend(condition, type);
+            }
+        }
+
+        // Crash auto-send: durably capture, then gated immediate delivery (PHASE 1/2).
+        private void HandleExceptionAutoSend(string condition, string stackTrace)
+        {
             float now;
             try { now = Time.realtimeSinceStartup; } catch { now = 0f; }
 
@@ -892,6 +990,108 @@ namespace PlayJoy.FastLogs
             _lastAutoSendUnscaled = now;
             _lastAutoSendStackHash = stackHash;
             _autoSendCountThisSession++;
+        }
+
+        // True if any compiled auto-send pattern matches the log line. Cheap and
+        // allocation-free; returns false fast when the feature is off or the line is empty.
+        private bool MatchesAutoSendPattern(string condition)
+        {
+            if (_autoSendPatterns == null || _autoSendPatterns.Length == 0 || string.IsNullOrEmpty(condition))
+            {
+                return false;
+            }
+            for (int i = 0; i < _autoSendPatterns.Length; i++)
+            {
+                var rx = _autoSendPatterns[i];
+                if (rx == null)
+                {
+                    continue;
+                }
+                try
+                {
+                    if (rx.IsMatch(condition))
+                    {
+                        return true;
+                    }
+                }
+                catch (Exception e)
+                {
+                    FlogLog.Exception(e);
+                }
+            }
+            return false;
+        }
+
+        // Pattern auto-send (feature #9): a non-exception log line matched a configured
+        // pattern. We immediately send a report, REUSING the crash auto-send throttle/cap/
+        // dedup (_autoSendCountThisSession + MaxAutoSendsPerSession, _lastAutoSendUnscaled +
+        // MinSecondsBetweenAutoSends, _lastAutoSendStackHash) so a chatty match cannot spam
+        // the server. Unlike the crash path this does NOT persist to the on-disk outbox: a
+        // matched info/warn line is not a crash and need not survive a process death. Never
+        // throws.
+        private void HandlePatternAutoSend(string condition, LogType type)
+        {
+            float now;
+            try { now = Time.realtimeSinceStartup; } catch { now = 0f; }
+
+            // Dedup keys on the matched message (no useful stack for a plain log line).
+            int stackHash = ComputeStackHash(condition, null);
+
+            _inAutoSendDispatch = true;
+            try
+            {
+                // Don't pile on an in-flight send or a pending retry; the match is dropped
+                // (the line is also already in the captured log, so the next send carries it).
+                if (_isBusy || _retryCoroutine != null)
+                {
+                    return;
+                }
+
+                // Per-session cap (shared with crash auto-sends).
+                int cap = _config.AutoSend.MaxAutoSendsPerSession;
+                if (cap > 0 && _autoSendCountThisSession >= cap)
+                {
+                    return;
+                }
+
+                bool sameAsLastSent = stackHash == _lastAutoSendStackHash && _lastAutoSendStackHash != 0;
+
+                float minGap = _config.AutoSend.MinSecondsBetweenAutoSends;
+                float sinceLastSent = now - _lastAutoSendUnscaled;
+
+                // Global throttle (shared): never auto-send more than once per minGap.
+                if (sinceLastSent < minGap)
+                {
+                    return;
+                }
+
+                // Dedup: same matched line as the previous auto-send is suppressed for an
+                // extended window (2x the gap), mirroring the crash path.
+                if (sameAsLastSent && sinceLastSent < minGap * 2f)
+                {
+                    return;
+                }
+
+                RecordAutoSend(now, stackHash);
+
+                string title = "Auto report (pattern)";
+                string comment = "Log line (" + type + ") matched an auto-send pattern (auto-sent by FastLogs):\n" + (condition ?? string.Empty);
+                bool shot = _config.AutoSend.IncludeScreenshot;
+
+                ShowToast(ToastKind.Progress, "FastLogs: log pattern matched, sending...", null, 0f, false);
+
+                // Not a crash: own no persisted file, so a success deletes nothing.
+                ForgetPendingCrashOwnership();
+                BeginSend(shot, title, comment);
+            }
+            catch (Exception e)
+            {
+                FlogLog.Exception(e);
+            }
+            finally
+            {
+                _inAutoSendDispatch = false;
+            }
         }
 
         // Cheap, allocation-light stack signature. Prefers the stack trace; falls back
@@ -1097,6 +1297,7 @@ namespace PlayJoy.FastLogs
                 ScreenshotPngBase64 = null,
                 Title = string.IsNullOrEmpty(title) ? null : Truncate(title, 120),
                 Comment = string.IsNullOrEmpty(minimalComment) ? null : Truncate(minimalComment, 4000),
+                SessionId = string.IsNullOrEmpty(_sessionId) ? null : _sessionId,
             };
 
             return report;
@@ -1437,6 +1638,40 @@ namespace PlayJoy.FastLogs
         public void ClearAttachments()
         {
             _queuedAttachments.Clear();
+        }
+
+        /// <summary>
+        /// WebGL only (feature #7): open the browser file dialog, then upload the chosen
+        /// file via the byte[] path (SendFileAsync(bytes, fileName)), returning an awaitable
+        /// result. Must be called from a user-gesture handler so the browser allows the
+        /// dialog. On non-WebGL platforms this resolves immediately with a "not supported"
+        /// failure (use SendFileAsync(byte[], fileName) or a native picker there). Never throws.
+        /// </summary>
+        public FlogTask<FileUploadResultDto> WebPickAndSendFile(string title)
+        {
+#if UNITY_WEBGL && !UNITY_EDITOR
+            try
+            {
+                if (_webFilePicker == null)
+                {
+                    // The send sink reuses the existing byte[] file-upload path, so the
+                    // picked file goes through the very same /api/files pipeline.
+                    _webFilePicker = WebFilePicker.Create((bytes, fileName) => BeginSendFileBytes(bytes, fileName, title));
+                }
+                return _webFilePicker.Pick(title);
+            }
+            catch (Exception e)
+            {
+                FlogLog.Exception(e);
+                return FlogTask.FromResult(FileUploadResultDto.Fail("FastLogs: failed to open the file picker: " + e.Message));
+            }
+#else
+            // Off WebGL there is no browser file dialog, so do NOT create a persistent
+            // DontDestroyOnLoad host that could only ever fail; resolve with the same
+            // "not supported" failure WebFilePicker.Pick would return.
+            return FlogTask.FromResult(FileUploadResultDto.Fail(
+                "FastLogs: WebPickAndSendFile is only supported on WebGL. Use SendFileAsync(byte[], fileName) on other platforms."));
+#endif
         }
 
         // Core file-upload entry: validates the uploader, the decoded-size cap (AFTER any
@@ -2191,7 +2426,8 @@ namespace PlayJoy.FastLogs
                 Context = context,
                 Breadcrumbs = breadcrumbs,
                 SceneContextJson = string.IsNullOrEmpty(sceneContext) ? null : sceneContext,
-                CorrelationCode = string.IsNullOrEmpty(_correlationCode) ? null : Truncate(_correlationCode, 64)
+                CorrelationCode = string.IsNullOrEmpty(_correlationCode) ? null : Truncate(_correlationCode, 64),
+                SessionId = string.IsNullOrEmpty(_sessionId) ? null : _sessionId
             };
 
             return report;

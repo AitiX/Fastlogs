@@ -16,7 +16,9 @@ namespace PlayJoy.FastLogs
     /// </summary>
     internal static class FlogLog
     {
-        private const string Prefix = "[FastLogs] ";
+        // Exposed within the assembly so the auto-send path can recognize (and skip)
+        // FastLogs' own diagnostic lines and avoid a pattern-match feedback loop.
+        internal const string Prefix = "[FastLogs] ";
 
         // Conditional on the same symbols that gate the rest of the package.
         // In retail / console builds none of these calls are compiled in.

@@ -93,6 +93,9 @@ namespace PlayJoy.FastLogs
             w.Field("sceneContext", report.SceneContextJson);
             w.Field("correlationCode", report.CorrelationCode);
 
+            // Optional per-run session id (one GUID per process) - omitted when empty.
+            w.Field("sessionId", report.SessionId);
+
             w.EndObject();
             return sb.ToString();
         }

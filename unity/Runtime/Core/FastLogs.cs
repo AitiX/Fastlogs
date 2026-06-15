@@ -483,6 +483,28 @@ namespace PlayJoy.FastLogs
         }
 
         /// <summary>
+        /// WebGL only (feature #7): open the browser file dialog and upload the chosen file
+        /// (via the byte[] path, WebGL-safe), returning its shareable link. MUST be called
+        /// from a user-gesture handler (e.g. a UI button click) so the browser permits the
+        /// dialog. On non-WebGL platforms it resolves immediately with a "not supported"
+        /// failure - use <see cref="SendFileAsync(byte[], string, string, string, int)"/> (or a
+        /// native picker) there. In stripped builds returns a "disabled" result.
+        /// Value-returning: compiles everywhere.
+        /// </summary>
+        public static FlogTask<FileUploadResultDto> WebPickAndSendFile(string title = null)
+        {
+#if FASTLOGS_ENABLED
+            if (_runtime == null)
+            {
+                return FlogTask.FromResult(FileUploadResultDto.Fail("FastLogs is not initialized."));
+            }
+            return _runtime.WebPickAndSendFile(title);
+#else
+            return FlogTask.FromResult(FileUploadResultDto.Disabled);
+#endif
+        }
+
+        /// <summary>
         /// Zip a folder on the client into one archive and upload it, returning its link. On
         /// WebGL (no file system) this fails cleanly. In stripped builds returns a "disabled"
         /// result. Value-returning: compiles everywhere.

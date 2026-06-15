@@ -368,7 +368,10 @@ namespace PlayJoy.FastLogs
                 LogEncoding = Str(obj, "logEncoding"),
                 Title = Str(obj, "title"),
                 Comment = Str(obj, "comment"),
-                Tester = Str(obj, "tester")
+                Tester = Str(obj, "tester"),
+                // Restore the ORIGINAL session's id so a drained crash report stays
+                // grouped with the run it was captured in (not the new run draining it).
+                SessionId = Str(obj, "sessionId")
             };
 
             // counts

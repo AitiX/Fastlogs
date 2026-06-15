@@ -87,6 +87,13 @@ namespace PlayJoy.FastLogs
         /// and grab this exact log on the server. Omitted when empty.
         /// </summary>
         public string CorrelationCode;
+
+        /// <summary>
+        /// sessionId - optional id identifying the current process run (one GUID generated
+        /// at Init, the same on every report of that run), so reports from the same play
+        /// session can be grouped/correlated on the server. Omitted when empty.
+        /// </summary>
+        public string SessionId;
     }
 
     /// <summary>
