@@ -118,6 +118,65 @@ URL последнего успешно созданного лога (из от
 
 ---
 
+## Отправка файла / папки (фича SEND-FILE)
+
+Отдельно от лог-отчёта: отправить произвольный **файл** или **папку** на сервер и получить
+короткую ссылку (как у отчёта), скачать через вьюер кнопкой Download. Транспорт - **JSON +
+base64** на **отдельный** `POST <BASE_URL>/api/files` (НЕ multipart, НЕ внутри лог-отчёта).
+Реализация - `scr_fastlogs_files`. Конфиг: `FASTLOGS_FILES_ENDPOINT` (`""` -> выводится из
+`FASTLOGS_ENDPOINT` заменой `/api/logs`->`/api/files`), `FASTLOGS_MAX_FILE_BYTES` (деф. 25 MB).
+Типовой кейс: выгрузить файл сейва с устройства разработчику - `fastlogs_send_file(game_save_id
++ "save01.dat", { title: "Сейв перед крашем", kind: "save" })`.
+
+> **ИНВАРИАНТ:** к бинарю/именам файлов **PII-скраб НЕ применяется** - только кап по размеру.
+> Файл/сейв уходит как есть (это сознательно).
+
+Общие `opts` (опц., struct) для всех трёх функций:
+`title` (string, <=120), `logId` (string - привязать к лог-отчёту, попадёт в `attachments`
+вьюера), `groupId` (string - группировка аплоадов), `mime` (string - переопределить MIME),
+`kind` (string - тип вложения; если не задан, проставляется автодефолт - `"file"` для
+`fastlogs_send_file`, `"folder"` для `fastlogs_send_folder`/`fastlogs_send_files` - паритет с
+Unity; явный `opts.kind` не переопределяется), `retentionDays` (int, <1 не шлётся), `name` (string -
+переопределить имя файла в архиве/каталоге), `onDone` (function(result) - колбэк завершения,
+вызывается из `Other_62.gml` после ответа сервера).
+
+Структура `result` в `onDone`:
+`{ success (bool), id (string), url (string - короткая ссылка вьюера), downloadUrl (string -
+прямая ссылка на блоб), statusCode (real - HTTP-код ответа, 0 если запрос не дошёл),
+error (string - `""` при успехе, `"network"` при сетевой ошибке, `"http_<код>"` при HTTP-ошибке) }`.
+
+Все три возвращают `bool` СРАЗУ (синхронно): `true` если запрос поставлен в отправку; `false` если
+no-op (`!FASTLOGS_ENABLED` / нет файла-папки / пустой блоб / превышен кап по DECODED-размеру / не
+задан/невыводим endpoint / уже идёт другая отправка). Итог отправки приходит ПОЗЖЕ - в `onDone`
+(если задан) и тостом. Ответ сервера (`201 { id, url, downloadUrl }`) разбирается в Async HTTP
+событии (`Other_62.gml`) СВОЕЙ короткой веткой (тост + опц. колбэк), **без** retry-until-success
+/ дренажа outbox / poison-pill - эта логика только для лог-отчётов. Single-flight: разделяет
+очередь с лог-отправкой (одна за раз) - аплоад файла не стартует, пока идёт `fastlogs_send` или
+ожидается его отложенный повтор. При успехе короткая ссылка авто-копируется в буфер обмена при
+`FASTLOGS_COPY_ON_SEND` (на WebGL может не сработать - нужен user-gesture; не падаем).
+
+### `fastlogs_send_file(path, [opts])` -> bool
+Отправить ОДИН файл по пути `path`. `name` по умолчанию = basename пути, `mime` угадывается по
+расширению имени (иначе `application/octet-stream`). Файл читается через `buffer_load` -> кап по
+размеру -> `buffer_base64_encode` (как скриншот). Возврат `false` (no-op), если файла нет
+(`!file_exists`) или `buffer_load` не удался.
+
+### `fastlogs_send_folder(path, [opts])` -> bool
+Зазиповать папку `path` (рекурсивно, метод **STORE** - без компрессии) в **один `.zip`** на
+клиенте и отправить. `name` по умолчанию = `<имя папки>.zip`, `mime` = `application/zip`.
+Папка зипуется в буфере вручную (один `.zip`, паритет с Unity); структура каталогов сохраняется
+(rel-пути с прямыми слешами). Возврат `false` (no-op), если папки нет (`!directory_exists`) или
+она пуста. Нечитаемые отдельные файлы пропускаются (не валят весь архив); кап считается по
+размеру итогового `.zip`.
+
+### `fastlogs_send_files(paths, [opts])` -> bool
+Зазиповать массив путей `paths` в один `.zip` (метод STORE) и отправить. Имена в архиве -
+basename каждого пути (при коллизии добавляется суффикс ` (k)` перед расширением). `name` по
+умолчанию = `files.zip`, `mime` = `application/zip`. Отсутствующие/нечитаемые пути молча
+пропускаются; если валидных файлов не осталось - `false` (no-op).
+
+---
+
 ## Оверлей
 
 ### `fastlogs_open()` / `fastlogs_close()` / `fastlogs_toggle()`
@@ -204,8 +263,9 @@ context/breadcrumbs`. За старт досылается не более `FAST
 | `scr_fastlogs_core`         | `fastlogs_init` (+ досыл pending #1), `flog`/`fastlogs_log`/`warn`/`error`, кольцо, счётчики, `fastlogs_clear`, `fastlogs_get_counts`, exception handler (+ персист pending #1), константы уровней |
 | `scr_fastlogs_recorder`     | `fastlogs_record_start`/`stop`/`set`/`is_recording`, персист на диск + загрузка прошлых сессий, ротация; pending-очередь краша (#1): `fastlogs_pending_write`/`delete`/`resend_all` |
 | `scr_fastlogs_device`       | сбор `device{}` по контракту (внутр.: `fastlogs_collect_device()`), маппинг `os_type`->platform |
+| `scr_fastlogs_files`        | отправка файла/папки (SEND-FILE): `fastlogs_send_file`/`fastlogs_send_folder`/`fastlogs_send_files`; zip-store папки в буфере; сборка JSON-тела `/api/files`; кап по `FASTLOGS_MAX_FILE_BYTES` (бинарь без PII-скраба) |
 | `scr_fastlogs_payload`      | сборка JSON-тела (внутр.: `fastlogs_build_payload(...)`), `timestampUtc`, усечение `logText`, опускание пустых полей, вложение `context`/`breadcrumbs` (#2) + redaction (#3) |
-| `scr_fastlogs_http`         | `fastlogs_send`, `fastlogs_is_sending`, `fastlogs_last_url`, `fastlogs_retry_is_pending`, retry-until-success (отложенный повтор на Alarm[0]), отправка/разбор ответа (Async HTTP), `fastlogs_pending_send` (досыл краша #1) |
+| `scr_fastlogs_http`         | `fastlogs_send`, `fastlogs_is_sending`, `fastlogs_last_url`, `fastlogs_retry_is_pending`, retry-until-success (отложенный повтор на Alarm[0]), отправка/разбор ответа (Async HTTP), `fastlogs_pending_send` (досыл краша #1); SEND-FILE: `fastlogs_files_endpoint`, `fastlogs_files_post_internal` (POST на `/api/files`) |
 | `scr_fastlogs_overlay`      | `fastlogs_open`/`close`/`toggle`, отрисовка примитивами, обработка тап-зон |
 | `scr_fastlogs_input`        | опрос hotkey/мыши/тача/геймпада -> вызовы overlay/copy |
 | `scr_fastlogs_clipboard`    | `fastlogs_set_screenshot` тут НЕ реализуется; реализует copy-обёртку `clipboard_set_text` (last_url) |
@@ -222,5 +282,5 @@ context/breadcrumbs`. За старт досылается не более `FAST
 | `Step_0.gml`         | Step (3/0)         | опрос ввода, отложенные задачи |
 | `Alarm_0.gml`        | Alarm[0] (2/0)     | тик retry-until-success (отложенный повтор отправки, фича RETRY) |
 | `Draw_64.gml`        | Draw GUI (8/64)    | отрисовка оверлея примитивами |
-| `Other_62.gml`       | Async HTTP (7/62)  | разбор ответа ingest |
+| `Other_62.gml`       | Async HTTP (7/62)  | разбор ответа ingest; ветвление по `request_kind` (`"log"` - лог-отчёт; `"file"` - аплоад `/api/files`, короткая ветка: тост/URL/колбэк) |
 | `Other_63.gml`       | Async Save/Load (7/63) | завершение async-файловых операций (если используются) |

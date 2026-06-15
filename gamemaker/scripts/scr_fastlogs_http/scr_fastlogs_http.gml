@@ -67,6 +67,16 @@ function __fastlogs_http_state() {
             //   следующий pending, пока outbox непуст (объём ограничен FASTLOGS_PENDING_MAX/enforce_cap).
             init_chain_active : false,  // активна ли СТАРТ-цепочка дренажа (запущена resend_all)
             init_drain_count  : 0,      // сколько файлов дослано в рамках СТАРТ-цепочки (лимит PER_START)
+            // ОТПРАВКА ФАЙЛА/ПАПКИ (фича SEND-FILE). Тип ТЕКУЩЕГО in-flight запроса, чтобы
+            //   Async HTTP обработчик (Other_62) ветвил разбор ответа: "log" - обычный отчёт
+            //   (retry/drain/pending логика), "file" - загрузка файла на /api/files (своя
+            //   короткая ветка: показать тост/URL, БЕЗ retry-until-success/дренажа outbox).
+            //   "" пока запросов не было; устанавливается перед каждым http_request.
+            request_kind  : "",
+            // Колбэк завершения file-запроса: cb(result_struct) где result_struct =
+            //   { success, id, url, downloadUrl, statusCode, error }. undefined -> без колбэка
+            //   (просто тост). Используется fastlogs_send_file* (см. scr_fastlogs_files).
+            file_on_done  : undefined,
         };
     }
     return st.http;
@@ -283,10 +293,11 @@ function fastlogs_http_post_internal(body) {
         return false;
     }
 
-    hs.request_id  = req;
-    hs.is_sending  = true;
-    hs.state       = "sending";
-    hs.last_status = 0;
+    hs.request_id   = req;
+    hs.is_sending   = true;
+    hs.state        = "sending";
+    hs.last_status  = 0;
+    hs.request_kind = "log";   // SEND-FILE: помечаем тип запроса для ветвления в Other_62
 
     show_debug_message("[FastLogs] POST -> " + FASTLOGS_ENDPOINT + " (req id " + string(req) + ", body " + string(string_byte_length(body)) + " bytes)");
     return true;
@@ -475,6 +486,102 @@ function fastlogs_last_url() {
 // =====================================================================================
 function fastlogs_http_get_state() {
     return __fastlogs_http_state();
+}
+
+// =====================================================================================
+// ОТПРАВКА ФАЙЛА/ПАПКИ (фича SEND-FILE) - HTTP-слой.
+// -------------------------------------------------------------------------------------
+// Транспорт: JSON + base64 на ОТДЕЛЬНЫЙ POST <BASE_URL>/api/files (НЕ внутри лог-отчёта,
+//   НЕ multipart). Кап по DECODED-размеру (FASTLOGS_MAX_FILE_BYTES) - на клиенте И на сервере.
+//   Бинарь БЕЗ PII-скраба (явный инвариант: redaction к блобу НЕ применяется).
+// Single-flight: разделяет hs.is_sending/request_id с лог-отправкой (одна за раз). При успехе/
+//   ошибке Async HTTP обработчик (Other_62) идёт СВОЕЙ короткой веткой по request_kind=="file"
+//   (показать тост/URL), БЕЗ retry-until-success/дренажа outbox/poison-pill (это только для логов).
+// =====================================================================================
+
+// =====================================================================================
+// fastlogs_files_endpoint() -> string
+// URL files-эндпоинта. Приоритет: явный FASTLOGS_FILES_ENDPOINT, иначе выводим из
+//   FASTLOGS_ENDPOINT заменой "/api/logs" -> "/api/files". "" если вывести нельзя.
+// =====================================================================================
+function fastlogs_files_endpoint() {
+    if (is_string(FASTLOGS_FILES_ENDPOINT) && string_length(FASTLOGS_FILES_ENDPOINT) > 0) {
+        return FASTLOGS_FILES_ENDPOINT;
+    }
+    if (is_string(FASTLOGS_ENDPOINT) && string_length(FASTLOGS_ENDPOINT) > 0) {
+        // Замена только если базовый endpoint оканчивается на /api/logs (типовой случай).
+        //   string_replace заменяет ПЕРВОЕ вхождение - достаточно для одиночного /api/logs.
+        if (string_pos("/api/logs", FASTLOGS_ENDPOINT) > 0) {
+            return string_replace(FASTLOGS_ENDPOINT, "/api/logs", "/api/files");
+        }
+    }
+    return "";
+}
+
+// =====================================================================================
+// fastlogs_files_post_internal(body, [on_done]) -> bool
+// Ставит ОДИН POST на files-эндпоинт с готовым JSON-телом (с полем fileBase64). Заголовки/
+//   токен как у обычного post. true если http_request вызван; false если no-op (выключено /
+//   нет endpoint / уже идёт отправка / запрос не создан). on_done(result) - колбэк завершения
+//   из Other_62 (result: { success, id, url, downloadUrl, statusCode, error }).
+// =====================================================================================
+function fastlogs_files_post_internal(body, on_done = undefined) {
+    if (!FASTLOGS_ENABLED) { return false; }
+
+    var endpoint = fastlogs_files_endpoint();
+    if (!is_string(endpoint) || string_length(endpoint) == 0) {
+        show_debug_message("[FastLogs] file send skipped: files endpoint not resolvable (set FASTLOGS_FILES_ENDPOINT or FASTLOGS_ENDPOINT with /api/logs)");
+        fastlogs_send_status("error", "Ошибка: не задан endpoint файлов", false);
+        return false;
+    }
+    if (!is_string(body) || string_length(body) == 0) {
+        show_debug_message("[FastLogs] file send aborted: empty body");
+        return false;
+    }
+
+    var hs = __fastlogs_http_state();
+
+    // Single-flight: не вмешиваемся в идущую лог-отправку/ожидание повтора (одна за раз).
+    if (hs.is_sending) {
+        show_debug_message("[FastLogs] file send skipped: already sending");
+        fastlogs_send_status("info", "Отправка уже идёт...", false);
+        return false;
+    }
+    if (fastlogs_retry_is_pending()) {
+        show_debug_message("[FastLogs] file send skipped: log retry pending");
+        fastlogs_send_status("info", "Отправка уже идёт (ждём повтор)", false);
+        return false;
+    }
+
+    // Заголовки: ds_map строк (как обычный лог-post). Тот же токен/Authorization.
+    var headers = ds_map_create();
+    ds_map_add(headers, "Content-Type", "application/json");
+    if (is_string(FASTLOGS_TOKEN) && string_length(FASTLOGS_TOKEN) > 0) {
+        ds_map_add(headers, "Authorization", "Bearer " + FASTLOGS_TOKEN);
+    }
+
+    if (is_real(FASTLOGS_HTTP_TIMEOUT_MS) && FASTLOGS_HTTP_TIMEOUT_MS > 0) {
+        http_set_connect_timeout(FASTLOGS_HTTP_TIMEOUT_MS);
+    }
+
+    var req = http_request(endpoint, "POST", headers, body);
+    ds_map_destroy(headers);
+
+    if (!is_real(req)) {
+        show_debug_message("[FastLogs] file http_request returned non-real id");
+        fastlogs_send_status("error", "Ошибка: запрос не создан", false);
+        return false;
+    }
+
+    hs.request_id   = req;
+    hs.is_sending   = true;
+    hs.state        = "sending";
+    hs.last_status  = 0;
+    hs.request_kind = "file";   // SEND-FILE: ветка file в Other_62 (без retry/drain лог-логики)
+    hs.file_on_done = is_method(on_done) ? on_done : undefined;
+
+    show_debug_message("[FastLogs] FILE POST -> " + endpoint + " (req id " + string(req) + ", body " + string(string_byte_length(body)) + " bytes)");
+    return true;
 }
 
 // =====================================================================================

@@ -314,6 +314,50 @@ IPv6 (консервативно, >=2 двоеточий) / Bearer+Authorization
 
 ---
 
+### 2.10. Отправка файла/папки + zip-store (фича SEND-FILE)
+
+Транспорт - **JSON + base64** на ОТДЕЛЬНЫЙ `POST <BASE_URL>/api/files` (НЕ multipart, НЕ внутри
+лог-отчёта). Тело: `{ appId, platform, appVersion, name, mime, fileBase64, kind?, logId?,
+groupId?, title?, retentionDays? }`. Файл читается `buffer_load -> buffer_base64_encode(buf,0,
+size)` (как скриншот). Кап по **DECODED**-размеру (`FASTLOGS_MAX_FILE_BYTES`, деф. 25 MB) -
+ДО base64, на клиенте И на сервере. Бинарь БЕЗ PII-скраба (явный инвариант).
+
+**Папка зипуется НА КЛИЕНТЕ в один `.zip` методом STORE (без компрессии)** - вручную в буфере,
+для паритета с Unity (один архив). Запасной group-upload по `groupId` НЕ используется (zip-store
+подтверждён рабочим). Сверено по `YAL-GameMaker/zip-writer` (вариант `zip23`, GML-only) и PKZIP
+APPNOTE; built-ins сверены с `GmlSpec.xml` рантайма 2024.14.2.256 (точные сигнатуры/арность):
+
+- `buffer_crc32(buffer, offset, size)` -> Real. **Возвращает CRC ДО финального XOR** -> для ZIP
+  нужен `(buffer_crc32(buf,0,size) ^ $FFFFFFFF) & $FFFFFFFF` (стандарт PKZIP/zlib, полином
+  0xEDB88320). Подтверждено: YAL делает ровно `^ 0xFFFFFFFF`.
+- `buffer_copy(src_buffer, src_offset, size, dest_buffer, dest_offset)` -> **НЕ авто-растит**
+  grow-буфер назначения и **НЕ двигает** его seek. Поэтому перед копированием сырых данных файла
+  делаем `buffer_resize` (удвоением) и затем `buffer_seek(buffer_seek_start, next)` вручную
+  (аналог `zip_impl_write`). `buffer_write` (для заголовков ZIP) grow-буфер растит сам.
+- `buffer_resize(buffer, newsize)`, `buffer_tell`, `buffer_seek(buf, buffer_seek_start, off)`,
+  `buffer_get_size` - стандартные. После сборки ZIP `buffer_resize(out, buffer_tell(out))`
+  отрезает резервную ёмкость grow-буфера (иначе хвост попал бы в base64/кап).
+- Имена файлов в ZIP пишем `buffer_write(out, buffer_text, name)` (UTF-8 БЕЗ `\0`),
+  `name_len = string_byte_length(name)`. Флаг general-purpose `0x0800` (bit 11 = UTF-8 имя)
+  выставлен -> не-ASCII имена валидны.
+- Сигнатуры: Local File Header `0x04034b50` (`buffer_s32` 67324752), Central Directory
+  `0x02014b50` (33639248), EOCD `0x06054b50` (101010256). method=0 (STORE), version=20.
+  CRC -> `buffer_u32`; comp/uncomp size, offset, cd_size -> `buffer_s32` (для блобов <=25 MB
+  поля укладываются в 32 бита, ZIP64 не нужен).
+
+**Рекурсивный обход папки** (для zip): `file_find_first(dir + "/*.*", fa_directory)` +
+`file_find_next()` возвращает И файлы, И подкаталоги; различаем `directory_exists(path)` (GM:S+
+предпочтительнее `file_attributes`), пропускаем `"."`/`".."`, **`file_find_close()` ДО рекурсии**
+(один активный поиск за раз). Подтверждено: yal.cc recursive folder copying + GmlSpec.
+
+**Endpoint files**: `FASTLOGS_FILES_ENDPOINT` (`""` -> вывод из `FASTLOGS_ENDPOINT` через
+`string_replace(FASTLOGS_ENDPOINT, "/api/logs", "/api/files")` - заменяет ПЕРВОЕ вхождение).
+
+**Async HTTP (Other_62)**: in-flight запрос помечается `hs.request_kind` (`"log"`/`"file"`).
+File-ветка разбирает `201 { id, url, downloadUrl }`, дёргает `hs.file_on_done(result)` (если
+задан) и `exit` - БЕЗ retry-until-success/дренажа outbox/poison-pill (это только для логов).
+File-аплоад делит single-flight (`is_sending`/`request_id`) с лог-отправкой: одна за раз.
+
 ## 3. Консоль-безопасность (гейтинг)
 
 `#macro FASTLOGS_ENABLED` задаётся per-config:

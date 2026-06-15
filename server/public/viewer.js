@@ -33,8 +33,17 @@
 //     web?:         { ... },
 //   },
 //   context:      { [key: string]: string },   // empty {} when none
-//   breadcrumbs:  [ { t?: string, m: string, lvl?: 'info'|'warn'|'error' } ] // empty [] when none
+//   breadcrumbs:  [ { t?: string, m: string, lvl?: 'info'|'warn'|'error' } ], // empty [] when none
+//   sceneContext: string | null,   // opaque JSON string (parsed + rendered here)
+//   correlationCode: string | null,// short debug/await code
+//   attachments:  [ { id, name, size, kind, mime, downloadUrl } ] // standalone files (empty [] when none)
 // }
+//
+// sceneContext JSON shape (when parsed):
+//   { truncated: bool, stats: { scenes, objects, components },
+//     scenes: [ { name, ddol, roots: [GO] } ] }
+//   GO   = { n: name, a: active, tag, layer, comp: [COMP], kids: [GO] }
+//   COMP = { t: typeName, en: bool|null, f: { fieldName: valueString } }
 //
 // Known device group order shown first, extras appended after.
 
@@ -322,6 +331,8 @@
     try { metaParts.push(new Date(data.timestampUtc).toLocaleString()); } catch (e) { metaParts.push(data.timestampUtc); }
   }
   if (data.tester) metaParts.unshift('by ' + data.tester);
+  // Debug/await correlation code (small label) when the client sent one.
+  if (data.correlationCode) metaParts.push('code: ' + data.correlationCode);
   document.getElementById('counts-meta').textContent = metaParts.join(' - ');
 
   // ---- Device info ----
@@ -481,6 +492,199 @@
     });
   }
 
+  // ---- Scene Context (collapsible object tree) ----
+
+  // Build a small badge span (e.g. an "active" / tag / layer marker).
+  function sceneBadge(text, extraClass) {
+    var b = document.createElement('span');
+    b.className = 'scene-badge' + (extraClass ? ' ' + extraClass : '');
+    b.textContent = text;
+    return b;
+  }
+
+  // A collapsible node: an arrow + label row over an indented child container
+  // (built lazily on first expand to keep a large tree cheap). `openByDefault`
+  // controls the initial state; deep nodes stay collapsed so the tree stays
+  // readable. `buildChildren(container)` populates the body when first opened.
+  function sceneNode(labelEl, buildChildren, openByDefault) {
+    var node = document.createElement('div');
+    node.className = 'scene-node';
+
+    var toggle = document.createElement('div');
+    toggle.className = 'scene-toggle';
+    var arrow = document.createElement('span');
+    arrow.className = 'scene-arrow';
+    arrow.textContent = '►';
+    toggle.appendChild(arrow);
+    toggle.appendChild(labelEl);
+
+    var children = document.createElement('div');
+    children.className = 'scene-children';
+
+    var built = false;
+    function ensureBuilt() {
+      if (built) return;
+      built = true;
+      buildChildren(children);
+    }
+
+    toggle.addEventListener('click', function () {
+      var willOpen = !node.classList.contains('open');
+      if (willOpen) ensureBuilt();
+      node.classList.toggle('open', willOpen);
+    });
+
+    node.appendChild(toggle);
+    node.appendChild(children);
+
+    if (openByDefault) {
+      ensureBuilt();
+      node.classList.add('open');
+    }
+    return node;
+  }
+
+  // A leaf row "key: value" used for component fields.
+  function sceneField(key, value) {
+    var row = document.createElement('div');
+    row.className = 'scene-field';
+    var k = document.createElement('span');
+    k.className = 'scene-fkey';
+    k.textContent = key + ':';
+    var v = document.createElement('span');
+    v.className = 'scene-fval';
+    v.textContent = (value === null || value === undefined) ? 'null'
+      : (typeof value === 'object' ? JSON.stringify(value) : String(value));
+    row.appendChild(k);
+    row.appendChild(v);
+    return row;
+  }
+
+  // Render one component (t + enabled badge) -> expandable field list.
+  function renderComp(comp) {
+    var label = document.createElement('span');
+    label.className = 'scene-name scene-comp';
+    label.textContent = (comp && comp.t != null) ? String(comp.t) : '(component)';
+
+    var hasFields = comp && comp.f && typeof comp.f === 'object' && Object.keys(comp.f).length > 0;
+
+    function labelRow() {
+      var wrap = document.createElement('span');
+      wrap.appendChild(label);
+      if (comp && comp.en === false) wrap.appendChild(sceneBadge('disabled', 'scene-off'));
+      else if (comp && comp.en === true) wrap.appendChild(sceneBadge('enabled', 'scene-on'));
+      return wrap;
+    }
+
+    if (!hasFields) {
+      var leaf = document.createElement('div');
+      leaf.className = 'scene-leaf';
+      leaf.appendChild(labelRow());
+      return leaf;
+    }
+    return sceneNode(labelRow(), function (container) {
+      Object.keys(comp.f).forEach(function (fk) {
+        container.appendChild(sceneField(fk, comp.f[fk]));
+      });
+    }, false);
+  }
+
+  // Render one GameObject (n + active/tag/layer badges) -> components + kids.
+  // Always collapsed by default (the tree can be deep/large).
+  function renderGO(go) {
+    var label = document.createElement('span');
+    var nameEl = document.createElement('span');
+    nameEl.className = 'scene-name';
+    nameEl.textContent = (go && go.n != null) ? String(go.n) : '(object)';
+    label.appendChild(nameEl);
+    if (go && go.a === false) label.appendChild(sceneBadge('inactive', 'scene-off'));
+    if (go && go.tag != null && go.tag !== '' && go.tag !== 'Untagged') label.appendChild(sceneBadge(String(go.tag)));
+    if (go && go.layer != null) label.appendChild(sceneBadge('L' + go.layer));
+
+    var comps = (go && Array.isArray(go.comp)) ? go.comp : [];
+    var kids = (go && Array.isArray(go.kids)) ? go.kids : [];
+
+    if (comps.length === 0 && kids.length === 0) {
+      var leaf = document.createElement('div');
+      leaf.className = 'scene-leaf';
+      leaf.appendChild(label);
+      return leaf;
+    }
+    return sceneNode(label, function (container) {
+      comps.forEach(function (c) { container.appendChild(renderComp(c)); });
+      kids.forEach(function (k) { container.appendChild(renderGO(k)); });
+    }, false);
+  }
+
+  // Render one scene (name + ddol badge) -> its root GameObjects.
+  function renderScene(scene, openByDefault) {
+    var label = document.createElement('span');
+    var nameEl = document.createElement('span');
+    nameEl.className = 'scene-name';
+    nameEl.textContent = (scene && scene.name != null) ? String(scene.name) : '(scene)';
+    label.appendChild(nameEl);
+    if (scene && scene.ddol) label.appendChild(sceneBadge('DontDestroyOnLoad', 'scene-ddol'));
+
+    var roots = (scene && Array.isArray(scene.roots)) ? scene.roots : [];
+    return sceneNode(label, function (container) {
+      if (roots.length === 0) {
+        var empty = document.createElement('div');
+        empty.className = 'scene-leaf scene-stats';
+        empty.textContent = '(no root objects)';
+        container.appendChild(empty);
+        return;
+      }
+      roots.forEach(function (r) { container.appendChild(renderGO(r)); });
+    }, openByDefault);
+  }
+
+  var scenePanel = document.getElementById('scene-panel');
+  if (data.sceneContext) {
+    scenePanel.style.display = '';
+    var sceneHeader = document.getElementById('scene-panel-header');
+    var sceneBody = document.getElementById('scene-body');
+    sceneHeader.addEventListener('click', function () {
+      scenePanel.classList.toggle('open');
+    });
+
+    var parsed = null;
+    try {
+      parsed = JSON.parse(data.sceneContext);
+    } catch (e) {
+      parsed = null;
+    }
+
+    if (!parsed || typeof parsed !== 'object') {
+      // Malformed / unexpected: fall back to showing the raw string verbatim.
+      var raw = document.createElement('div');
+      raw.className = 'scene-raw';
+      raw.textContent = data.sceneContext;
+      sceneBody.appendChild(raw);
+    } else {
+      var scenes = Array.isArray(parsed.scenes) ? parsed.scenes : [];
+      document.getElementById('scene-count').textContent = '(' + scenes.length + ')';
+
+      // Stats line (scenes / objects / components) + a truncated note.
+      var stats = parsed.stats || {};
+      var statParts = [];
+      if (stats.scenes != null) statParts.push(stats.scenes + ' scenes');
+      if (stats.objects != null) statParts.push(stats.objects + ' objects');
+      if (stats.components != null) statParts.push(stats.components + ' components');
+      if (parsed.truncated) statParts.push('truncated');
+      if (statParts.length > 0) {
+        var statsEl = document.createElement('div');
+        statsEl.className = 'scene-stats';
+        statsEl.textContent = statParts.join(' · ');
+        sceneBody.appendChild(statsEl);
+      }
+
+      // Open the first scene by default; the rest collapse to keep it light.
+      scenes.forEach(function (scene, idx) {
+        sceneBody.appendChild(renderScene(scene, idx === 0));
+      });
+    }
+  }
+
   // ---- Screenshot ----
 
   var screenshotWrap = document.getElementById('screenshot-wrap');
@@ -508,6 +712,56 @@
     screenshotHeader.addEventListener('click', function () {
       screenshotWrap.classList.toggle('open');
       screenshotArrow.textContent = screenshotWrap.classList.contains('open') ? '▼' : '►';
+    });
+  }
+
+  // ---- Attachments (standalone files attached to this log) ----
+
+  var attachments = Array.isArray(data.attachments) ? data.attachments : [];
+  var attachmentsPanel = document.getElementById('attachments-panel');
+  if (attachments.length > 0) {
+    attachmentsPanel.style.display = '';
+    var attHeader = document.getElementById('attachments-panel-header');
+    var attBody = document.getElementById('attachments-body');
+    document.getElementById('attachments-count').textContent = '(' + attachments.length + ')';
+
+    attachments.forEach(function (att) {
+      if (!att || !att.downloadUrl) return;
+      var row = document.createElement('div');
+      row.className = 'att-row';
+
+      var info = document.createElement('div');
+      info.className = 'att-info';
+
+      var nameEl = document.createElement('span');
+      nameEl.className = 'att-name';
+      nameEl.textContent = att.name || att.id;
+      info.appendChild(nameEl);
+
+      var metaParts = [];
+      if (att.size !== null && att.size !== undefined && !isNaN(att.size)) metaParts.push(fmtBytes(att.size));
+      if (att.kind) metaParts.push(att.kind);
+      if (metaParts.length > 0) {
+        var metaEl = document.createElement('span');
+        metaEl.className = 'att-meta';
+        metaEl.textContent = metaParts.join(' · ');
+        info.appendChild(metaEl);
+      }
+
+      // Relative download URL: works regardless of the host serving the page.
+      var dl = document.createElement('a');
+      dl.className = 'btn btn-ghost att-download';
+      dl.href = att.downloadUrl;
+      dl.setAttribute('download', '');
+      dl.textContent = 'Download';
+
+      row.appendChild(info);
+      row.appendChild(dl);
+      attBody.appendChild(row);
+    });
+
+    attHeader.addEventListener('click', function () {
+      attachmentsPanel.classList.toggle('open');
     });
   }
 

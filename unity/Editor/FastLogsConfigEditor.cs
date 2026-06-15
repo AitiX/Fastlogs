@@ -18,6 +18,7 @@ namespace PlayJoy.FastLogs.Editor
         private bool _screenshotFold  = false;
         private bool _diagFoldout     = false;
         private bool _triggerFoldout  = true;
+        private bool _filesFoldout     = false;
         private bool _netFoldout      = false;
         private bool _retryFoldout    = false;
         private bool _uiFoldout       = false;
@@ -30,6 +31,7 @@ namespace PlayJoy.FastLogs.Editor
         private SerializedProperty _screenshot;
         private SerializedProperty _diagnostics;
         private SerializedProperty _trigger;
+        private SerializedProperty _files;
         private SerializedProperty _net;
         private SerializedProperty _retry;
         private SerializedProperty _ui;
@@ -44,6 +46,7 @@ namespace PlayJoy.FastLogs.Editor
             _screenshot  = serializedObject.FindProperty("_screenshot");
             _diagnostics = serializedObject.FindProperty("_diagnostics");
             _trigger     = serializedObject.FindProperty("_trigger");
+            _files       = serializedObject.FindProperty("_files");
             _net         = serializedObject.FindProperty("_net");
             _retry       = serializedObject.FindProperty("_retry");
             _ui          = serializedObject.FindProperty("_ui");
@@ -67,6 +70,7 @@ namespace PlayJoy.FastLogs.Editor
             _screenshotFold = DrawGroup("Screenshot",  _screenshot,  _screenshotFold);
             _diagFoldout    = DrawGroup("Diagnostics", _diagnostics, _diagFoldout);
             _triggerFoldout = DrawGroup("Trigger",     _trigger,     _triggerFoldout);
+            _filesFoldout   = DrawGroup("Files",       _files,       _filesFoldout);
             _netFoldout     = DrawGroup("Net",         _net,         _netFoldout);
             _retryFoldout   = DrawGroup("Retry",       _retry,       _retryFoldout);
             _uiFoldout      = DrawGroup("UI",          _ui,          _uiFoldout);

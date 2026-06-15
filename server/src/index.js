@@ -31,7 +31,9 @@ const { viewer } = require('./routes/viewer');
 const { pin } = require('./routes/pin');
 const { setStatus, setTags } = require('./routes/triage');
 const { createRedmineIssue } = require('./routes/redmine');
+const { awaitByCode } = require('./routes/await');
 const { browseRoot, browseApp, browseVersion, browseCrashes } = require('./routes/browse');
+const { handleFileUpload, fileDownload, fileViewer } = require('./routes/files');
 const staticRoutes = require('./routes/static');
 
 // ---------------------------------------------------------------------------
@@ -48,6 +50,14 @@ router.post('/api/logs/:id/status', setStatus);
 router.post('/api/logs/:id/tags', setTags);
 router.post('/api/logs/:id/redmine', createRedmineIssue);
 router.get('/api/logs/:id', meta);
+
+// Standalone file uploads (FastLogs SendFile / SendFolder). JSON + base64 on a
+// dedicated endpoint; the route reads a LARGER body limit than the log ingest.
+router.post('/api/files', handleFileUpload);
+
+// Await: resolve the latest live log of an app by debug/await code (viewer-token
+// gated). The caller polls this; no long-poll on the server.
+router.get('/api/await/:appId', awaitByCode);
 
 // Catalog (viewer-token gated). The literal "crashes" route MUST precede the
 // "/:version" catch-all: both are 3-segment GET patterns and the router is
@@ -71,6 +81,14 @@ router.get('/browse.js', (req, res) => staticRoutes.serveAsset(req, res, '/brows
 router.get('/:id/raw', raw);
 router.get('/:id/screenshot', screenshot);
 router.get('/:id/screenshot/:n', screenshot);
+
+// Standalone file surface. Anchored by the literal first segment "files", so
+// "/files/<id>" never collides with "/:id/raw" (last segment must be "raw") and
+// "/files/<id>/download" never collides with "/browse/:appId/:version". Both
+// MUST precede the "/:id" viewer catch-all, which would otherwise swallow
+// "files" as an id (locked by files-route-order.test.js).
+router.get('/files/:id/download', fileDownload);
+router.get('/files/:id', fileViewer);
 
 // Viewer catch-all (must be last among GET routes).
 router.get('/:id', viewer);
@@ -149,7 +167,11 @@ function scheduleSweep() {
   const sec = config.sweepIntervalSec;
   if (!sec || sec <= 0) return;
   const run = () => sweeper.sweep(undefined, config.sweepBatch)
-    .then((r) => { if (r && r.rowsDeleted) console.log(`[sweep] removed ${r.rowsDeleted} expired log(s)`); })
+    .then((r) => {
+      if (r && (r.rowsDeleted || r.filesDeleted)) {
+        console.log(`[sweep] removed ${r.rowsDeleted} expired log(s), ${r.filesDeleted} expired file(s)`);
+      }
+    })
     .catch((e) => console.error('[sweep] error:', (e && e.message) || e));
   run();
   sweepTimer = setInterval(run, sec * 1000);

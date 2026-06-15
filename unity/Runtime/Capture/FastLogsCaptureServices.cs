@@ -42,6 +42,7 @@ namespace PlayJoy.FastLogs
         // core treats them as absent and stays functional.
         public virtual ITriggerSource CreateTriggerSource(FastLogsConfig config) { return null; }
         public virtual ILogUploader CreateUploader(FastLogsConfig config) { return null; }
+        public virtual IFileUploader CreateFileUploader(FastLogsConfig config) { return null; }
         public virtual IScreenshotCapturer CreateScreenshotCapturer(FastLogsConfig config) { return null; }
         public virtual IClipboard CreateClipboard(FastLogsConfig config) { return null; }
         public virtual ILogShareOverlay CreateOverlay(FastLogsConfig config) { return null; }

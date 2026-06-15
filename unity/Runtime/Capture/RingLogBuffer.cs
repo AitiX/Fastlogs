@@ -167,6 +167,9 @@ namespace PlayJoy.FastLogs
             }
         }
 
+        /// <summary>Approximate UTF-16 byte footprint of the buffered log text (cheap, O(1)).</summary>
+        public long ApproxBytes { get { return _approxBytes; } }
+
         private int EstimateCapacity()
         {
             // Rough: keep the StringBuilder from reallocating too often.

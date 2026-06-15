@@ -73,13 +73,42 @@ function migrate() {
       window_start INTEGER NOT NULL,
       count        INTEGER NOT NULL DEFAULT 0
     );
+
+    CREATE TABLE IF NOT EXISTS files (
+      id          TEXT PRIMARY KEY,
+      app_id      TEXT NOT NULL,
+      app_version TEXT,
+      platform    TEXT,
+      log_id      TEXT,
+      group_id    TEXT,
+      name        TEXT NOT NULL,
+      mime        TEXT,
+      kind        TEXT,
+      size_bytes  INTEGER NOT NULL DEFAULT 0,
+      sha256      TEXT,
+      title       TEXT,
+      tester      TEXT,
+      created_at  TEXT NOT NULL,
+      expires_at  TEXT,
+      pinned      INTEGER NOT NULL DEFAULT 0,
+      ip_hash     TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_files_expires
+      ON files (expires_at) WHERE pinned = 0;
+
+    CREATE INDEX IF NOT EXISTS idx_files_log
+      ON files (log_id) WHERE log_id IS NOT NULL;
+
+    CREATE INDEX IF NOT EXISTS idx_files_app
+      ON files (app_id, created_at);
   `);
 
   // Additive column migrations for databases created by an earlier version.
   // ADD COLUMN is the safe, idempotent way to evolve the schema; guarding with
   // table_info keeps a re-run a no-op.
   const logCols = db.prepare('PRAGMA table_info(logs)').all();
-  for (const col of ['comment', 'tester', 'context_json', 'breadcrumbs_json', 'crash_sig', 'tags', 'redmine_issue_id', 'redmine_issue_url', 'engine']) {
+  for (const col of ['comment', 'tester', 'context_json', 'breadcrumbs_json', 'crash_sig', 'tags', 'redmine_issue_id', 'redmine_issue_url', 'engine', 'scene_context', 'correlation_code']) {
     if (!logCols.some((c) => c.name === col)) {
       db.exec(`ALTER TABLE logs ADD COLUMN ${col} TEXT`);
     }
@@ -104,6 +133,11 @@ function migrate() {
   // loop above, since crash_sig only exists once that ALTER has run (it is not
   // part of the inline CREATE TABLE). Idempotent via IF NOT EXISTS.
   db.exec(`CREATE INDEX IF NOT EXISTS idx_logs_crash ON logs (app_id, crash_sig) WHERE crash_sig IS NOT NULL`);
+
+  // Index backing the /api/await lookup (most recent log of an app by debug
+  // code). Created AFTER the loop, since correlation_code only exists once that
+  // ALTER has run. Idempotent via IF NOT EXISTS.
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_logs_code ON logs (app_id, correlation_code) WHERE correlation_code IS NOT NULL`);
 }
 
 migrate();
@@ -116,12 +150,14 @@ const stmts = {
   insertLog: db.prepare(`
     INSERT INTO logs (
       id, app_id, platform, app_version, device_json, title, comment, tester,
-      context_json, breadcrumbs_json, crash_sig, engine, ts_utc,
+      context_json, breadcrumbs_json, scene_context, correlation_code,
+      crash_sig, engine, ts_utc,
       cnt_error, cnt_warn, cnt_log, log_bytes, has_shot, shot_count, created_at,
       expires_at, pinned, ip_hash
     ) VALUES (
       @id, @app_id, @platform, @app_version, @device_json, @title, @comment, @tester,
-      @context_json, @breadcrumbs_json, @crash_sig, @engine, @ts_utc,
+      @context_json, @breadcrumbs_json, @scene_context, @correlation_code,
+      @crash_sig, @engine, @ts_utc,
       @cnt_error, @cnt_warn, @cnt_log, @log_bytes, @has_shot, @shot_count, @created_at,
       @expires_at, @pinned, @ip_hash
     )
@@ -248,6 +284,22 @@ const stmts = {
 
   updateCrashSig: db.prepare(`UPDATE logs SET crash_sig = @crash_sig WHERE id = @id`),
 
+  // Most recent LIVE log of an app matching a debug/await code. Liveness mirrors
+  // getLiveLog / listCrashRows (pinned OR not-yet-expired). A direct
+  // correlation_code match is preferred; failing that, a code embedded in the
+  // free-text comment (LIKE %code%) is the fallback. Newest by created_at.
+  // @codeLike is the caller-escaped "%<code>%" pattern with @esc as the ESCAPE
+  // char so a code containing % or _ cannot widen the match.
+  getLatestByCode: db.prepare(`
+    SELECT id, created_at FROM logs
+    WHERE app_id = @app_id
+          AND (pinned = 1 OR expires_at IS NULL OR expires_at > @now)
+          AND (correlation_code = @code
+               OR (comment IS NOT NULL AND comment LIKE @codeLike ESCAPE @esc))
+    ORDER BY created_at DESC
+    LIMIT 1
+  `),
+
   rateGet: db.prepare(`SELECT window_start, count FROM rate_counters WHERE key = ?`),
 
   rateUpsert: db.prepare(`
@@ -260,6 +312,43 @@ const stmts = {
       count = CASE
         WHEN excluded.window_start > rate_counters.window_start
           THEN 1 ELSE rate_counters.count + 1 END
+  `),
+
+  // --- Standalone file uploads (POST /api/files) ---------------------------
+
+  insertFile: db.prepare(`
+    INSERT INTO files (
+      id, app_id, app_version, platform, log_id, group_id, name, mime, kind,
+      size_bytes, sha256, title, tester, created_at, expires_at, pinned, ip_hash
+    ) VALUES (
+      @id, @app_id, @app_version, @platform, @log_id, @group_id, @name, @mime, @kind,
+      @size_bytes, @sha256, @title, @tester, @created_at, @expires_at, @pinned, @ip_hash
+    )
+  `),
+
+  getFile: db.prepare(`SELECT * FROM files WHERE id = ?`),
+
+  deleteFile: db.prepare(`DELETE FROM files WHERE id = ?`),
+
+  listExpiredFiles: db.prepare(`
+    SELECT * FROM files
+    WHERE pinned = 0 AND expires_at IS NOT NULL AND expires_at <= ?
+    ORDER BY expires_at ASC
+    LIMIT ?
+  `),
+
+  // Files attached to a log, oldest first (the order they were uploaded). The
+  // liveness filter mirrors getLiveFile (pinned OR not-yet-expired) so the
+  // attachments list never surfaces files the sweeper is about to drop.
+  listFilesByLog: db.prepare(`
+    SELECT * FROM files
+    WHERE log_id = @log_id
+          AND (pinned = 1 OR expires_at IS NULL OR expires_at > @now)
+    ORDER BY created_at ASC
+  `),
+
+  setFilePin: db.prepare(`
+    UPDATE files SET pinned = @pinned, expires_at = @expires_at WHERE id = @id
   `),
 };
 
@@ -371,9 +460,60 @@ function listLogsMissingSig(appId, limit) {
   return stmts.listLogsMissingSig.all({ app_id: appId, limit });
 }
 
+// Most recent LIVE log of `appId` whose correlation_code equals `code`, or
+// (fallback) whose comment contains `code`. `now` is an ISO-8601 UTC string for
+// the liveness filter. Returns { id, created_at } or null when nothing matches.
+function getLatestByCode(appId, code, now) {
+  // Escape SQL LIKE wildcards so a literal % or _ in the code is matched as-is.
+  const escaped = String(code).replace(/[\\%_]/g, (ch) => '\\' + ch);
+  const row = stmts.getLatestByCode.get({
+    app_id: appId,
+    code,
+    codeLike: `%${escaped}%`,
+    esc: '\\',
+    now,
+  });
+  return row || null;
+}
+
 // Set a log's crash_sig. `sig` is the signature, or '' for "not a crash".
 function updateCrashSig(id, sig) {
   return stmts.updateCrashSig.run({ id, crash_sig: sig });
+}
+
+// --- Standalone file uploads -----------------------------------------------
+
+// Insert a new file row. `row` must contain all named columns (see insertFile).
+function insertFile(row) {
+  return stmts.insertFile.run(row);
+}
+
+// Fetch a single file row by id, or undefined if absent.
+function getFile(id) {
+  return stmts.getFile.get(id);
+}
+
+// Delete a file row by id. Returns the run info (changes count).
+function deleteFile(id) {
+  return stmts.deleteFile.run(id);
+}
+
+// List up to `limit` non-pinned files whose expires_at is at or before `now`
+// (an ISO-8601 UTC string). Used by the retention sweeper.
+function listExpiredFiles(now, limit) {
+  return stmts.listExpiredFiles.all(now, limit);
+}
+
+// Live files attached to a log (`now` is an ISO-8601 UTC string for the liveness
+// filter), oldest first. Returns raw rows; the route shapes them.
+function listFilesByLog(logId, now) {
+  return stmts.listFilesByLog.all({ log_id: logId, now });
+}
+
+// Set the pinned flag and expires_at for a file.
+// `pinned` is 0|1, `expiresAt` is an ISO string or null (null => never expires).
+function setFilePin(id, pinned, expiresAt) {
+  return stmts.setFilePin.run({ id, pinned: pinned ? 1 : 0, expires_at: expiresAt });
 }
 
 // Increment a rate-limit counter for `key` within the window starting at
@@ -410,6 +550,13 @@ module.exports = {
   listLogs,
   listCrashRows,
   listLogsMissingSig,
+  getLatestByCode,
   updateCrashSig,
+  insertFile,
+  getFile,
+  deleteFile,
+  listExpiredFiles,
+  listFilesByLog,
+  setFilePin,
   bumpRate,
 };

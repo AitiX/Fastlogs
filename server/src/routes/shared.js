@@ -47,6 +47,52 @@ function getLiveLog(id) {
   return row;
 }
 
+// Return the standalone-file row for `id` only if it is "live": it exists and
+// is either pinned or not yet expired. Mirrors getLiveLog so an expired,
+// non-pinned file behaves as if the sweeper had already removed it. Returns
+// undefined when there is no live file.
+function getLiveFile(id) {
+  if (!isPlausibleId(id)) return undefined;
+  const row = db.getFile(id);
+  if (!row) return undefined;
+  if (row.pinned === 1) return row;
+  if (row.expires_at && row.expires_at <= nowUtcIso()) return undefined;
+  return row;
+}
+
+// Public links for a standalone file id, built from the configured base URL.
+// `self` is the lightweight HTML viewer; `download` streams the blob as an
+// attachment.
+function fileLinksFor(id) {
+  const base = config.baseUrl;
+  const enc = encodeURIComponent(id);
+  return {
+    self: `${base}/files/${enc}`,
+    download: `${base}/files/${enc}/download`,
+  };
+}
+
+// Shape the public view of one file row for the attachments list. `downloadUrl`
+// is RELATIVE so the viewer works regardless of the host serving the page or a
+// baseUrl that differs from it.
+function publicFileObject(row) {
+  return {
+    id: row.id,
+    name: row.name,
+    size: row.size_bytes,
+    kind: row.kind || null,
+    mime: row.mime || null,
+    downloadUrl: `/files/${encodeURIComponent(row.id)}/download`,
+  };
+}
+
+// Live files attached to a log, shaped for the public attachments list (empty
+// array when none). Used by publicLogObject and the viewer data island.
+function attachmentsForLog(logId) {
+  const rows = db.listFilesByLog(logId, nowUtcIso());
+  return rows.map(publicFileObject);
+}
+
 // Build the public links object for a log id from the configured base URL.
 function linksFor(id, hasShot) {
   const base = config.baseUrl;
@@ -156,6 +202,14 @@ function publicLogObject(row) {
     // empty object / empty array when the log carried none.
     context: parseJsonColumn(row.context_json, false, {}),
     breadcrumbs: parseJsonColumn(row.breadcrumbs_json, true, []),
+    // Scene snapshot: the raw JSON string the client built (parsed + rendered by
+    // the viewer), or null when none. correlationCode is a short debug/await
+    // code, or null. Both are passed through verbatim.
+    sceneContext: row.scene_context || null,
+    correlationCode: row.correlation_code || null,
+    // Standalone files attached to this log (SendFile with logId). Always an
+    // array; live rows only (pinned or not-yet-expired). downloadUrl is relative.
+    attachments: attachmentsForLog(row.id),
     links: linksFor(row.id, row.has_shot === 1),
   };
 }
@@ -165,6 +219,10 @@ module.exports = {
   VIEWER_PLACEHOLDER,
   isPlausibleId,
   getLiveLog,
+  getLiveFile,
+  fileLinksFor,
+  publicFileObject,
+  attachmentsForLog,
   linksFor,
   notFound,
   notFoundJson,

@@ -25,6 +25,11 @@ namespace PlayJoy.FastLogs
             return new UnityWebRequestUploader();
         }
 
+        public override IFileUploader CreateFileUploader(FastLogsConfig config)
+        {
+            return new UnityWebRequestUploader();
+        }
+
         public override IScreenshotCapturer CreateScreenshotCapturer(FastLogsConfig config)
         {
             return new ScreenshotCapturer();

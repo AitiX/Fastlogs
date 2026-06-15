@@ -46,6 +46,7 @@ namespace PlayJoy.FastLogs
 
         private readonly IClipboard _clipboard;
         private readonly SettingsPanel _settings; // optional embedded settings tab
+        private Vector2 _bodyScroll; // scrolls the open-panel body so it never overflows the screen height
         private readonly FastLogsConfig _config;  // read-only access (tester name, etc.); may be null
 
         // Hidden MonoBehaviour that routes Unity's OnGUI callback into this object,
@@ -54,6 +55,7 @@ namespace PlayJoy.FastLogs
 
         private bool _visible;
         private bool _includeScreenshot;
+        private bool _includeSceneContext;
 
         // Raised by the screenshot capturer for the single frame it grabs, so the
         // overlay (and its toast) never draw themselves into the captured PNG.
@@ -103,8 +105,16 @@ namespace PlayJoy.FastLogs
         private Texture2D _toastTexSuccess;
         private Texture2D _toastTexError;
 
+        // ---- Confirm-prompt state (loop guard; visible even when the overlay is closed) ----
+        // Drawn in the same bottom-centre area as the toast, on top of it. When
+        // _confirmActive is false nothing confirm-related is drawn or allocated.
+        private bool _confirmActive;
+        private string _confirmMessage;
+
         public event Action<bool, string, string> SendRequested; // (includeScreenshot, title, comment)
         public event Action RetryRequested;
+        public event Action SceneContextRequested; // user asked to attach a scene-context snapshot to the next send
+        public event Action<bool> ConfirmAnswered;  // loop-guard confirm answer (true = send, false = cancel)
 
         public bool IsVisible { get { return _visible; } }
 
@@ -184,6 +194,20 @@ namespace PlayJoy.FastLogs
             _toastActive = false;
             _toastMessage = null;
             _toastUrl = null;
+        }
+
+        // ---- Confirm prompt (loop guard) ----
+
+        public void ShowConfirm(string message)
+        {
+            _confirmMessage = message ?? string.Empty;
+            _confirmActive = true;
+        }
+
+        private void HideConfirm()
+        {
+            _confirmActive = false;
+            _confirmMessage = null;
         }
 
         // ---- Toast rendering (only reached while a toast is active) ----
@@ -266,6 +290,61 @@ namespace PlayJoy.FastLogs
             GUILayout.EndArea();
         }
 
+        // Confirm prompt: reuses the toast bubble (info colour) but with a message line
+        // and a fixed two-button [Send]/[Cancel] row. Drawn on top of any toast and even
+        // when the overlay is closed, mirroring DrawToast.
+        private void DrawConfirm()
+        {
+            EnsureToastStyles();
+
+            float scale = DpiScale();
+            Rect safe = SafeAreaPixels();
+            float pad = BasePadding * scale;
+
+            float width = Mathf.Min(safe.width - pad * 2f, ToastLogicalWidth * scale);
+            float lineH = Mathf.Max(MinTouch * scale, 28f * scale);
+
+            // Message can wrap to two lines; reserve room plus the action row.
+            float msgH = lineH * 2f;
+            float height = pad * 2f + msgH + lineH + pad;
+
+            float x = safe.xMin + (safe.width - width) * 0.5f;
+            float y = safe.yMax - height - pad;
+
+            var bubble = new Rect(x, y, width, height);
+            GUI.DrawTexture(bubble, ToastTexFor(ToastKind.Info), ScaleMode.StretchToFill);
+
+            GUILayout.BeginArea(new Rect(bubble.x + pad, bubble.y + pad, bubble.width - pad * 2f, bubble.height - pad * 2f));
+
+            GUILayout.Label(_confirmMessage ?? string.Empty, _toastLabel, GUILayout.Height(msgH));
+
+            GUILayout.BeginHorizontal();
+            if (GUILayout.Button("Send", _toastButton, GUILayout.Height(lineH)))
+            {
+                RaiseConfirm(true);
+            }
+            if (GUILayout.Button("Cancel", _toastButton, GUILayout.Height(lineH)))
+            {
+                RaiseConfirm(false);
+            }
+            GUILayout.EndHorizontal();
+
+            GUILayout.EndArea();
+        }
+
+        private void RaiseConfirm(bool send)
+        {
+            // Hide first so the answer handler cannot observe a stale prompt and a second
+            // tap in the same frame cannot fire twice.
+            HideConfirm();
+            var handler = ConfirmAnswered;
+            if (handler != null)
+            {
+                try { handler(send); }
+                catch (Exception e) { FlogLog.Exception(e); }
+            }
+        }
+
         private void RaiseRetry()
         {
             var handler = RetryRequested;
@@ -300,6 +379,10 @@ namespace PlayJoy.FastLogs
                 if (_toastActive)
                 {
                     DrawToast();
+                }
+                if (_confirmActive)
+                {
+                    DrawConfirm();
                 }
                 return;
             }
@@ -338,18 +421,36 @@ namespace PlayJoy.FastLogs
                 panelHeight += _settings.EstimateHeight(scale) + pad;
             }
 
-            var panel = new Rect(x, y, panelWidth, panelHeight);
+            // Never let the panel grow past the safe area: clamp to the available
+            // height and scroll the body when the content (esp. the settings tab on a
+            // small screen / high DPI) would not fit. The header stays pinned.
+            float maxPanelHeight = safe.height - pad * 2f;
+            bool scrollBody = panelHeight > maxPanelHeight;
+            float drawnHeight = Mathf.Min(panelHeight, maxPanelHeight);
+
+            var panel = new Rect(x, y, panelWidth, drawnHeight);
             GUI.DrawTexture(panel, _panelTex, ScaleMode.StretchToFill);
 
             GUILayout.BeginArea(new Rect(panel.x + pad, panel.y + pad, panel.width - pad * 2f, panel.height - pad * 2f));
 
+            // Header pinned so close/settings buttons stay reachable while the body scrolls.
             DrawHeaderRow(scale, lineH);
+
+            if (scrollBody)
+            {
+                _bodyScroll = GUILayout.BeginScrollView(_bodyScroll);
+            }
+
+            // Reserve the vertical scrollbar width so the result row never spawns a
+            // horizontal scrollbar when the body is scrolling.
+            float bodyWidth = panelWidth - pad * 2f - (scrollBody ? 18f * scale : 0f);
+
             DrawInputRows(scale, lineH, commentH, hasTester);
             DrawActionRow(scale, lineH);
 
             if (hasResult)
             {
-                DrawResultRow(scale, lineH, panelWidth - pad * 2f);
+                DrawResultRow(scale, lineH, bodyWidth);
             }
             else if (!_lastResult.Success && !string.IsNullOrEmpty(_lastResult.Error) && _lastResult.StatusCode != 0)
             {
@@ -363,12 +464,22 @@ namespace PlayJoy.FastLogs
                 _settings.OnGUILayout(scale);
             }
 
+            if (scrollBody)
+            {
+                GUILayout.EndScrollView();
+            }
+
             GUILayout.EndArea();
 
             // Toast draws on top of the open overlay too (e.g. send progress).
             if (_toastActive)
             {
                 DrawToast();
+            }
+            // Confirm prompt draws on top of everything (toast + open overlay).
+            if (_confirmActive)
+            {
+                DrawConfirm();
             }
         }
 
@@ -431,6 +542,13 @@ namespace PlayJoy.FastLogs
                 _includeScreenshot = !_includeScreenshot;
             }
 
+            // Scene-context toggle: when armed, Send first queues a hierarchy snapshot.
+            string sceneLabel = _includeSceneContext ? "[x] Scene" : "[ ] Scene";
+            if (GUILayout.Button(sceneLabel, _toggle, GUILayout.Width(Mathf.Max(MinTouch * scale * 2.2f, 96f * scale)), GUILayout.Height(lineH)))
+            {
+                _includeSceneContext = !_includeSceneContext;
+            }
+
             GUI.enabled = true;
 
             if (_settings != null)
@@ -486,6 +604,19 @@ namespace PlayJoy.FastLogs
             {
                 return;
             }
+
+            // If the scene-context toggle is armed, queue a hierarchy snapshot first so it
+            // rides with this send (the capture is synchronous).
+            if (_includeSceneContext)
+            {
+                var sc = SceneContextRequested;
+                if (sc != null)
+                {
+                    try { sc(); }
+                    catch (Exception e) { FlogLog.Exception(e); }
+                }
+            }
+
             var handler = SendRequested;
             if (handler != null)
             {
@@ -495,6 +626,10 @@ namespace PlayJoy.FastLogs
                 try { handler(_includeScreenshot, title, comment); }
                 catch (Exception e) { FlogLog.Exception(e); }
             }
+
+            // Close the overlay immediately on Send; the user learns the outcome from the
+            // toast (which carries the link + Copy/Open/Retry), not from the open panel.
+            _visible = false;
         }
 
         private void CopyUrl(string url)
@@ -714,7 +849,9 @@ namespace PlayJoy.FastLogs
             DestroySolid(ref _toastTexSuccess);
             DestroySolid(ref _toastTexError);
             SendRequested = null;
+            SceneContextRequested = null;
             RetryRequested = null;
+            ConfirmAnswered = null;
         }
 
         private static void DestroySolid(ref Texture2D tex)

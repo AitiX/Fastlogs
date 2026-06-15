@@ -64,6 +64,15 @@
     <div class="device-groups" id="device-groups"></div>
   </div>
 
+  <div class="ctx-panel" id="scene-panel" style="display:none">
+    <div class="ctx-panel-header" id="scene-panel-header">
+      <span class="ctx-arrow">&#9658;</span>
+      <h3>Scene Context</h3>
+      <span class="ctx-count" id="scene-count"></span>
+    </div>
+    <div class="ctx-body" id="scene-body"></div>
+  </div>
+
   <div class="ctx-panel" id="context-panel" style="display:none">
     <div class="ctx-panel-header" id="context-panel-header">
       <span class="ctx-arrow">&#9658;</span>
@@ -86,6 +95,15 @@
       <span id="screenshot-arrow">&#9658;</span>&nbsp;<span id="screenshot-label">Screenshot</span>
     </div>
     <div class="screenshot-body" id="screenshot-body"></div>
+  </div>
+
+  <div class="ctx-panel" id="attachments-panel" style="display:none">
+    <div class="ctx-panel-header" id="attachments-panel-header">
+      <span class="ctx-arrow">&#9658;</span>
+      <h3>Attachments</h3>
+      <span class="ctx-count" id="attachments-count"></span>
+    </div>
+    <div class="ctx-body" id="attachments-body"></div>
   </div>
 
   <div class="log-controls">
@@ -130,7 +148,10 @@
            device: { system:{}, graphics:{}, display:{}, application:{},
                      runtime:{}, memory:{}, network:{}, build:{}, web:{} },
            context: { key: value, ... },
-           breadcrumbs: [ { t?, m, lvl? }, ... ] }
+           breadcrumbs: [ { t?, m, lvl? }, ... ],
+           sceneContext: string | null,  // opaque JSON, parsed + rendered client-side
+           correlationCode: string | null,
+           attachments: [ { id, name, size, kind, mime, downloadUrl }, ... ] }  // standalone files attached to this log
   See viewer.js for the full contract.
 -->
 <script>var __LD = /*__FASTLOGS_DATA__*/ null;</script>

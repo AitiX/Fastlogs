@@ -35,8 +35,10 @@ namespace PlayJoy.FastLogs
     /// <summary>
     /// Default uploader. Posts the report JSON to the configured endpoint and parses
     /// the server response. Never throws; surfaces failures as UploadResultDto.Fail.
+    /// Also implements <see cref="IFileUploader"/>: POST /api/files with a JSON +
+    /// base64 body (no gzip applied to the blob).
     /// </summary>
-    internal sealed class UnityWebRequestUploader : ILogUploader
+    internal sealed class UnityWebRequestUploader : ILogUploader, IFileUploader
     {
         private const string JsonContentType = "application/json";
 
@@ -194,6 +196,229 @@ namespace PlayJoy.FastLogs
             // Non-2xx: 5xx is retryable, 4xx (and anything else) is not.
             outcome.Result = ParseError(responseText, status, transportError);
             outcome.Retryable = status >= 500 && status < 600;
+        }
+
+        // ============================================================
+        // IFileUploader - POST /api/files (JSON + base64, no gzip on the blob)
+        // ============================================================
+
+        public FlogTask<FileUploadResultDto> UploadFileAsync(FileUploadRequest req, FastLogsConfig config)
+        {
+            var task = FlogTask.Create<FileUploadResultDto>();
+
+            if (req.Bytes == null)
+            {
+                task.SetResult(FileUploadResultDto.Fail("No file bytes to upload."));
+                return task;
+            }
+
+            string endpoint = config != null && config.Files != null
+                ? config.Files.ResolvedEndpoint(config.Server != null ? config.Server.EndpointUrl : null)
+                : null;
+            if (string.IsNullOrEmpty(endpoint))
+            {
+                task.SetResult(FileUploadResultDto.Fail(
+                    "No files endpoint URL is configured (Files.FilesEndpointUrl is empty and it could not be derived from Server.EndpointUrl)."));
+                return task;
+            }
+
+            try
+            {
+                FlogCoroutineHost.Run(UploadFileRoutine(req, endpoint, config, task));
+            }
+            catch (Exception e)
+            {
+                FlogLog.Exception(e);
+                task.SetResult(FileUploadResultDto.Fail("Failed to start file upload: " + e.Message));
+            }
+
+            return task;
+        }
+
+        private IEnumerator UploadFileRoutine(FileUploadRequest req, string endpoint, FastLogsConfig config, FlogTask<FileUploadResultDto> task)
+        {
+            // --- Serialize once; the body does not change between retries. The blob is
+            //     base64'd here (NOT gzipped - explicit invariant) and embedded in the
+            //     JSON body, exactly like screenshots in a log report. ---
+            byte[] bodyBytes;
+            try
+            {
+                string fileBase64 = Convert.ToBase64String(req.Bytes);
+                string appId = config != null && config.Server != null ? config.Server.AppId : string.Empty;
+                string platform = PlatformName();
+                string appVersion = SafeAppVersion();
+                string tester = config != null && config.UI != null ? config.UI.TesterName : null;
+                int? retention = null;
+                if (config != null && config.Server != null && config.Server.RetentionDaysOverride > 0)
+                {
+                    retention = config.Server.RetentionDaysOverride;
+                }
+
+                string json = MiniJson.SerializeFileUpload(
+                    appId, platform, appVersion,
+                    req.FileName, req.Mime, fileBase64,
+                    req.Kind, req.LogId, req.GroupId,
+                    req.Title,
+                    string.IsNullOrEmpty(tester) ? null : tester,
+                    retention);
+                bodyBytes = Encoding.UTF8.GetBytes(json);
+            }
+            catch (Exception e)
+            {
+                FlogLog.Exception(e);
+                task.SetResult(FileUploadResultDto.Fail("Failed to serialize file upload: " + e.Message));
+                yield break;
+            }
+
+            string token = config != null && config.Server != null ? config.Server.Token : null;
+            int timeout = config != null && config.Files != null ? Mathf.Max(1, config.Files.TimeoutSeconds) : 60;
+            int maxRetries = config != null && config.Net != null ? Mathf.Max(0, config.Net.MaxRetries) : 0;
+
+            FileUploadResultDto result = FileUploadResultDto.Fail("File upload did not run.");
+
+            for (int attempt = 0; attempt <= maxRetries; attempt++)
+            {
+                var attemptResult = new FileAttemptOutcome();
+                yield return SendFileOnce(endpoint, bodyBytes, token, timeout, attemptResult);
+
+                result = attemptResult.Result;
+                result.Retryable = attemptResult.Retryable && !result.Success;
+
+                if (result.Success || !attemptResult.Retryable || attempt == maxRetries)
+                {
+                    break;
+                }
+
+                float delay = Mathf.Min(5f, 0.5f * (1 << attempt));
+                FlogLog.Warn("File upload attempt " + (attempt + 1) + " failed (" + result.StatusCode + "), retrying in " + delay.ToString("0.0") + "s.");
+                float until = Time.realtimeSinceStartup + delay;
+                while (Time.realtimeSinceStartup < until)
+                {
+                    yield return null;
+                }
+            }
+
+            task.SetResult(result);
+        }
+
+        // Carries one file-upload attempt's outcome out of the coroutine.
+        private sealed class FileAttemptOutcome
+        {
+            public FileUploadResultDto Result;
+            public bool Retryable;
+        }
+
+        private IEnumerator SendFileOnce(string endpoint, byte[] body, string token, int timeoutSeconds, FileAttemptOutcome outcome)
+        {
+            UnityWebRequest request = null;
+            try
+            {
+                request = new UnityWebRequest(endpoint, UnityWebRequest.kHttpVerbPOST)
+                {
+                    uploadHandler = new UploadHandlerRaw(body) { contentType = JsonContentType },
+                    downloadHandler = new DownloadHandlerBuffer(),
+                    timeout = timeoutSeconds
+                };
+                request.SetRequestHeader("Content-Type", JsonContentType);
+                request.SetRequestHeader("Accept", JsonContentType);
+                if (!string.IsNullOrEmpty(token))
+                {
+                    request.SetRequestHeader("Authorization", "Bearer " + token);
+                }
+            }
+            catch (Exception e)
+            {
+                FlogLog.Exception(e);
+                if (request != null)
+                {
+                    request.Dispose();
+                    request = null;
+                }
+                outcome.Result = FileUploadResultDto.Fail("Failed to build file request: " + e.Message);
+                outcome.Retryable = false;
+                yield break;
+            }
+
+            yield return request.SendWebRequest();
+
+            bool connectionError = IsConnectionError(request);
+            long status = request.responseCode;
+            string responseText = SafeDownloadText(request);
+            string transportError = request.error;
+
+            request.Dispose();
+
+            if (connectionError)
+            {
+                outcome.Result = FileUploadResultDto.Fail("Connection error: " + (transportError ?? "unknown"), status);
+                outcome.Retryable = true;
+                yield break;
+            }
+
+            if (status >= 200 && status < 300)
+            {
+                outcome.Result = ParseFileSuccess(responseText, status);
+                outcome.Retryable = false;
+                yield break;
+            }
+
+            outcome.Result = ParseFileError(responseText, status, transportError);
+            outcome.Retryable = status >= 500 && status < 600;
+        }
+
+        private static FileUploadResultDto ParseFileSuccess(string responseText, long status)
+        {
+            string id, url, downloadUrl, expiresAt, error, message;
+            bool parsed = MiniJson.TryParseFileUploadResponse(responseText, out id, out url, out downloadUrl, out expiresAt, out error, out message);
+
+            if (parsed && !string.IsNullOrEmpty(id))
+            {
+                return FileUploadResultDto.Ok(id, url, downloadUrl, expiresAt, status);
+            }
+
+            string detail = !string.IsNullOrEmpty(message) ? message : "Server returned success but no id.";
+            return FileUploadResultDto.Fail(detail, status);
+        }
+
+        private static FileUploadResultDto ParseFileError(string responseText, long status, string transportError)
+        {
+            string id, url, downloadUrl, expiresAt, error, message;
+            MiniJson.TryParseFileUploadResponse(responseText, out id, out url, out downloadUrl, out expiresAt, out error, out message);
+
+            string detail;
+            if (!string.IsNullOrEmpty(message)) detail = message;
+            else if (!string.IsNullOrEmpty(error)) detail = error;
+            else if (!string.IsNullOrEmpty(transportError)) detail = transportError;
+            else detail = "HTTP " + status;
+
+            return FileUploadResultDto.Fail(detail, status);
+        }
+
+        // Platform name for the files contract (mirrors the report platform enum).
+        private static string PlatformName()
+        {
+            switch (Application.platform)
+            {
+                case RuntimePlatform.WebGLPlayer: return "WebGL";
+                case RuntimePlatform.Android: return "Android";
+                case RuntimePlatform.IPhonePlayer: return "iOS";
+                case RuntimePlatform.WindowsPlayer:
+                case RuntimePlatform.WindowsEditor: return "Windows";
+                case RuntimePlatform.OSXPlayer:
+                case RuntimePlatform.OSXEditor: return "macOS";
+                case RuntimePlatform.LinuxPlayer:
+                case RuntimePlatform.LinuxEditor: return "Linux";
+                case RuntimePlatform.PS4: return "PS4";
+                case RuntimePlatform.PS5: return "PS5";
+                case RuntimePlatform.Switch: return "Switch";
+                default: return "Other";
+            }
+        }
+
+        private static string SafeAppVersion()
+        {
+            try { return Application.version; }
+            catch (Exception e) { FlogLog.Exception(e); return null; }
         }
 
         // ---- Gzip ----

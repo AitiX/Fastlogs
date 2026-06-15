@@ -203,6 +203,11 @@ namespace PlayJoy.FastLogs
             get { return _ring.Count; }
         }
 
+        public int ApproxLogBytes
+        {
+            get { long b = _ring.ApproxBytes; return b > int.MaxValue ? int.MaxValue : (int)b; }
+        }
+
         public void Dispose()
         {
             if (_disposed)

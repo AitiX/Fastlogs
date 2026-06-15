@@ -32,6 +32,81 @@ var ok       = is_real(http_status) && (http_status >= 200 && http_status < 300)
 // status < 0 -> сетевая ошибка/обрыв (http_status может быть 0).
 var net_error = is_real(status) && (status < 0);
 
+// =====================================================================================
+// ОТПРАВКА ФАЙЛА/ПАПКИ (фича SEND-FILE): СВОЯ короткая ветка для request_kind=="file".
+//   Сервер POST /api/files отвечает 201 { id, url, downloadUrl, expiresAt }. Без retry-until-
+//   success / дренажа outbox / poison-pill - это логика ТОЛЬКО для лог-отчётов. Тут: разобрать
+//   ответ, дёрнуть file_on_done(result), показать тост (Готово+ссылка / Ошибка). Никаких
+//   немедленных ретраев (файл тяжёлый; повтор - явным повторным вызовом из кода интегратора).
+// =====================================================================================
+if (hs.request_kind == "file") {
+    hs.request_kind = "";   // сбрасываем тип in-flight запроса
+
+    var f_cb = hs.file_on_done;
+    hs.file_on_done = undefined;
+
+    var f_id   = "";
+    var f_url  = "";
+    var f_durl = "";
+    if (ok && !net_error && is_string(result) && string_length(result) > 0) {
+        var fp = undefined;
+        try { fp = json_parse(result); } catch (_efp) { fp = undefined; }
+        if (is_struct(fp)) {
+            if (variable_struct_exists(fp, "id")          && is_string(fp.id))          { f_id   = fp.id; }
+            if (variable_struct_exists(fp, "url")         && is_string(fp.url))         { f_url  = fp.url; }
+            if (variable_struct_exists(fp, "downloadUrl") && is_string(fp.downloadUrl)) { f_durl = fp.downloadUrl; }
+        }
+    }
+
+    if (ok && !net_error) {
+        hs.state = "ok";
+        // Короткая ссылка вьюера (url) - как у лог-отчёта; download отдельной кнопкой во вьюере.
+        if (string_length(f_url) > 0) { hs.last_url = f_url; }
+        show_debug_message("[FastLogs] file upload OK (" + string(http_status) + ") id=" + f_id + " url=" + f_url);
+
+        // COPY-ON-SEND: авто-копируем короткую ссылку (best-effort, как у лог-отправки).
+        var f_copied = false;
+        if (FASTLOGS_COPY_ON_SEND && string_length(f_url) > 0
+            && script_exists(asset_get_index("fastlogs_copy_url"))) {
+            try { f_copied = fastlogs_copy_url(); } catch (_efc) { f_copied = false; }
+        }
+        if (script_exists(asset_get_index("fastlogs_status_toast"))) {
+            if (string_length(f_url) > 0) {
+                var f_text = f_copied ? "Файл отправлен (ссылка скопирована)" : "Файл отправлен";
+                fastlogs_status_toast("ok", f_text, { url: f_url });
+            } else {
+                fastlogs_status_toast("ok", "Файл отправлен");
+            }
+        }
+    } else {
+        hs.state = "error";
+        show_debug_message("[FastLogs] file upload FAILED status=" + string(status)
+            + " http_status=" + string(http_status) + " result=" + string(result));
+        if (script_exists(asset_get_index("fastlogs_status_toast"))) {
+            var f_reason;
+            if (net_error)                                    f_reason = "сеть недоступна";
+            else if (is_real(http_status) && http_status > 0) f_reason = "HTTP " + string(http_status);
+            else                                              f_reason = "неизвестно";
+            fastlogs_status_toast("error", "Ошибка отправки файла: " + f_reason, { retry: false });
+        }
+    }
+
+    // Колбэк интегратора/фасада (если задан) с готовым результатом.
+    if (is_method(f_cb)) {
+        try {
+            f_cb({
+                success     : (ok && !net_error),
+                id          : f_id,
+                url         : f_url,
+                downloadUrl : f_durl,
+                statusCode  : (is_real(http_status) ? http_status : 0),
+                error       : (ok && !net_error) ? "" : (net_error ? "network" : ("http_" + string(http_status))),
+            });
+        } catch (_ecb) { /* колбэк не должен ронять обработчик */ }
+    }
+    exit;   // file-ветка завершена; лог-логика ниже не выполняется
+}
+
 if (ok && !net_error) {
     // RETRY-UNTIL-SUCCESS (фича RETRY): успех - финал. Гасим любой pending отложенный повтор
     //   и его alarm (этот успех мог прийти как раз от отложенной попытки). Существующий

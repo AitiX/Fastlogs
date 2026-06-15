@@ -22,6 +22,7 @@
 #endif
 
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 
 namespace PlayJoy.FastLogs
@@ -331,10 +332,12 @@ namespace PlayJoy.FastLogs
         /// builds (both body and call sites are removed).
         /// </summary>
         [Conditional("UNITY_EDITOR"), Conditional("DEVELOPMENT_BUILD"), Conditional("LOGSHARE_FORCE_ENABLED")]
-        public static void Send()
+        public static void Send(
+            [System.Runtime.CompilerServices.CallerFilePath] string callerFile = null,
+            [System.Runtime.CompilerServices.CallerLineNumber] int callerLine = 0)
         {
 #if FASTLOGS_ENABLED
-            if (_runtime != null) _runtime.QuickSend();
+            if (_runtime != null) _runtime.QuickSendFromCode(new CallSite(callerFile, callerLine));
 #endif
         }
 
@@ -363,22 +366,207 @@ namespace PlayJoy.FastLogs
         }
 
         /// <summary>
+        /// Set a short correlation/debug code (&lt;=64 chars) attached to every subsequent
+        /// report, so a specific log can be awaited and grabbed on the server (see the
+        /// /api/await endpoint and the fastlogs-await tool). Pass null/empty to clear.
+        /// Stripped in retail/console.
+        /// </summary>
+        [Conditional("UNITY_EDITOR"), Conditional("DEVELOPMENT_BUILD"), Conditional("LOGSHARE_FORCE_ENABLED")]
+        public static void SetCorrelationCode(string code)
+        {
+#if FASTLOGS_ENABLED
+            if (_runtime != null) _runtime.SetCorrelationCode(code);
+#endif
+        }
+
+        /// <summary>
+        /// Capture the full runtime scene hierarchy (all loaded scenes + DontDestroyOnLoad
+        /// -&gt; objects -&gt; components -&gt; serialized fields) now and queue it for the
+        /// next send, so it rides with the report and is viewable as a tree. Bounded by the
+        /// SceneContext config limits. One-shot: ignored if a capture is already queued unless
+        /// allowRepeat is true (loop guard, mirrors log throttling). Stripped in retail/console.
+        /// </summary>
+        [Conditional("UNITY_EDITOR"), Conditional("DEVELOPMENT_BUILD"), Conditional("LOGSHARE_FORCE_ENABLED")]
+        public static void CaptureSceneContext(bool allowRepeat = false)
+        {
+#if FASTLOGS_ENABLED
+            if (_runtime != null) _runtime.CaptureSceneContext(allowRepeat);
+#endif
+        }
+
+        /// <summary>
+        /// Capture the scene context now and send a report immediately (capture + Send), so a
+        /// hierarchy snapshot ships in one call from code. One-shot: ignored if it already sent
+        /// once unless allowRepeat is true (loop guard). Stripped in retail/console.
+        /// </summary>
+        [Conditional("UNITY_EDITOR"), Conditional("DEVELOPMENT_BUILD"), Conditional("LOGSHARE_FORCE_ENABLED")]
+        public static void SendSceneContext(bool allowRepeat = false,
+            [System.Runtime.CompilerServices.CallerFilePath] string callerFile = null,
+            [System.Runtime.CompilerServices.CallerLineNumber] int callerLine = 0)
+        {
+#if FASTLOGS_ENABLED
+            if (_runtime != null) _runtime.SendSceneContextFromCode(allowRepeat, new CallSite(callerFile, callerLine));
+#endif
+        }
+
+        /// <summary>
         /// Build and upload a report, returning the result. Awaitable on all Unity
         /// versions (FlogTask, coroutine-driven). Optional title and comment are
         /// attached to the report (comment is the tester's free-form problem
         /// description). In stripped builds returns a completed "disabled" result
         /// immediately. Value-returning: compiles everywhere.
         /// </summary>
-        public static FlogTask<UploadResultDto> SendAsync(bool includeScreenshot = false, string title = null, string comment = null)
+        public static FlogTask<UploadResultDto> SendAsync(bool includeScreenshot = false, string title = null, string comment = null,
+            [System.Runtime.CompilerServices.CallerFilePath] string callerFile = null,
+            [System.Runtime.CompilerServices.CallerLineNumber] int callerLine = 0)
         {
 #if FASTLOGS_ENABLED
             if (_runtime == null)
             {
                 return FlogTask.FromResult(UploadResultDto.Fail("FastLogs is not initialized."));
             }
-            return _runtime.BeginSend(includeScreenshot, title, comment, attachQueuedShots: true);
+            return _runtime.BeginSendFromCode(includeScreenshot, title, comment, new CallSite(callerFile, callerLine));
 #else
             return FlogTask.FromResult(UploadResultDto.Disabled);
+#endif
+        }
+
+        // ============================================================
+        // Files (send an arbitrary file / folder, get a shareable link)
+        // ============================================================
+        // These target a SEPARATE endpoint (POST /api/files), independent of the log
+        // report send. The blob is NEVER PII-scrubbed (explicit invariant) - only a
+        // decoded-size cap (FilesSection.MaxFileBytes, default 25 MB) applies. Awaitable
+        // members are value-returning (compile everywhere) and return a completed
+        // "disabled" result in stripped builds. Path overloads cannot work on WebGL (no
+        // file system); there they resolve to a clear failure - use the byte[] overload.
+
+        /// <summary>
+        /// Upload a single file by path and return its shareable link. Reads the file into
+        /// memory and posts it. On WebGL (no file system) this fails with a clear message;
+        /// use the byte[] overload instead. In stripped builds returns a "disabled" result.
+        /// Value-returning: compiles everywhere.
+        /// </summary>
+        public static FlogTask<FileUploadResultDto> SendFileAsync(string path, string title = null,
+            [System.Runtime.CompilerServices.CallerFilePath] string callerFile = null,
+            [System.Runtime.CompilerServices.CallerLineNumber] int callerLine = 0)
+        {
+#if FASTLOGS_ENABLED
+            if (_runtime == null)
+            {
+                return FlogTask.FromResult(FileUploadResultDto.Fail("FastLogs is not initialized."));
+            }
+            return _runtime.BeginSendFilePath(path, title);
+#else
+            return FlogTask.FromResult(FileUploadResultDto.Disabled);
+#endif
+        }
+
+        /// <summary>
+        /// Upload a file from in-memory bytes (WebGL-safe; no file system needed) and return
+        /// its shareable link. In stripped builds returns a "disabled" result.
+        /// Value-returning: compiles everywhere.
+        /// </summary>
+        public static FlogTask<FileUploadResultDto> SendFileAsync(byte[] bytes, string fileName, string title = null,
+            [System.Runtime.CompilerServices.CallerFilePath] string callerFile = null,
+            [System.Runtime.CompilerServices.CallerLineNumber] int callerLine = 0)
+        {
+#if FASTLOGS_ENABLED
+            if (_runtime == null)
+            {
+                return FlogTask.FromResult(FileUploadResultDto.Fail("FastLogs is not initialized."));
+            }
+            return _runtime.BeginSendFileBytes(bytes, fileName, title);
+#else
+            return FlogTask.FromResult(FileUploadResultDto.Disabled);
+#endif
+        }
+
+        /// <summary>
+        /// Zip a folder on the client into one archive and upload it, returning its link. On
+        /// WebGL (no file system) this fails cleanly. In stripped builds returns a "disabled"
+        /// result. Value-returning: compiles everywhere.
+        /// </summary>
+        public static FlogTask<FileUploadResultDto> SendFolderAsync(string path, string title = null,
+            [System.Runtime.CompilerServices.CallerFilePath] string callerFile = null,
+            [System.Runtime.CompilerServices.CallerLineNumber] int callerLine = 0)
+        {
+#if FASTLOGS_ENABLED
+            if (_runtime == null)
+            {
+                return FlogTask.FromResult(FileUploadResultDto.Fail("FastLogs is not initialized."));
+            }
+            return _runtime.BeginSendFolder(path, title);
+#else
+            return FlogTask.FromResult(FileUploadResultDto.Disabled);
+#endif
+        }
+
+        /// <summary>
+        /// Zip several files on the client into one archive and upload it, returning its
+        /// link. On WebGL (no file system) this fails cleanly. In stripped builds returns a
+        /// "disabled" result. Value-returning: compiles everywhere.
+        /// </summary>
+        public static FlogTask<FileUploadResultDto> SendFilesAsync(IReadOnlyList<string> paths, string title = null,
+            [System.Runtime.CompilerServices.CallerFilePath] string callerFile = null,
+            [System.Runtime.CompilerServices.CallerLineNumber] int callerLine = 0)
+        {
+#if FASTLOGS_ENABLED
+            if (_runtime == null)
+            {
+                return FlogTask.FromResult(FileUploadResultDto.Fail("FastLogs is not initialized."));
+            }
+            return _runtime.BeginSendFiles(paths, title);
+#else
+            return FlogTask.FromResult(FileUploadResultDto.Disabled);
+#endif
+        }
+
+        /// <summary>
+        /// Fire-and-forget: upload a file by path; a status toast shows the result. Stripped
+        /// in retail/console (body and call sites removed). For an awaitable result use
+        /// <see cref="SendFileAsync(string, string, string, int)"/>.
+        /// </summary>
+        [Conditional("UNITY_EDITOR"), Conditional("DEVELOPMENT_BUILD"), Conditional("LOGSHARE_FORCE_ENABLED")]
+        public static void SendFile(string path, string title = null)
+        {
+#if FASTLOGS_ENABLED
+            if (_runtime != null) _runtime.BeginSendFilePath(path, title);
+#endif
+        }
+
+        /// <summary>
+        /// Fire-and-forget: zip a folder and upload it; a status toast shows the result.
+        /// Stripped in retail/console. For an awaitable result use
+        /// <see cref="SendFolderAsync(string, string, string, int)"/>.
+        /// </summary>
+        [Conditional("UNITY_EDITOR"), Conditional("DEVELOPMENT_BUILD"), Conditional("LOGSHARE_FORCE_ENABLED")]
+        public static void SendFolder(string path, string title = null)
+        {
+#if FASTLOGS_ENABLED
+            if (_runtime != null) _runtime.BeginSendFolder(path, title);
+#endif
+        }
+
+        /// <summary>
+        /// Queue a file/folder path to ride as an attachment of the NEXT successful report
+        /// send (linked to that report on the server). A folder is zipped at upload time.
+        /// Capped (oldest dropped). No-op on WebGL (no file system). Stripped in retail/console.
+        /// </summary>
+        [Conditional("UNITY_EDITOR"), Conditional("DEVELOPMENT_BUILD"), Conditional("LOGSHARE_FORCE_ENABLED")]
+        public static void AttachFile(string path)
+        {
+#if FASTLOGS_ENABLED
+            if (_runtime != null) _runtime.AttachFile(path);
+#endif
+        }
+
+        /// <summary>Drop all paths queued by AttachFile without sending them. Stripped in retail/console.</summary>
+        [Conditional("UNITY_EDITOR"), Conditional("DEVELOPMENT_BUILD"), Conditional("LOGSHARE_FORCE_ENABLED")]
+        public static void ClearAttachments()
+        {
+#if FASTLOGS_ENABLED
+            if (_runtime != null) _runtime.ClearAttachments();
 #endif
         }
 

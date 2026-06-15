@@ -5,6 +5,8 @@
 // Deletes logs whose retention has elapsed: rows in `logs` that are not pinned
 // and whose expires_at is at or before `now`. For each such log we remove its
 // on-disk blobs (gzipped body + screenshot) and then delete the database row.
+// The same policy applies to standalone file uploads (the `files` table): its
+// .bin blob is removed before its row.
 //
 // Idempotency: removeBlobs ignores missing files, and deleting an already-gone
 // row is a no-op, so re-running the sweep (or crashing mid-batch and retrying)
@@ -26,9 +28,10 @@ const { nowUtcIso } = require('./util/http');
 //   - now:   ISO-8601 UTC cutoff string (defaults to current time);
 //   - batch: max number of logs to process in this call (default 500).
 //
-// Returns { scanned, blobsRemoved, rowsDeleted, errors } where `errors` is an
-// array of { id, error } for logs that could not be fully removed (those rows
-// are left in place for the next sweep).
+// Returns { scanned, blobsRemoved, rowsDeleted, filesScanned, fileBlobsRemoved,
+// filesDeleted, errors } where `errors` is an array of { id, error } (or
+// { fileId, error }) for rows that could not be fully removed (those are left
+// in place for the next sweep).
 async function sweep(now = nowUtcIso(), batch = 500) {
   const expired = db.listExpired(now, batch);
 
@@ -36,6 +39,9 @@ async function sweep(now = nowUtcIso(), batch = 500) {
     scanned: expired.length,
     blobsRemoved: 0,
     rowsDeleted: 0,
+    filesScanned: 0,
+    fileBlobsRemoved: 0,
+    filesDeleted: 0,
     errors: [],
   };
 
@@ -64,6 +70,32 @@ async function sweep(now = nowUtcIso(), batch = 500) {
       return n;
     });
     result.rowsDeleted = deleteMany(deletable);
+  }
+
+  // --- Standalone files phase (same policy: blob removed BEFORE the row) -----
+  const expiredFiles = db.listExpiredFiles(now, batch);
+  result.filesScanned = expiredFiles.length;
+
+  const deletableFiles = [];
+  for (const row of expiredFiles) {
+    try {
+      const removed = await storage.removeFileBlob(row.id);
+      result.fileBlobsRemoved += removed;
+      deletableFiles.push(row.id);
+    } catch (err) {
+      result.errors.push({ fileId: row.id, error: (err && err.message) || String(err) });
+    }
+  }
+
+  if (deletableFiles.length > 0) {
+    const deleteManyFiles = db.db.transaction((ids) => {
+      let n = 0;
+      for (const id of ids) {
+        n += db.deleteFile(id).changes;
+      }
+      return n;
+    });
+    result.filesDeleted = deleteManyFiles(deletableFiles);
   }
 
   return result;

@@ -73,6 +73,20 @@ namespace PlayJoy.FastLogs
         /// 100 items and ~16KB. Omitted when null/empty.
         /// </summary>
         public List<BreadcrumbDto> Breadcrumbs;
+
+        /// <summary>
+        /// sceneContext - compact JSON STRING capturing the runtime scene hierarchy
+        /// (loaded scenes + DontDestroyOnLoad -&gt; objects -&gt; components -&gt; fields),
+        /// built by SceneContextCapturer. The server stores it opaquely; the viewer parses
+        /// and renders it as a collapsible tree. Omitted when empty.
+        /// </summary>
+        public string SceneContextJson;
+
+        /// <summary>
+        /// correlationCode - optional short debug/await code (&lt;=64 chars) used to wait for
+        /// and grab this exact log on the server. Omitted when empty.
+        /// </summary>
+        public string CorrelationCode;
     }
 
     /// <summary>

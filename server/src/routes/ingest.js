@@ -152,6 +152,9 @@ const BC_MAX_TEXT = 512;
 const BC_MAX_T = 40; // generous bound for an ISO-8601 timestamp string
 const BC_LEVELS = new Set(['info', 'warn', 'error']);
 
+// Max length of the optional `correlationCode` (a short debug/await code).
+const CODE_MAX_LEN = 64;
+
 const byteLen = (s) => Buffer.byteLength(s, 'utf8');
 
 // Sanitize the context object into a clamped { string: string } map, or return
@@ -208,6 +211,28 @@ function sanitizeBreadcrumbs(raw) {
     total += cost;
   }
   return out.length ? out : null;
+}
+
+// Sanitize the optional `sceneContext` field: a compact JSON STRING built by
+// the client (parsed + rendered by the viewer, opaque server-side). Kept
+// verbatim when it is a non-empty string within the configured byte budget;
+// anything else (non-string / empty / oversize) collapses to null so the field
+// is simply omitted. Oversize is dropped, never a 400 (the field is optional).
+function sanitizeSceneContext(raw, maxBytes) {
+  if (typeof raw !== 'string' || raw.length === 0) return null;
+  if (byteLen(raw) > maxBytes) {
+    console.warn(`[ingest] sceneContext dropped: ${byteLen(raw)} bytes exceeds ${maxBytes}`);
+    return null;
+  }
+  return raw;
+}
+
+// Sanitize the optional `correlationCode`: a short debug/await code. Coerced to
+// a string, trimmed, and clamped to CODE_MAX_LEN; empty collapses to null.
+function sanitizeCorrelationCode(raw) {
+  if (raw === null || raw === undefined) return null;
+  const code = String(raw).trim().slice(0, CODE_MAX_LEN);
+  return code.length ? code : null;
 }
 
 // Find a value in an object by a case/separator-insensitive key match (so the
@@ -293,6 +318,10 @@ async function handleIngest(req, res) {
   // Sanitized + clamped here; invalid types collapse to null (field omitted).
   const context = sanitizeContext(body.context);
   const breadcrumbs = sanitizeBreadcrumbs(body.breadcrumbs);
+  // Optional scene snapshot (opaque JSON string, clamped to maxSceneContextBytes)
+  // and a short debug/await code; both are stored as-is and never fail ingest.
+  const sceneContext = sanitizeSceneContext(body.sceneContext, config.maxSceneContextBytes);
+  const correlationCode = sanitizeCorrelationCode(body.correlationCode);
   const retentionDaysRaw = body.retentionDays;
   // Screenshots: the new `screenshotsPng` array plus the legacy single
   // `screenshotPng` are collected and validated at step 7.
@@ -418,6 +447,9 @@ async function handleIngest(req, res) {
     tester,
     context_json: context ? JSON.stringify(context) : null,
     breadcrumbs_json: breadcrumbs ? JSON.stringify(breadcrumbs) : null,
+    // Opaque scene snapshot JSON string + short debug/await code (or null).
+    scene_context: sceneContext,
+    correlation_code: correlationCode,
     // Crash signature for grouping. '' (not null) marks "computed, not a crash"
     // so the lazy backfill never re-scans this log.
     crash_sig: crashsig.computeSignature(logTextDecoded, { topK: config.crashSigTopK }) || '',

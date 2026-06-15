@@ -24,6 +24,27 @@ using UnityEngine;
 namespace PlayJoy.FastLogs
 {
     /// <summary>
+    /// Identity of a CODE send call site, captured via CallerInfo at the facade. The
+    /// loop guard keys per-site state on <see cref="Key"/> = "filename:line" (filename
+    /// only, no path). A default/empty struct (Key null) means "no call-site info"
+    /// (e.g. a runtime-internal send); the guard treats those as ungated.
+    /// </summary>
+    internal readonly struct CallSite
+    {
+        public readonly string Key;
+
+        public CallSite(string callerFile, int callerLine)
+        {
+            string file = string.IsNullOrEmpty(callerFile)
+                ? null
+                : System.IO.Path.GetFileName(callerFile);
+            Key = file != null ? (file + ":" + callerLine) : null;
+        }
+
+        public bool HasValue { get { return !string.IsNullOrEmpty(Key); } }
+    }
+
+    /// <summary>
     /// Runtime host. One instance per app, hidden and persistent. Internal: the
     /// public surface is the static <see cref="FastLogs"/> facade.
     /// </summary>
@@ -36,6 +57,7 @@ namespace PlayJoy.FastLogs
         private ITriggerSource _triggerSource;
         private ITriggerSource _quickSendTrigger; // separate gesture: send without opening the overlay
         private ILogUploader _uploader;
+        private IFileUploader _fileUploader;
         private IScreenshotCapturer _screenshot;
         private IClipboard _clipboard;
         private ILogShareOverlay _overlay;
@@ -69,6 +91,24 @@ namespace PlayJoy.FastLogs
         private const int MaxQueuedScreenshots = 8;
         private readonly List<string> _queuedShots = new List<string>();
 
+        // File paths queued via AttachFile(), to be uploaded to /api/files as attachments
+        // of the NEXT successful report send (logId = that report's id). Capped (oldest
+        // dropped) and cleared once the send that carried them resolves successfully. A
+        // path may be a file or a folder (folders are zipped at upload time).
+        private const int MaxQueuedAttachments = 8;
+        private readonly List<string> _queuedAttachments = new List<string>();
+
+        // Scene-hierarchy snapshot captured via CaptureSceneContext(), queued for the next
+        // send (like _queuedShots) and cleared once that send resolves. _sceneContextSentOnce
+        // is the once-per-session loop guard for SendSceneContext() (bypassed with allowRepeat).
+        private string _queuedSceneContext;
+        private bool _sceneContextSentOnce;
+        private bool _lastSendHadSceneContext; // did the in-flight/last send attach scene context?
+
+        // Correlation/debug code attached to every report (FastLogs.SetCorrelationCode), so a
+        // specific log can be awaited + grabbed on the server. Null = none.
+        private string _correlationCode;
+
         // ---- Retry-until-success state (outer loop, on top of the uploader's own
         //      immediate retries). At most ONE pending retry exists at a time. ----
         private Coroutine _retryCoroutine; // non-null while a retry is scheduled/counting down; null = none pending
@@ -87,6 +127,20 @@ namespace PlayJoy.FastLogs
         private float _lastCapturedUnscaled = float.NegativeInfinity;
         private int _lastCapturedStackHash;       // 0 = none yet
         private bool _inAutoSendDispatch;         // re-entrancy guard (our own logged exceptions must not re-trigger)
+
+        // ---- Loop guard (per CODE call site) ----
+        // Catches a single code call site (FastLogs.Send / SendAsync / SendSceneContext)
+        // that keeps sending. Counts are CUMULATIVE per session, no time window. Over the
+        // threshold and with UI present, a confirm is shown (Send -> reset + proceed, tagged
+        // with the confirmer; Cancel -> disable that site for the session). Over threshold
+        // with no UI, the send is dropped and every Nth drop logs one warning. Sites under
+        // threshold send normally. Sits at the code-API entry only (NOT the overlay Send or
+        // auto-crash send).
+        private readonly Dictionary<string, int> _siteSendCount = new Dictionary<string, int>(StringComparer.Ordinal);
+        private readonly HashSet<string> _disabledSites = new HashSet<string>(StringComparer.Ordinal);
+        private readonly Dictionary<string, int> _siteDropCount = new Dictionary<string, int>(StringComparer.Ordinal); // no-UI drops, per site (warn cadence)
+        private bool _confirmPending;                 // a confirm dialog is showing; only one at a time
+        private PendingLoopConfirm _pendingConfirm;   // the send to replay if the showing confirm is answered "Send"
 
         public FastLogsConfig Config { get { return _config; } }
         public bool IsBusy { get { return _isBusy; } }
@@ -116,6 +170,7 @@ namespace PlayJoy.FastLogs
                 TryCreate(() => _logSource = _services.CreateLogSource(config));
                 TryCreate(() => _triggerSource = _services.CreateTriggerSource(config));
                 TryCreate(() => _uploader = _services.CreateUploader(config));
+                TryCreate(() => _fileUploader = _services.CreateFileUploader(config));
                 TryCreate(() => _screenshot = _services.CreateScreenshotCapturer(config));
                 TryCreate(() => _clipboard = _services.CreateClipboard(config));
                 TryCreate(() => _overlay = _services.CreateOverlay(config));
@@ -144,6 +199,8 @@ namespace PlayJoy.FastLogs
             if (_overlay != null)
             {
                 _overlay.SendRequested += OnOverlaySendRequested;
+                _overlay.SceneContextRequested += OnOverlaySceneContextRequested;
+                _overlay.ConfirmAnswered += OnLoopConfirmAnswered;
 
                 // Light up the toast seam only if the overlay implements it. Existing
                 // overlays that do not implement IToastSink keep working (no toast).
@@ -202,6 +259,8 @@ namespace PlayJoy.FastLogs
             if (_overlay != null)
             {
                 _overlay.SendRequested -= OnOverlaySendRequested;
+                _overlay.SceneContextRequested -= OnOverlaySceneContextRequested;
+                _overlay.ConfirmAnswered -= OnLoopConfirmAnswered;
             }
             if (_toast != null)
             {
@@ -352,6 +411,321 @@ namespace PlayJoy.FastLogs
         private void ForgetPendingCrashOwnership()
         {
             _pendingCrashFilePath = null;
+        }
+
+        // ============================================================
+        // Loop guard - CODE-API send entry points
+        // ============================================================
+        // These wrap the shared send pipeline for sends triggered from game code
+        // (FastLogs.Send / SendAsync / SendSceneContext). They run the per-call-site
+        // loop guard FIRST; only if it lets the send through do they fall through to
+        // the same path the overlay/auto paths use. The overlay Send and auto-crash
+        // send deliberately do NOT call these, so they are never guarded.
+
+        /// <summary>FastLogs.Send() entry. Guards the call site, then quick-sends.</summary>
+        public void QuickSendFromCode(CallSite site)
+        {
+            switch (EvaluateLoopGuard(site, PendingLoopConfirm.QuickSend(site)))
+            {
+                case LoopGuardDecision.Proceed:
+                    QuickSend();
+                    break;
+                case LoopGuardDecision.Deferred:
+                case LoopGuardDecision.Dropped:
+                    break; // dialog shown / silently dropped; nothing to send now
+            }
+        }
+
+        /// <summary>FastLogs.SendAsync() entry. Guards the call site, then begins a send.</summary>
+        public FlogTask<UploadResultDto> BeginSendFromCode(bool includeScreenshot, string title, string comment, CallSite site)
+        {
+            var task = FlogTask.Create<UploadResultDto>();
+            switch (EvaluateLoopGuard(site, PendingLoopConfirm.BeginSend(site, includeScreenshot, title, comment, task)))
+            {
+                case LoopGuardDecision.Proceed:
+                    // A fresh, code-initiated report: detach from any pending crash file.
+                    ForgetPendingCrashOwnership();
+                    return BeginSend(includeScreenshot, title, comment, attachQueuedShots: true);
+                case LoopGuardDecision.Dropped:
+                    // No UI to confirm a looping site: resolve the awaited task with a
+                    // non-success "declined" result rather than leaving it pending.
+                    task.SetResult(LoopDeclinedResult(site.Key));
+                    return task;
+                case LoopGuardDecision.Deferred:
+                    // Confirm shown: the returned task stays pending and is resolved later
+                    // by OnLoopConfirmAnswered (real result on Send, declined on Cancel).
+                    return task;
+                default:
+                    task.SetResult(_lastResult);
+                    return task;
+            }
+        }
+
+        /// <summary>FastLogs.SendSceneContext() entry. Guards the call site, then sends scene context.</summary>
+        public void SendSceneContextFromCode(bool allowRepeat, CallSite site)
+        {
+            switch (EvaluateLoopGuard(site, PendingLoopConfirm.SceneContext(site, allowRepeat)))
+            {
+                case LoopGuardDecision.Proceed:
+                    SendSceneContext(allowRepeat);
+                    break;
+                case LoopGuardDecision.Deferred:
+                case LoopGuardDecision.Dropped:
+                    break;
+            }
+        }
+
+        // Outcome of the loop-guard check for a single code send.
+        private enum LoopGuardDecision
+        {
+            Proceed,  // under threshold (or guard off / no site info): send now
+            Deferred, // over threshold + UI: a confirm dialog was shown; do not send yet
+            Dropped   // over threshold + no UI, OR a confirm is already pending: do not send
+        }
+
+        // Core decision for a code send from the given site. On the FIRST over-threshold
+        // hit with UI available it shows the confirm dialog and stashes `deferred` to
+        // replay on a "Send" answer. Under threshold it increments the per-site counter
+        // and returns Proceed. Never throws.
+        private LoopGuardDecision EvaluateLoopGuard(CallSite site, PendingLoopConfirm deferred)
+        {
+            // Guard off, or no call-site info to key on: always send (no-op guard).
+            var cfg = _config != null ? _config.LoopGuard : null;
+            if (cfg == null || !cfg.Enabled || !site.HasValue)
+            {
+                return LoopGuardDecision.Proceed;
+            }
+
+            string key = site.Key;
+
+            // A site disabled by an earlier "Cancel" stays disabled for the session.
+            if (_disabledSites.Contains(key))
+            {
+                return LoopGuardDecision.Dropped;
+            }
+
+            int max = cfg.MaxCodeSendsPerSite > 0 ? cfg.MaxCodeSendsPerSite : 10;
+            int count;
+            _siteSendCount.TryGetValue(key, out count);
+
+            // Under threshold: count this send and let it through.
+            if (count < max)
+            {
+                _siteSendCount[key] = count + 1;
+                return LoopGuardDecision.Proceed;
+            }
+
+            // Over threshold (the (max+1)th and beyond). UI confirm if available,
+            // otherwise drop with throttled warning.
+            bool uiAvailable = _overlay != null && _config != null && _config.UI.EnableUI;
+            if (!uiAvailable)
+            {
+                CountNoUiDrop(key, cfg.NoUiWarnEvery);
+                return LoopGuardDecision.Dropped;
+            }
+
+            // Only ONE confirm pending at a time. While one is showing, further
+            // over-threshold sends from any site are just dropped (no stacked dialogs).
+            if (_confirmPending)
+            {
+                return LoopGuardDecision.Dropped;
+            }
+
+            ShowLoopConfirm(deferred);
+            return LoopGuardDecision.Deferred;
+        }
+
+        // Count a no-UI drop for a site and warn once every NoUiWarnEvery drops so a
+        // loop is visible without flooding the log.
+        private void CountNoUiDrop(string key, int warnEvery)
+        {
+            int drops;
+            _siteDropCount.TryGetValue(key, out drops);
+            drops++;
+            _siteDropCount[key] = drops;
+
+            int every = warnEvery > 0 ? warnEvery : 10;
+            if (drops % every == 0)
+            {
+                FlogLog.Warn("FastLogs: dropped " + drops + " looping sends from " + key + " (no UI to confirm)");
+            }
+        }
+
+        // Show the loop-guard confirm dialog for `deferred`'s site and stash it so a
+        // "Send" answer replays exactly this send. The dialog is rendered by the overlay
+        // (toast-like, visible even when closed).
+        private void ShowLoopConfirm(PendingLoopConfirm deferred)
+        {
+            _confirmPending = true;
+            _pendingConfirm = deferred;
+
+            int kb = _logSource != null ? Math.Max(1, _logSource.ApproxLogBytes / 1024) : 0;
+            string size = kb > 0 ? ("~" + kb + " KB") : "a log";
+            string msg = "FastLogs: this call keeps sending (" + deferred.SiteKey
+                + ") - possible loop. Send " + size + " anyway? (avoid filling the server)";
+            try { _overlay.ShowConfirm(msg); }
+            catch (Exception e) { FlogLog.Exception(e); }
+        }
+
+        // Answer of the loop-guard confirm dialog: true = Send (reset the site counter,
+        // tag the report with the confirmer + site, then replay the stashed send); false =
+        // Cancel (disable the site for the session, resolve any awaited task as declined).
+        private void OnLoopConfirmAnswered(bool send)
+        {
+            if (!_confirmPending)
+            {
+                return;
+            }
+
+            PendingLoopConfirm pending = _pendingConfirm;
+            _confirmPending = false;
+            _pendingConfirm = default;
+
+            string key = pending.SiteKey;
+            if (string.IsNullOrEmpty(key))
+            {
+                return;
+            }
+
+            if (!send)
+            {
+                // Cancel: disable this exact site for the rest of the session.
+                _disabledSites.Add(key);
+                if (pending.Kind == PendingLoopConfirm.SendKind.BeginSend && pending.Task != null)
+                {
+                    pending.Task.SetResult(LoopDeclinedResult(key));
+                }
+                return;
+            }
+
+            // Send: reset the site's counter so it gets a fresh budget, then tag THIS
+            // report with the confirmer (accountability goes to who confirmed, not the
+            // author) and the site, via the existing context mechanism the viewer shows.
+            _siteSendCount[key] = 0;
+            TagLoopConfirmContext(key);
+
+            try
+            {
+                switch (pending.Kind)
+                {
+                    case PendingLoopConfirm.SendKind.QuickSend:
+                        QuickSend();
+                        break;
+                    case PendingLoopConfirm.SendKind.BeginSend:
+                        ForgetPendingCrashOwnership();
+                        ReplayBeginSend(pending);
+                        break;
+                    case PendingLoopConfirm.SendKind.SceneContext:
+                        SendSceneContext(pending.AllowRepeat);
+                        break;
+                }
+            }
+            catch (Exception e)
+            {
+                FlogLog.Exception(e);
+            }
+        }
+
+        // Replay a deferred SendAsync, completing the ORIGINAL task the caller awaits
+        // with the real result rather than fabricating a new one. We start the send via
+        // BeginSend (its own task) and forward that result onto the original.
+        private void ReplayBeginSend(PendingLoopConfirm pending)
+        {
+            FlogTask<UploadResultDto> inner = BeginSend(
+                pending.IncludeScreenshot, pending.Title, pending.Comment, attachQueuedShots: true);
+
+            FlogTask<UploadResultDto> original = pending.Task;
+            if (original == null)
+            {
+                return;
+            }
+            if (inner == null)
+            {
+                original.SetResult(_lastResult);
+                return;
+            }
+
+            // Forward the inner result to the caller's task once it resolves. inner is
+            // completed on the main thread (coroutine), so the continuation is inline.
+            try
+            {
+                var awaiter = inner.GetAwaiter();
+                awaiter.OnCompleted(() =>
+                {
+                    try { original.SetResult(inner.Result); }
+                    catch (Exception e)
+                    {
+                        FlogLog.Exception(e);
+                        original.SetResult(UploadResultDto.Fail("Send faulted: " + e.Message));
+                    }
+                });
+            }
+            catch (Exception e)
+            {
+                FlogLog.Exception(e);
+                original.SetResult(UploadResultDto.Fail("Failed to replay send: " + e.Message));
+            }
+        }
+
+        // Inject the confirmer + site into the context map that rides with the very next
+        // report (reusing FastLogs.SetContext's store, which the viewer renders in its
+        // Context section). loopConfirmedBy = the tester name (or "unknown" if empty).
+        private void TagLoopConfirmContext(string siteKey)
+        {
+            string tester = _config != null ? _config.UI.TesterName : null;
+            string confirmedBy = string.IsNullOrEmpty(tester) ? "unknown" : tester;
+            SetContext("loopConfirmedBy", confirmedBy);
+            SetContext("loopSite", siteKey);
+        }
+
+        // A non-success result returned/resolved when a code send is declined by the loop
+        // guard (Cancel) or dropped for lack of UI. Not retryable - it is a deliberate
+        // local decision, not a transient failure.
+        private static UploadResultDto LoopDeclinedResult(string siteKey)
+        {
+            string where = string.IsNullOrEmpty(siteKey) ? string.Empty : (" from " + siteKey);
+            return UploadResultDto.Fail("FastLogs: send declined by loop guard" + where + ".");
+        }
+
+        // Captures a deferred code send so a "Send" confirm answer can replay it exactly.
+        private struct PendingLoopConfirm
+        {
+            public enum SendKind { QuickSend, BeginSend, SceneContext }
+
+            public SendKind Kind;
+            public string SiteKey;
+
+            // BeginSend (SendAsync) params + the caller's awaited task to resolve.
+            public bool IncludeScreenshot;
+            public string Title;
+            public string Comment;
+            public FlogTask<UploadResultDto> Task;
+
+            // SceneContext param.
+            public bool AllowRepeat;
+
+            public static PendingLoopConfirm QuickSend(CallSite site)
+            {
+                return new PendingLoopConfirm { Kind = SendKind.QuickSend, SiteKey = site.Key };
+            }
+
+            public static PendingLoopConfirm BeginSend(CallSite site, bool includeScreenshot, string title, string comment, FlogTask<UploadResultDto> task)
+            {
+                return new PendingLoopConfirm
+                {
+                    Kind = SendKind.BeginSend,
+                    SiteKey = site.Key,
+                    IncludeScreenshot = includeScreenshot,
+                    Title = title,
+                    Comment = comment,
+                    Task = task
+                };
+            }
+
+            public static PendingLoopConfirm SceneContext(CallSite site, bool allowRepeat)
+            {
+                return new PendingLoopConfirm { Kind = SendKind.SceneContext, SiteKey = site.Key, AllowRepeat = allowRepeat };
+            }
         }
 
         // Builds the quick-send gesture from the bundled triggers. A composite of a
@@ -866,6 +1240,462 @@ namespace PlayJoy.FastLogs
             _queuedShots.Clear();
         }
 
+        // ---- Scene context + correlation code ----
+
+        public void SetCorrelationCode(string code)
+        {
+            _correlationCode = string.IsNullOrEmpty(code) ? null : code.Trim();
+        }
+
+        /// <summary>Capture the scene hierarchy now and queue it for the next send.</summary>
+        public void CaptureSceneContext(bool allowRepeat)
+        {
+            // Loop guard: if a snapshot is already queued, don't recapture unless asked.
+            if (!allowRepeat && !string.IsNullOrEmpty(_queuedSceneContext))
+            {
+                return;
+            }
+            CaptureSceneContextNow();
+        }
+
+        /// <summary>Capture the scene context and send a report immediately (capture + Send).</summary>
+        public void SendSceneContext(bool allowRepeat)
+        {
+            // Loop guard: send once per session unless allowRepeat is passed.
+            if (!allowRepeat && _sceneContextSentOnce)
+            {
+                ShowToast(ToastKind.Info, "FastLogs: scene context already sent (allowRepeat to resend)", null, 3f, false);
+                return;
+            }
+            CaptureSceneContextNow();
+            _sceneContextSentOnce = true;
+            ForgetPendingCrashOwnership();
+            BeginSend(false, null, null, attachQueuedShots: true);
+        }
+
+        private void CaptureSceneContextNow()
+        {
+            try
+            {
+                _queuedSceneContext = SceneContextCapturer.Capture(_config != null ? _config.SceneContext : null);
+            }
+            catch (Exception e) { FlogLog.Exception(e); }
+        }
+
+        /// <summary>Drop the queued scene context without sending it.</summary>
+        public void ClearSceneContext()
+        {
+            _queuedSceneContext = null;
+        }
+
+        // ============================================================
+        // File / folder upload (feature: SendFile / SendFolder / SendFiles)
+        // ============================================================
+        // A separate endpoint (POST /api/files) from the log report send, so these run
+        // independently of _isBusy / the retry loop and have their own toasts. The blob
+        // is NEVER PII-scrubbed (explicit invariant) - only the decoded-size cap applies.
+        // Path-based entries read the file system, which is unavailable on WebGL; there
+        // they fail with a clear message (game code should use the byte[] overload).
+
+        /// <summary>
+        /// Upload a single file by path. Reads the bytes, then uploads them. On WebGL the
+        /// file system is unavailable, so this fails cleanly (use the byte[] overload).
+        /// </summary>
+        public FlogTask<FileUploadResultDto> BeginSendFilePath(string path, string title)
+        {
+#if UNITY_WEBGL && !UNITY_EDITOR
+            return FlogTask.FromResult(FileUploadResultDto.Fail(
+                "File path access unavailable on WebGL; use the byte[] overload (SendFileAsync(byte[], fileName, ...))."));
+#else
+            if (string.IsNullOrEmpty(path))
+            {
+                return FlogTask.FromResult(FileUploadResultDto.Fail("SendFile: empty path."));
+            }
+
+            byte[] bytes;
+            string fileName;
+            try
+            {
+                if (!System.IO.File.Exists(path))
+                {
+                    return FlogTask.FromResult(FileUploadResultDto.Fail("SendFile: file does not exist: " + path));
+                }
+                bytes = System.IO.File.ReadAllBytes(path);
+                fileName = System.IO.Path.GetFileName(path);
+            }
+            catch (Exception e)
+            {
+                FlogLog.Exception(e);
+                return FlogTask.FromResult(FileUploadResultDto.Fail("SendFile: failed to read file: " + e.Message));
+            }
+
+            return BeginSendBytes(bytes, fileName, GuessMime(fileName), title, "file", null, null);
+#endif
+        }
+
+        /// <summary>Upload a file from in-memory bytes. Works on every platform (incl. WebGL).</summary>
+        public FlogTask<FileUploadResultDto> BeginSendFileBytes(byte[] bytes, string fileName, string title)
+        {
+            if (bytes == null)
+            {
+                return FlogTask.FromResult(FileUploadResultDto.Fail("SendFile: null bytes."));
+            }
+            string name = string.IsNullOrEmpty(fileName) ? "file.bin" : fileName;
+            return BeginSendBytes(bytes, name, GuessMime(name), title, "file", null, null);
+        }
+
+        /// <summary>
+        /// Zip a folder on the client and upload the single archive. WebGL has no file
+        /// system, so this fails cleanly.
+        /// </summary>
+        public FlogTask<FileUploadResultDto> BeginSendFolder(string path, string title)
+        {
+#if UNITY_WEBGL && !UNITY_EDITOR
+            return FlogTask.FromResult(FileUploadResultDto.Fail(
+                "File path access unavailable on WebGL; use the byte[] overload (SendFileAsync(byte[], fileName, ...))."));
+#else
+            if (string.IsNullOrEmpty(path))
+            {
+                return FlogTask.FromResult(FileUploadResultDto.Fail("SendFolder: empty path."));
+            }
+
+            byte[] zip;
+            try
+            {
+                zip = FolderZipUtil.ZipFolder(path);
+            }
+            catch (Exception e)
+            {
+                FlogLog.Exception(e);
+                return FlogTask.FromResult(FileUploadResultDto.Fail("SendFolder: zipping failed: " + e.Message));
+            }
+            if (zip == null)
+            {
+                return FlogTask.FromResult(FileUploadResultDto.Fail("SendFolder: nothing to send (missing/empty folder or zip failed)."));
+            }
+
+            string name = FolderArchiveName(path);
+            return BeginSendBytes(zip, name, "application/zip", title, "folder", null, null);
+#endif
+        }
+
+        /// <summary>Zip several files on the client and upload the single archive. WebGL fails cleanly.</summary>
+        public FlogTask<FileUploadResultDto> BeginSendFiles(IReadOnlyList<string> paths, string title)
+        {
+#if UNITY_WEBGL && !UNITY_EDITOR
+            return FlogTask.FromResult(FileUploadResultDto.Fail(
+                "File path access unavailable on WebGL; use the byte[] overload (SendFileAsync(byte[], fileName, ...))."));
+#else
+            if (paths == null || paths.Count == 0)
+            {
+                return FlogTask.FromResult(FileUploadResultDto.Fail("SendFiles: no paths."));
+            }
+
+            byte[] zip;
+            try
+            {
+                zip = FolderZipUtil.ZipFiles(paths);
+            }
+            catch (Exception e)
+            {
+                FlogLog.Exception(e);
+                return FlogTask.FromResult(FileUploadResultDto.Fail("SendFiles: zipping failed: " + e.Message));
+            }
+            if (zip == null)
+            {
+                return FlogTask.FromResult(FileUploadResultDto.Fail("SendFiles: nothing to send (no readable files or zip failed)."));
+            }
+
+            return BeginSendBytes(zip, "files.zip", "application/zip", title, "folder", null, null);
+#endif
+        }
+
+        /// <summary>
+        /// Queue a file/folder path to be uploaded as an attachment of the NEXT successful
+        /// report send (linked by logId). Capped (oldest dropped). A folder is zipped at
+        /// upload time. No-op on WebGL (no file system) and for empty paths.
+        /// </summary>
+        public void AttachFile(string path)
+        {
+            if (string.IsNullOrEmpty(path))
+            {
+                return;
+            }
+#if UNITY_WEBGL && !UNITY_EDITOR
+            FlogLog.Warn("AttachFile is unavailable on WebGL (no file system); ignored.");
+            return;
+#else
+            if (_queuedAttachments.Count >= MaxQueuedAttachments)
+            {
+                _queuedAttachments.RemoveAt(0);
+            }
+            _queuedAttachments.Add(path);
+#endif
+        }
+
+        /// <summary>Drop all queued attachments without sending them.</summary>
+        public void ClearAttachments()
+        {
+            _queuedAttachments.Clear();
+        }
+
+        // Core file-upload entry: validates the uploader, the decoded-size cap (AFTER any
+        // zip, so it bounds the actual payload) and starts the upload coroutine. Never
+        // throws; the returned task always resolves.
+        private FlogTask<FileUploadResultDto> BeginSendBytes(byte[] bytes, string fileName, string mime, string title, string kind, string logId, string groupId)
+        {
+            var task = FlogTask.Create<FileUploadResultDto>();
+
+            if (_fileUploader == null)
+            {
+                ShowToast(ToastKind.Error, "FastLogs: no file uploader configured", null, 4f, false);
+                task.SetResult(FileUploadResultDto.Fail("No file uploader is configured."));
+                return task;
+            }
+
+            // Decoded-size cap, enforced on the client (the server caps too). Checked here,
+            // after any folder zip, so it bounds the real bytes about to be base64'd/sent.
+            int cap = _config != null && _config.Files != null ? _config.Files.MaxFileBytes : (25 * 1024 * 1024);
+            if (cap > 0 && bytes != null && bytes.Length > cap)
+            {
+                string msg = "FastLogs: file too large (" + (bytes.Length / 1024) + " KB > "
+                    + (cap / 1024) + " KB cap)";
+                ShowToast(ToastKind.Error, msg, null, 5f, false);
+                task.SetResult(FileUploadResultDto.Fail(msg, 413));
+                return task;
+            }
+
+            var req = new FileUploadRequest
+            {
+                Bytes = bytes,
+                FileName = string.IsNullOrEmpty(fileName) ? "file.bin" : fileName,
+                Mime = mime,
+                Title = string.IsNullOrEmpty(title) ? null : Truncate(title, 120),
+                Kind = kind,
+                LogId = logId,
+                GroupId = groupId
+            };
+
+            ShowToast(ToastKind.Progress, "FastLogs: uploading " + req.FileName + "...", null, 0f, false);
+
+            try
+            {
+                StartCoroutine(SendFileRoutine(req, task));
+            }
+            catch (Exception e)
+            {
+                FlogLog.Exception(e);
+                var fail = FileUploadResultDto.Fail("Failed to start file upload: " + e.Message);
+                ShowToast(ToastKind.Error, "FastLogs: " + fail.Error, null, 0f, false);
+                task.SetResult(fail);
+            }
+
+            return task;
+        }
+
+        private IEnumerator SendFileRoutine(FileUploadRequest req, FlogTask<FileUploadResultDto> task)
+        {
+            FlogTask<FileUploadResultDto> uploadTask = null;
+            try { uploadTask = _fileUploader.UploadFileAsync(req, _config); }
+            catch (Exception e)
+            {
+                FlogLog.Exception(e);
+                CompleteFile(task, FileUploadResultDto.Fail("File upload threw: " + e.Message));
+                yield break;
+            }
+
+            if (uploadTask == null)
+            {
+                CompleteFile(task, FileUploadResultDto.Fail("File uploader returned no task."));
+                yield break;
+            }
+
+            while (!uploadTask.IsCompleted)
+            {
+                yield return null;
+            }
+
+            FileUploadResultDto result = uploadTask.IsFaulted
+                ? FileUploadResultDto.Fail("File upload faulted: " + (uploadTask.Exception != null ? uploadTask.Exception.Message : "unknown"))
+                : uploadTask.Result;
+
+            CompleteFile(task, result);
+        }
+
+        private void CompleteFile(FlogTask<FileUploadResultDto> task, FileUploadResultDto result)
+        {
+            if (result.Success)
+            {
+                // Best-effort copy of the download/viewer link, mirroring the log send.
+                TryCopyFileLinkOnSend(result);
+
+                bool copied = _config != null && _config.UI.CopyLinkOnSend && !string.IsNullOrEmpty(result.Url);
+                ShowToast(ToastKind.Success, "FastLogs: file sent" + (copied ? " (link copied)" : ""), result.Url, 6f, false);
+            }
+            else
+            {
+                ShowToast(ToastKind.Error, "FastLogs file error: " + result.Error, null, 0f, false);
+            }
+
+            task.SetResult(result);
+        }
+
+        private void TryCopyFileLinkOnSend(FileUploadResultDto result)
+        {
+            if (_clipboard == null)
+            {
+                return;
+            }
+            if (_config == null || !_config.UI.CopyLinkOnSend)
+            {
+                return;
+            }
+            if (!result.Success || string.IsNullOrEmpty(result.Url))
+            {
+                return;
+            }
+            try { _clipboard.CopyToClipboard(result.Url); }
+            catch (Exception e) { FlogLog.Exception(e); }
+        }
+
+        // Upload all queued attachments (AttachFile) as attachments of the just-sent report
+        // (logId). Files are read/zipped and sent one at a time via the file uploader, then
+        // the queue is cleared. Best-effort: a failed attachment is logged and skipped.
+        private void UploadQueuedAttachments(string logId)
+        {
+            if (_fileUploader == null || _queuedAttachments.Count == 0 || string.IsNullOrEmpty(logId))
+            {
+                return;
+            }
+            // Snapshot + clear up front so a re-entrant send does not double-upload.
+            var paths = new List<string>(_queuedAttachments);
+            _queuedAttachments.Clear();
+            try { StartCoroutine(UploadAttachmentsRoutine(paths, logId)); }
+            catch (Exception e) { FlogLog.Exception(e); }
+        }
+
+        private IEnumerator UploadAttachmentsRoutine(List<string> paths, string logId)
+        {
+            for (int i = 0; i < paths.Count; i++)
+            {
+                string path = paths[i];
+                if (string.IsNullOrEmpty(path))
+                {
+                    continue;
+                }
+
+                byte[] bytes = null;
+                string fileName = null;
+                string mime = null;
+                try
+                {
+                    if (System.IO.Directory.Exists(path))
+                    {
+                        bytes = FolderZipUtil.ZipFolder(path);
+                        fileName = FolderArchiveName(path);
+                        mime = "application/zip";
+                    }
+                    else if (System.IO.File.Exists(path))
+                    {
+                        bytes = System.IO.File.ReadAllBytes(path);
+                        fileName = System.IO.Path.GetFileName(path);
+                        mime = GuessMime(fileName);
+                    }
+                    else
+                    {
+                        FlogLog.Warn("AttachFile: path no longer exists, skipped: " + path);
+                    }
+                }
+                catch (Exception e) { FlogLog.Exception(e); }
+
+                if (bytes == null)
+                {
+                    continue;
+                }
+
+                // Same decoded-size cap as a direct send.
+                int cap = _config != null && _config.Files != null ? _config.Files.MaxFileBytes : (25 * 1024 * 1024);
+                if (cap > 0 && bytes.Length > cap)
+                {
+                    FlogLog.Warn("AttachFile: " + fileName + " exceeds the size cap, skipped.");
+                    continue;
+                }
+
+                // "other" is a server-valid kind (VALID_KINDS); the attachment is linked to
+                // the report via LogId, which is what the viewer renders it under.
+                var req = new FileUploadRequest
+                {
+                    Bytes = bytes,
+                    FileName = string.IsNullOrEmpty(fileName) ? "attachment.bin" : fileName,
+                    Mime = mime,
+                    Kind = "other",
+                    LogId = logId
+                };
+
+                FlogTask<FileUploadResultDto> upload = null;
+                try { upload = _fileUploader.UploadFileAsync(req, _config); }
+                catch (Exception e) { FlogLog.Exception(e); }
+
+                if (upload == null)
+                {
+                    continue;
+                }
+                while (!upload.IsCompleted)
+                {
+                    yield return null;
+                }
+                if (upload.IsFaulted || !upload.Result.Success)
+                {
+                    FlogLog.Warn("AttachFile: upload of " + req.FileName + " failed.");
+                }
+            }
+        }
+
+        // Archive name for a folder upload: "<folderName>.zip" (or "folder.zip" as a fallback).
+        private static string FolderArchiveName(string folderPath)
+        {
+            try
+            {
+                string trimmed = folderPath.TrimEnd('/', '\\');
+                string leaf = System.IO.Path.GetFileName(trimmed);
+                return string.IsNullOrEmpty(leaf) ? "folder.zip" : (leaf + ".zip");
+            }
+            catch
+            {
+                return "folder.zip";
+            }
+        }
+
+        // Cheap MIME guess from a file extension; defaults to octet-stream. Not exhaustive
+        // by design (the server stores the blob opaquely) - just enough for common cases.
+        private static string GuessMime(string fileName)
+        {
+            if (string.IsNullOrEmpty(fileName))
+            {
+                return "application/octet-stream";
+            }
+            string ext;
+            try { ext = System.IO.Path.GetExtension(fileName); }
+            catch { ext = null; }
+            if (string.IsNullOrEmpty(ext))
+            {
+                return "application/octet-stream";
+            }
+            switch (ext.ToLowerInvariant())
+            {
+                case ".txt": case ".log": return "text/plain";
+                case ".json": return "application/json";
+                case ".xml": return "application/xml";
+                case ".csv": return "text/csv";
+                case ".png": return "image/png";
+                case ".jpg": case ".jpeg": return "image/jpeg";
+                case ".zip": return "application/zip";
+                case ".gz": return "application/gzip";
+                case ".pdf": return "application/pdf";
+                default: return "application/octet-stream";
+            }
+        }
+
         // ---- Send pipeline ----
 
         private void OnOverlaySendRequested(bool includeScreenshot, string title, string comment)
@@ -874,6 +1704,13 @@ namespace PlayJoy.FastLogs
             // pending crash file so its success cannot delete a leftover crash report.
             ForgetPendingCrashOwnership();
             BeginSend(includeScreenshot, title, comment, attachQueuedShots: true);
+        }
+
+        private void OnOverlaySceneContextRequested()
+        {
+            // Overlay armed scene-context capture: queue a snapshot now (allowRepeat so the
+            // toggle always refreshes it); it rides with the send the overlay raises next.
+            CaptureSceneContext(true);
         }
 
         /// <summary>
@@ -975,11 +1812,16 @@ namespace PlayJoy.FastLogs
                 if (!string.IsNullOrEmpty(screenshotBase64)) shots.Add(screenshotBase64);
             }
 
+            // Scene context (queued via CaptureSceneContext) rides along on a send that
+            // attaches the queue, mirroring the screenshot queue.
+            string sceneCtx = (attachQueuedShots && !string.IsNullOrEmpty(_queuedSceneContext)) ? _queuedSceneContext : null;
+            _lastSendHadSceneContext = sceneCtx != null;
+
             // 3) Build the report off the current diagnostics + log text.
             LogReportDto report = null;
             try
             {
-                report = BuildReport(title, comment, shots);
+                report = BuildReport(title, comment, shots, sceneCtx);
             }
             catch (Exception e)
             {
@@ -1041,8 +1883,17 @@ namespace PlayJoy.FastLogs
             if (result.Success)
             {
                 // The queued screenshots rode with this send (if it attached them); they
-                // are now delivered, so drop them.
+                // are now delivered, so drop them. Same for the queued scene context.
                 if (_lastSendAttachQueued) _queuedShots.Clear();
+                if (_lastSendHadSceneContext) _queuedSceneContext = null;
+
+                // Files queued via AttachFile() are uploaded now to /api/files as
+                // attachments of this report (logId = result.Id), then the queue clears.
+                // Best-effort and out-of-band: it does not affect this send's result.
+                if (!string.IsNullOrEmpty(result.Id))
+                {
+                    UploadQueuedAttachments(result.Id);
+                }
 
                 // FEATURE #1: this send succeeded, so drop its persisted crash file (if
                 // this send owned one) and release ownership.
@@ -1060,7 +1911,8 @@ namespace PlayJoy.FastLogs
 
                 bool copied = _config != null && _config.UI.CopyLinkOnSend
                               && !string.IsNullOrEmpty(result.Url);
-                string msg = copied ? "FastLogs: done (link copied)" : "FastLogs: done";
+                string what = _lastSendHadSceneContext ? "logs + context" : "logs";
+                string msg = "FastLogs: " + what + " sent" + (copied ? " (link copied)" : "");
                 ShowToast(ToastKind.Success, msg, result.Url, 6f, false);
 
                 // "AT THE FIRST OPPORTUNITY": now that a send completed and the client is
@@ -1088,9 +1940,10 @@ namespace PlayJoy.FastLogs
                 // deleting a now-stale file and prevents the drain from double-owning it.
                 _pendingCrashFilePath = null;
 
-                // Terminal failure consumes the queued screenshots too (this send is
-                // done; keep them only across transient retries, handled above).
+                // Terminal failure consumes the queued screenshots + scene context too
+                // (this send is done; kept only across transient retries, handled above).
                 if (_lastSendAttachQueued) _queuedShots.Clear();
+                if (_lastSendHadSceneContext) _queuedSceneContext = null;
 
                 ShowToast(ToastKind.Error, "FastLogs error: " + result.Error, null, 0f, true);
 
@@ -1274,7 +2127,7 @@ namespace PlayJoy.FastLogs
 
         // ---- Report assembly ----
 
-        private LogReportDto BuildReport(string title, string comment, List<string> screenshots)
+        private LogReportDto BuildReport(string title, string comment, List<string> screenshots, string sceneContext = null)
         {
             bool includeSensitive = _config != null && _config.Diagnostics.IncludeSensitive;
             bool scrubPii = _config == null || _config.Diagnostics.ScrubPii; // default ON
@@ -1336,7 +2189,9 @@ namespace PlayJoy.FastLogs
                 Comment = string.IsNullOrEmpty(comment) ? null : Truncate(comment, 4000),
                 Tester = string.IsNullOrEmpty(tester) ? null : Truncate(tester, 120),
                 Context = context,
-                Breadcrumbs = breadcrumbs
+                Breadcrumbs = breadcrumbs,
+                SceneContextJson = string.IsNullOrEmpty(sceneContext) ? null : sceneContext,
+                CorrelationCode = string.IsNullOrEmpty(_correlationCode) ? null : Truncate(_correlationCode, 64)
             };
 
             return report;

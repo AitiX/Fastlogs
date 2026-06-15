@@ -31,17 +31,26 @@ namespace PlayJoy.FastLogs
         [Header("Screenshot")]
         [SerializeField] private ScreenshotSection _screenshot = new ScreenshotSection();
 
+        [Header("Scene Context")]
+        [SerializeField] private SceneContextSection _sceneContext = new SceneContextSection();
+
         [Header("Diagnostics")]
         [SerializeField] private DiagnosticsSection _diagnostics = new DiagnosticsSection();
 
         [Header("Trigger")]
         [SerializeField] private TriggerConfig _trigger = new TriggerConfig();
 
+        [Header("Files")]
+        [SerializeField] private FilesSection _files = new FilesSection();
+
         [Header("Net")]
         [SerializeField] private NetSection _net = new NetSection();
 
         [Header("Retry")]
         [SerializeField] private RetrySection _retry = new RetrySection();
+
+        [Header("Loop Guard")]
+        [SerializeField] private LoopGuardSection _loopGuard = new LoopGuardSection();
 
         [Header("UI")]
         [SerializeField] private UiSection _ui = new UiSection();
@@ -55,10 +64,13 @@ namespace PlayJoy.FastLogs
         public RecordingSection Recording => _recording;
         public AutoSendSection AutoSend => _autoSend;
         public ScreenshotSection Screenshot => _screenshot;
+        public SceneContextSection SceneContext => _sceneContext;
         public DiagnosticsSection Diagnostics => _diagnostics;
         public TriggerConfig Trigger => _trigger;
+        public FilesSection Files => _files;
         public NetSection Net => _net;
         public RetrySection Retry => _retry;
+        public LoopGuardSection LoopGuard => _loopGuard;
         public UiSection UI => _ui;
         public EnableSection Enable => _enable;
 
@@ -156,6 +168,38 @@ namespace PlayJoy.FastLogs
         }
 
         [Serializable]
+        public sealed class SceneContextSection
+        {
+            [Tooltip("Max GameObjects captured across all scenes. Capture stops (marked truncated) beyond this.")]
+            [Min(1)]
+            public int MaxObjects = 5000;
+
+            [Tooltip("Max hierarchy depth to recurse into (a root object is depth 0).")]
+            [Min(1)]
+            public int MaxDepth = 12;
+
+            [Tooltip("Max components dumped per GameObject.")]
+            [Min(1)]
+            public int MaxComponentsPerObject = 40;
+
+            [Tooltip("Max fields dumped per component.")]
+            [Min(1)]
+            public int MaxFieldsPerComponent = 60;
+
+            [Tooltip("Max length of a single formatted field value; longer values are truncated.")]
+            [Min(16)]
+            public int MaxStringLength = 200;
+
+            [Tooltip("Max elements listed for a collection field; longer collections show count + first N.")]
+            [Min(0)]
+            public int MaxCollectionElements = 20;
+
+            [Tooltip("Hard cap on the serialized scene-context JSON in bytes. Capture stops (marked truncated) beyond this.")]
+            [Min(1024)]
+            public int MaxBytes = 1024 * 1024; // 1 MB
+        }
+
+        [Serializable]
         public sealed class DiagnosticsSection
         {
             [Tooltip("Include potentially identifying fields (device name, urls, identifiers). Off by default (privacy-by-default).")]
@@ -163,6 +207,49 @@ namespace PlayJoy.FastLogs
 
             [Tooltip("Scrub PII (emails, IPs, bearer tokens, long digit runs) from the log text, context values and breadcrumb messages before upload. ON by default (privacy-by-default). Patterns are extensible via PiiScrubber.AddPattern.")]
             public bool ScrubPii = true;
+        }
+
+        [Serializable]
+        public sealed class FilesSection
+        {
+            [Tooltip("Hard cap on the DECODED (pre-base64) size in bytes of a single file/folder upload. Checked on the client AFTER a folder is zipped, before sending; the server enforces its own MAX_FILE_BYTES too. Default 25 MB.")]
+            [Min(1)]
+            public int MaxFileBytes = 25 * 1024 * 1024; // 25 MB
+
+            [Tooltip("Full files endpoint URL (POST /api/files). Empty by default - derived at runtime from Server.EndpointUrl by replacing '/api/logs' with '/api/files'. Set explicitly only to override that derivation.")]
+            public string FilesEndpointUrl = string.Empty;
+
+            [Tooltip("Request timeout in seconds for file uploads (larger than the log timeout: blobs are bigger).")]
+            [Min(1)]
+            public int TimeoutSeconds = 60;
+
+            /// <summary>
+            /// The effective files endpoint: <see cref="FilesEndpointUrl"/> when set,
+            /// otherwise derived from the given log-ingest endpoint by replacing the
+            /// '/api/logs' segment with '/api/files'. Returns null when neither is usable.
+            /// </summary>
+            public string ResolvedEndpoint(string serverEndpointUrl)
+            {
+                if (!string.IsNullOrEmpty(FilesEndpointUrl))
+                {
+                    return FilesEndpointUrl;
+                }
+                if (string.IsNullOrEmpty(serverEndpointUrl))
+                {
+                    return null;
+                }
+                // Derive from the log endpoint: .../api/logs -> .../api/files. If the log
+                // endpoint does not contain that segment, append /api/files to the origin
+                // is risky (unknown path), so fall back to a plain suffix swap only when
+                // the marker is present; otherwise return null so the caller fails clearly.
+                int idx = serverEndpointUrl.LastIndexOf("/api/logs", StringComparison.OrdinalIgnoreCase);
+                if (idx < 0)
+                {
+                    return null;
+                }
+                return serverEndpointUrl.Substring(0, idx) + "/api/files"
+                    + serverEndpointUrl.Substring(idx + "/api/logs".Length);
+            }
         }
 
         [Serializable]
@@ -190,6 +277,21 @@ namespace PlayJoy.FastLogs
             [Tooltip("Maximum number of outer retry attempts after the first failure. 0 = unlimited (keep retrying as long as the app is alive). Only one pending retry exists at a time; pressing Send again replaces it.")]
             [Min(0)]
             public int MaxRetryAttempts = 0;
+        }
+
+        [Serializable]
+        public sealed class LoopGuardSection
+        {
+            [Tooltip("Catch a single CODE call site (FastLogs.Send/SendAsync/SendSceneContext) that keeps sending and ask the user to confirm before it floods the server. Does not apply to the manual overlay Send or auto-crash sends (those have their own gating). When off, the guard is a no-op (always send).")]
+            public bool Enabled = true;
+
+            [Tooltip("Cumulative code-sends allowed per call site per session before that site is considered a possible loop. The next send over this count triggers the confirm dialog (UI available) or is dropped (no UI).")]
+            [Min(1)]
+            public int MaxCodeSendsPerSite = 10;
+
+            [Tooltip("With no UI to confirm, over-threshold sends are dropped silently; every Nth drop from a site logs one warning so the loop is visible without flooding. Set per how chatty you want the warning.")]
+            [Min(1)]
+            public int NoUiWarnEvery = 10;
         }
 
         [Serializable]

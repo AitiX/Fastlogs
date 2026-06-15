@@ -134,14 +134,61 @@ function logExistsSync(id) {
   return fs.existsSync(logPath(id));
 }
 
+// --- Standalone file uploads (POST /api/files) -----------------------------
+//
+// A standalone file is stored verbatim (NO gzip) as "<shard>/<id>.bin". The
+// content is opaque (any file type, or a client-built .zip), so we never
+// transform it: the bytes on disk are exactly what was uploaded. The .bin
+// extension keeps it distinct from log/screenshot blobs in the same shard.
+
+// Absolute path to the stored blob for a standalone file id.
+function filePath(id) {
+  return path.join(shardDir(id), `${id}.bin`);
+}
+
+// Store a standalone file blob verbatim. `buf` is a Buffer of the raw bytes.
+// Returns the number of bytes written.
+async function saveFile(id, buf) {
+  await ensureShard(id);
+  const data = Buffer.isBuffer(buf) ? buf : Buffer.from(buf);
+  await fsp.writeFile(filePath(id), data);
+  return data.length;
+}
+
+// Read a standalone file blob as a Buffer, or null if missing.
+async function readFile(id) {
+  try {
+    return await fsp.readFile(filePath(id));
+  } catch (err) {
+    if (err.code === 'ENOENT') return null;
+    throw err;
+  }
+}
+
+// Remove a standalone file blob. Missing file is ignored (idempotent). Returns
+// the count removed (0 or 1).
+async function removeFileBlob(id) {
+  try {
+    await fsp.unlink(filePath(id));
+    return 1;
+  } catch (err) {
+    if (err.code === 'ENOENT') return 0;
+    throw err;
+  }
+}
+
 module.exports = {
   saveLogGz,
   readLogGz,
   saveShot,
   readShot,
   removeBlobs,
+  saveFile,
+  readFile,
+  removeFileBlob,
   logPath,
   shotPath,
+  filePath,
   shardDir,
   shardOf,
   logExistsSync,

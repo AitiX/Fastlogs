@@ -68,6 +68,19 @@ function resolveDir(p) {
 const redmineUrl = envStr('REDMINE_URL', '').replace(/\/+$/, '');
 const redmineApiKey = envStr('REDMINE_API_KEY', '');
 
+// Standalone file uploads (POST /api/files). The cap is on the DECODED size of
+// the uploaded blob. The request body carries it as base64 inside a JSON
+// envelope, so the raw body is ~4/3 larger plus the JSON field overhead; the
+// body-read limit below is derived from maxFileBytes with generous headroom so
+// /api/files does NOT reuse the smaller maxPayloadBytes (8 MB) ceiling.
+const maxFileBytes = envInt('MAX_FILE_BYTES', 25 * 1024 * 1024);
+// base64 inflates by 4/3; +64 KB covers the JSON keys/metadata. Overridable via
+// MAX_FILE_BODY_BYTES for deployments that need a different envelope budget.
+const maxFileBodyBytes = envInt(
+  'MAX_FILE_BODY_BYTES',
+  Math.ceil(maxFileBytes * 4 / 3) + 64 * 1024,
+);
+
 const config = Object.freeze({
   // Server.
   port: envInt('PORT', 8787),
@@ -95,6 +108,16 @@ const config = Object.freeze({
   maxPayloadBytes: envInt('MAX_PAYLOAD_BYTES', 8 * 1024 * 1024),
   maxScreenshotBytes: envInt('MAX_SCREENSHOT_BYTES', 2 * 1024 * 1024),
   maxLogBytes: envInt('MAX_LOG_BYTES', 20 * 1024 * 1024),
+
+  // Standalone file uploads. maxFileBytes caps the DECODED blob; maxFileBodyBytes
+  // is the larger request-body read limit for POST /api/files (NOT the 8 MB
+  // maxPayloadBytes), sized for the base64 + JSON envelope around the blob.
+  maxFileBytes,
+  maxFileBodyBytes,
+
+  // Max size (bytes, UTF-8) of the optional `sceneContext` JSON string. Stored
+  // verbatim; a larger string is dropped at ingest (the report is not failed).
+  maxSceneContextBytes: envInt('MAX_SCENE_CONTEXT_BYTES', 1024 * 1024),
 
   // Max screenshots accepted per report (the rest are dropped). A log can carry
   // several shots (the client can capture more than one before sending).

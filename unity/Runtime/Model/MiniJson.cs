@@ -88,6 +88,50 @@ namespace PlayJoy.FastLogs
                 w.MarkWritten();
             }
 
+            // Optional scene context (a JSON string, sent escaped; the server stores it
+            // opaquely and the viewer parses it) + correlation/await code - omitted when empty.
+            w.Field("sceneContext", report.SceneContextJson);
+            w.Field("correlationCode", report.CorrelationCode);
+
+            w.EndObject();
+            return sb.ToString();
+        }
+
+        /// <summary>
+        /// Serialize a POST /api/files request body. Required: appId, platform, appVersion,
+        /// name, fileBase64. Optional fields (mime, kind, logId, groupId, title, tester,
+        /// retentionDays) are omitted when empty/null. The blob is passed already base64'd
+        /// in <paramref name="fileBase64"/> (and is NOT PII-scrubbed - explicit invariant).
+        /// </summary>
+        public static string SerializeFileUpload(
+            string appId, string platform, string appVersion,
+            string name, string mime, string fileBase64,
+            string kind, string logId, string groupId,
+            string title, string tester, int? retentionDays)
+        {
+            // Pre-size for the base64 blob (the dominant term) + a little headroom.
+            var sb = new StringBuilder((fileBase64 != null ? fileBase64.Length : 0) + 256);
+            var w = new Writer(sb);
+
+            w.BeginObject();
+
+            // Required fields (always written; caller guarantees them).
+            w.Raw("appId", appId);
+            w.Raw("platform", platform);
+            w.Raw("appVersion", appVersion);
+            w.Raw("name", name);
+            // Already-base64 blob: append raw (no escape scan / no UTF-8 re-copy of ~34 MB).
+            w.Base64Field("fileBase64", fileBase64 ?? string.Empty, forceWrite: true);
+
+            // Optional fields - omitted when empty/null.
+            w.Field("mime", mime);
+            w.Field("kind", kind);
+            w.Field("logId", logId);
+            w.Field("groupId", groupId);
+            w.Field("title", title);
+            w.Field("tester", tester);
+            w.Field("retentionDays", retentionDays);
+
             w.EndObject();
             return sb.ToString();
         }
@@ -431,6 +475,22 @@ namespace PlayJoy.FastLogs
                 AppendString(_sb, value ?? string.Empty);
             }
 
+            // Write a string field whose value is already a JSON-safe token (no chars
+            // that need escaping), wrapping it in quotes directly. Used for the base64
+            // blob: the base64 alphabet ([A-Za-z0-9+/=], plus URL-safe -/_) contains no
+            // characters that JSON must escape, so we skip the per-char escape scan and
+            // the extra UTF-8 copy - critical for blobs near the 25 MB cap (~34 MB of
+            // base64 chars). forceWrite emits even when empty (it is a required field).
+            public void Base64Field(string key, string value, bool forceWrite = true)
+            {
+                if (!forceWrite && string.IsNullOrEmpty(value)) return;
+                Sep();
+                AppendKey(_sb, key);
+                _sb.Append('"');
+                if (!string.IsNullOrEmpty(value)) _sb.Append(value);
+                _sb.Append('"');
+            }
+
             // Optional string - omitted when empty.
             public void Field(string key, string value)
             {
@@ -591,6 +651,30 @@ namespace PlayJoy.FastLogs
             id = GetString(obj, "id");
             url = GetString(obj, "url");
             rawUrl = GetString(obj, "rawUrl");
+            expiresAt = GetString(obj, "expiresAt");
+            error = GetString(obj, "error");
+            message = GetString(obj, "message");
+            return true;
+        }
+
+        /// <summary>
+        /// Parse the POST /api/files response and extract the files contract fields
+        /// ({id, url, downloadUrl, expiresAt}, plus error/message on failure). Returns true
+        /// on a structurally valid object response.
+        /// </summary>
+        public static bool TryParseFileUploadResponse(string json, out string id, out string url, out string downloadUrl, out string expiresAt, out string error, out string message)
+        {
+            id = url = downloadUrl = expiresAt = error = message = null;
+
+            object parsed = Parse(json);
+            if (!(parsed is Dictionary<string, object> obj))
+            {
+                return false;
+            }
+
+            id = GetString(obj, "id");
+            url = GetString(obj, "url");
+            downloadUrl = GetString(obj, "downloadUrl");
             expiresAt = GetString(obj, "expiresAt");
             error = GetString(obj, "error");
             message = GetString(obj, "message");

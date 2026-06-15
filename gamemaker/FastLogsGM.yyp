@@ -28,6 +28,7 @@
     {"id":{"name":"scr_fastlogs_context","path":"scripts/scr_fastlogs_context/scr_fastlogs_context.yy",},},
     {"id":{"name":"scr_fastlogs_core","path":"scripts/scr_fastlogs_core/scr_fastlogs_core.yy",},},
     {"id":{"name":"scr_fastlogs_device","path":"scripts/scr_fastlogs_device/scr_fastlogs_device.yy",},},
+    {"id":{"name":"scr_fastlogs_files","path":"scripts/scr_fastlogs_files/scr_fastlogs_files.yy",},},
     {"id":{"name":"scr_fastlogs_http","path":"scripts/scr_fastlogs_http/scr_fastlogs_http.yy",},},
     {"id":{"name":"scr_fastlogs_input","path":"scripts/scr_fastlogs_input/scr_fastlogs_input.yy",},},
     {"id":{"name":"scr_fastlogs_overlay","path":"scripts/scr_fastlogs_overlay/scr_fastlogs_overlay.yy",},},

@@ -73,6 +73,9 @@ namespace PlayJoy.FastLogs
 
         /// <summary>Current number of entries in the ring buffer.</summary>
         int EntryCount { get; }
+
+        /// <summary>Approximate size in bytes of the buffered log text (cheap O(1); for size hints, not exact).</summary>
+        int ApproxLogBytes { get; }
     }
 
     /// <summary>
@@ -103,6 +106,53 @@ namespace PlayJoy.FastLogs
         /// <see cref="UploadResultDto"/>. Honors config Net settings.
         /// </summary>
         FlogTask<UploadResultDto> UploadAsync(LogReportDto report, FastLogsConfig config);
+    }
+
+    /// <summary>
+    /// A single file/folder upload request. The payload is already the final bytes to
+    /// send (a raw file read into memory, or a zip archive produced on the client for a
+    /// folder / multiple files). The uploader base64-encodes the bytes onto the JSON
+    /// body of POST /api/files. Unlike a log report, the blob is NEVER PII-scrubbed
+    /// (explicit invariant): only the decoded-size cap applies.
+    /// </summary>
+    public struct FileUploadRequest
+    {
+        /// <summary>Final bytes to upload (file content or client-side zip).</summary>
+        public byte[] Bytes;
+
+        /// <summary>Display/download file name, e.g. "save.dat" or "folder.zip".</summary>
+        public string FileName;
+
+        /// <summary>MIME type (e.g. "application/octet-stream", "application/zip"). May be null.</summary>
+        public string Mime;
+
+        /// <summary>Optional human-facing title shown in the viewer. May be null.</summary>
+        public string Title;
+
+        /// <summary>Optional id of the log this file is an attachment of. May be null.</summary>
+        public string LogId;
+
+        /// <summary>Optional group id tying several files into one upload batch. May be null.</summary>
+        public string GroupId;
+
+        /// <summary>Optional kind tag (e.g. "file", "folder", "attachment"). May be null.</summary>
+        public string Kind;
+    }
+
+    /// <summary>
+    /// Uploads a single file/folder blob to the server's files endpoint (POST /api/files,
+    /// JSON + base64) and returns the parsed result. Separate from <see cref="ILogUploader"/>
+    /// because it targets a different endpoint and does not carry a log report. Like the
+    /// log uploader, implementations must not throw - failures are returned as a
+    /// non-success <see cref="FileUploadResultDto"/>.
+    /// </summary>
+    public interface IFileUploader
+    {
+        /// <summary>
+        /// Upload the file blob in <paramref name="req"/>. Honors config Files settings
+        /// (endpoint, timeout). The body is sent plain (no gzip applied to the blob).
+        /// </summary>
+        FlogTask<FileUploadResultDto> UploadFileAsync(FileUploadRequest req, FastLogsConfig config);
     }
 
     /// <summary>Captures a PNG screenshot of the current frame.</summary>
@@ -146,6 +196,24 @@ namespace PlayJoy.FastLogs
 
         /// <summary>Raised when the user requests a send from the overlay.</summary>
         event Action<bool, string, string> SendRequested; // (includeScreenshot, title, comment)
+
+        /// <summary>Raised when the user arms scene-context capture (queue a hierarchy snapshot for the next send).</summary>
+        event Action SceneContextRequested;
+
+        /// <summary>
+        /// Show a confirm prompt with the given message and two choices (Send / Cancel),
+        /// rendered like a toast so it is visible even when the overlay is closed. Replaces
+        /// any pending confirm. The answer is delivered via <see cref="ConfirmAnswered"/>.
+        /// Used by the loop guard: a code call site that keeps sending asks the user before
+        /// it floods the server.
+        /// </summary>
+        void ShowConfirm(string message);
+
+        /// <summary>
+        /// Raised once when the user answers an active confirm prompt: true = proceed with
+        /// the send, false = cancel. The prompt is hidden before this fires.
+        /// </summary>
+        event Action<bool> ConfirmAnswered;
     }
 
     /// <summary>Severity / intent of a transient on-screen toast.</summary>
@@ -199,6 +267,14 @@ namespace PlayJoy.FastLogs
         ILogSource CreateLogSource(FastLogsConfig config);
         ITriggerSource CreateTriggerSource(FastLogsConfig config);
         ILogUploader CreateUploader(FastLogsConfig config);
+
+        /// <summary>
+        /// Optional file/folder uploader (POST /api/files). May return null - the core
+        /// then treats SendFile/SendFolder/SendFiles as unavailable and fails them with a
+        /// clear message rather than crashing.
+        /// </summary>
+        IFileUploader CreateFileUploader(FastLogsConfig config);
+
         IScreenshotCapturer CreateScreenshotCapturer(FastLogsConfig config);
         IClipboard CreateClipboard(FastLogsConfig config);
         ILogShareOverlay CreateOverlay(FastLogsConfig config);

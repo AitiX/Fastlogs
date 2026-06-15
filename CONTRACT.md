@@ -106,6 +106,75 @@ http://localhost:8787
 
 ---
 
+## 1b. Files - отправка произвольного файла (SendFile / SendFolder)
+
+Отдельный эндпоинт для выгрузки **произвольного файла или папки** (папка зипуется **на клиенте** в один `.zip`) и получения короткой ссылки - как у отчёта. Это **НЕ** часть лог-отчёта: отдельный `POST /api/files`, отдельный (больший) лимит тела.
+
+### `POST /api/files`
+
+**Заголовки запроса:**
+- `Content-Type: application/json` (обязательно)
+- `Authorization: Bearer <ingest_token>` (те же правила авторизации, что у `/api/logs`: per-app токен / общий team-токен / auto-register)
+
+**Тело (JSON):**
+
+```jsonc
+{
+  "appId": "lfa",                  // ОБЯЗ. [a-z0-9_-]{2,32}
+  "platform": "Windows",           // ОБЯЗ. тот же enum, что у /api/logs
+  "appVersion": "1.4.2 (build 318)", // ОБЯЗ. строка версии
+  "name": "save_slot_3.zip",       // ОБЯЗ. имя файла (сервер берёт только basename; путь обрезается)
+  "mime": "application/zip",       // ОПЦ. MIME-тип; по умолчанию отдаётся application/octet-stream
+  "fileBase64": "UEsDBBQ...",      // ОБЯЗ. содержимое файла в base64 (БЕЗ префикса "data:")
+  "kind": "save",                  // ОПЦ. file|folder|save|screenshot|archive|other (иное -> null)
+  "logId": "a7Bk9Q",               // ОПЦ. привязка к логу: файл появится в attachments[] этого лога
+  "groupId": "session-42",         // ОПЦ. групповая метка (несколько файлов одной операции)
+  "title": "Save before crash",    // ОПЦ. <=120 символов
+  "tester": "Alex",                // ОПЦ. <=120 символов
+  "retentionDays": 14              // ОПЦ. clamp(1, app.maxRetentionDays)
+}
+```
+
+**Ответ `201 Created`:**
+
+```json
+{
+  "id": "K3p9Zx",
+  "url": "http://localhost:8787/files/K3p9Zx",
+  "downloadUrl": "http://localhost:8787/files/K3p9Zx/download",
+  "expiresAt": "2026-06-26T09:30:00Z"
+}
+```
+
+**Просмотр / скачивание:**
+
+| Endpoint | Назначение |
+|----------|-----------|
+| `GET /files/<id>` | лёгкий HTML: имя, размер, кнопка **Download** (кейс «выгрузить сейв разработчику») |
+| `GET /files/<id>/download` | сам блоб; `Content-Disposition: attachment` с корректным именем, `Content-Type` из `mime` |
+
+Файл, привязанный по `logId`, дополнительно появляется в `attachments[]` ответа `GET /api/logs/<id>` и в панели **Attachments** вьюера лога (`downloadUrl` - относительный).
+
+**Коды ошибок** - те же, что у `/api/logs`:
+
+| Код | Когда |
+|-----|-------|
+| `400 bad_request` | невалидный JSON, нет `appId`/`platform`/`appVersion`/`name`/`fileBase64`, неверный enum, пустой декод base64 |
+| `401 unauthorized` | игра требует токен, а он не передан |
+| `403 forbidden` | неверный токен или `appId` не зарегистрирован/выключен |
+| `413 payload_too_large` | размер **распакованного** блоба превышает `MAX_FILE_BYTES`, либо тело запроса больше лимита чтения |
+| `415 unsupported_media_type` | `Content-Type` не `application/json` |
+| `429 too_many_requests` | rate limit; заголовок `Retry-After` |
+| `500 internal_error` | ошибка сервера |
+
+**Инварианты Files:**
+- Кап - по **DECODED**-размеру: `MAX_FILE_BYTES` (по умолчанию 25 MB). Проверяется и на клиенте (до отправки), и на сервере. У `/api/files` **отдельный больший лимит чтения тела** (`MAX_FILE_BODY_BYTES`, по умолчанию `MAX_FILE_BYTES`*4/3 + запас на JSON), **не** общий `MAX_PAYLOAD` (8 MB).
+- **PII-скраб к бинарю НЕ применяется**: блоб хранится и отдаётся **байт-в-байт**, без чистки и без перекодирования (в т.ч. без gzip). Единственная защита - размерный кап. Скраб (см. §7.9) действует только для текстов лога/`context`/`breadcrumbs`.
+- Папка зипуется **на клиенте** (Unity: `ZipArchive` в `MemoryStream`; GameMaker: zip-store буфера) - сервер получает один обычный файл.
+- Ретеншн - **как у логов**: `expiresAt` по `retentionDays` (clamp по `app.maxRetentionDays`), pin продлевает, sweeper удаляет просроченные непиннутые (блоб - до строки). Несуществующий/просроченный/невалидный `id` -> единый `404`.
+
+---
+
 ## 2. Просмотр
 
 | Endpoint | Назначение |
@@ -166,6 +235,8 @@ http://localhost:8787
 | `MAX_SCREENSHOT` (PNG) | ~2 MB |
 | `MAX_SCREENSHOTS` (скриншотов на отчёт) | 8 |
 | `MAX_LOG_BYTES` (распакованный лог) | ~20 MB |
+| `MAX_FILE_BYTES` (распакованный блоб `/api/files`) | ~25 MB |
+| `MAX_FILE_BODY_BYTES` (лимит тела `/api/files`) | `MAX_FILE_BYTES`*4/3 + запас (~34 MB) |
 | Ретеншн по умолчанию | 30 дней |
 | Ретеншн максимум | 365 дней |
 | Rate limit | per `ip_hash` и per `appId` (→ `429 + Retry-After`) |
