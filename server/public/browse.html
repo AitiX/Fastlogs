@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="robots" content="noindex, nofollow">
   <title>FastLogs - Catalog</title>
+  <link rel="stylesheet" href="/fonts.css">
   <link rel="stylesheet" href="/browse.css">
 </head>
 <body>
@@ -42,9 +43,23 @@
       <option value="errors">Most errors</option>
       <option value="largest">Largest</option>
     </select>
+    <select class="filter-select" id="folder-select" style="display:none">
+      <option value="">All folders</option>
+    </select>
     <label class="filter-toggle-label" id="errors-only-label" style="display:none">
       <input type="checkbox" id="errors-only-cb"> Errors only
     </label>
+  </div>
+
+  <!-- Folder move toolbar (logs view only); revealed by browse.js when logs
+       are selected via the row checkboxes. -->
+  <div class="folder-bar" id="folder-bar" style="display:none">
+    <span class="folder-bar-count" id="folder-bar-count">0 selected</span>
+    <input class="filter-input folder-bar-input" id="folder-move-input" type="text"
+           list="folder-datalist" placeholder="Folder (e.g. Release/QA), blank = root">
+    <datalist id="folder-datalist"></datalist>
+    <button class="folder-bar-btn" id="folder-move-btn" type="button">Move to folder</button>
+    <span class="folder-bar-msg" id="folder-bar-msg"></span>
   </div>
 
   <div id="content">

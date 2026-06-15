@@ -153,6 +153,19 @@ const config = Object.freeze({
   // Storage dashboard: how many of the largest logs to list per app.
   statsTopN: envInt('STATS_TOP_N', 5),
 
+  // Log folders (manual catalog organisation). folderMaxLen bounds the whole
+  // normalized path; folderMaxDepth bounds how many "/"-separated segments a
+  // path may have; folderSegmentMaxLen bounds one segment. A path that violates
+  // any bound (or carries traversal / control chars) is rejected by the move
+  // endpoint with 400, so the column can never hold abusive values.
+  folderMaxLen: envInt('FOLDER_MAX_LEN', 200),
+  folderMaxDepth: envInt('FOLDER_MAX_DEPTH', 8),
+  folderSegmentMaxLen: envInt('FOLDER_SEGMENT_MAX_LEN', 60),
+
+  // Max log ids accepted in one POST /api/folders/move request (bounds the work
+  // a single move does; the catalog moves a selection of logs at once).
+  folderMoveMaxIds: envInt('FOLDER_MOVE_MAX_IDS', 500),
+
   // Crash grouping. crashSigTopK = how many top normalized stack frames are
   // folded into a crash signature (higher = finer grouping). crashRecomputeBatch
   // = max crash_sig-NULL logs the /browse/:appId/crashes route lazily backfills

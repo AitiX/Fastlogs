@@ -303,6 +303,10 @@ async function handleIngest(req, res) {
   if (!appId || typeof appId !== 'string' || !/^[a-z0-9_-]{2,32}$/.test(appId)) {
     return sendError(res, 400, 'bad_request', 'appId must be 2-32 chars [a-z0-9_-]');
   }
+  // Resolve the appId through aliases so a renamed project's OLD slug keeps
+  // ingesting into the new canonical app. A genuinely unknown id resolves to
+  // itself (resolveAppId returns null), preserving the auto-register path below.
+  const canonicalAppId = db.resolveAppId(appId) || appId;
   if (!platform || !VALID_PLATFORMS.has(platform)) {
     return sendError(res, 400, 'bad_request', `platform must be one of: ${[...VALID_PLATFORMS].join(', ')}`);
   }
@@ -344,8 +348,9 @@ async function handleIngest(req, res) {
   // Screenshots: the new `screenshotsPng` array plus the legacy single
   // `screenshotPng` are collected and validated at step 7.
 
-  // 4. Auth: validate app + token.
-  let { ok, app, code } = validateIngest(appId, req.headers['authorization']);
+  // 4. Auth: validate app + token. The CANONICAL id is used so a request under
+  // an old (aliased) slug authenticates against the renamed app's token/state.
+  let { ok, app, code } = validateIngest(canonicalAppId, req.headers['authorization']);
   if (!ok) {
     if (code === 'unauthorized') {
       return sendError(res, 401, 'unauthorized', 'Authorization token required');
@@ -358,8 +363,8 @@ async function handleIngest(req, res) {
   if (code === 'auto_register') {
     try {
       db.upsertApp({
-        app_id: appId,
-        name: appId,
+        app_id: canonicalAppId,
+        name: canonicalAppId,
         token_hash: null,
         retention_days: config.defaultRetentionDays,
         max_retention_days: config.maxRetentionDays,
@@ -367,7 +372,7 @@ async function handleIngest(req, res) {
         enabled: 1,
         created_at: nowUtcIso(),
       });
-      app = db.getApp(appId);
+      app = db.getApp(canonicalAppId);
     } catch (err) {
       console.error('[ingest] auto-register failed:', err);
       return sendError(res, 500, 'internal_error', 'Failed to auto-register app');
@@ -382,7 +387,7 @@ async function handleIngest(req, res) {
     return sendError(res, 429, 'too_many_requests', 'Rate limit exceeded',
       { 'Retry-After': String(rlIp.retryAfter) });
   }
-  const rlApp = ratelimit.check(`ingest:app:${appId}`, RL_APP_LIMIT, RL_WINDOW_SEC);
+  const rlApp = ratelimit.check(`ingest:app:${canonicalAppId}`, RL_APP_LIMIT, RL_WINDOW_SEC);
   if (!rlApp.allowed) {
     return sendError(res, 429, 'too_many_requests', 'Rate limit exceeded',
       { 'Retry-After': String(rlApp.retryAfter) });
@@ -456,7 +461,9 @@ async function handleIngest(req, res) {
   // 11. Insert DB row.
   const row = {
     id,
-    app_id: appId,
+    // Store the CANONICAL app_id so an alias-routed ingest lands in the renamed
+    // project's catalog (logs are grouped by the canonical id).
+    app_id: canonicalAppId,
     platform,
     app_version: appVersion,
     device_json: JSON.stringify(device),
@@ -511,7 +518,7 @@ async function handleIngest(req, res) {
   try {
     const sinks = require('../sinks');
     sinks.dispatch(app, {
-      project: appId,
+      project: canonicalAppId,
       projectName: app.name,
       version: appVersion,
       platform,

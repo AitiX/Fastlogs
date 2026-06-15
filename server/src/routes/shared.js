@@ -167,6 +167,9 @@ function catalogRowFromLog(r) {
     engine: r.engine || null,
     version: r.app_version || null,
     sessionId: r.session_id || null,
+    // Manual catalog folder (or null for the root). The catalog groups rows by
+    // it and the Move-to-folder action sets it via POST /api/folders/move.
+    folder: r.folder || null,
     expiresAt: r.expires_at || null,
   };
 }
@@ -248,6 +251,8 @@ function publicLogObject(row) {
     // Per-launch session id (or null). When set, the viewer can link to "all
     // logs of this session" in the catalog (GET /browse/<appId>?session=...).
     sessionId: row.session_id || null,
+    // Manual catalog folder this log was filed under (or null for the root).
+    folder: row.folder || null,
     // Standalone files attached to this log (SendFile with logId). Always an
     // array; live rows only (pinned or not-yet-expired). downloadUrl is relative.
     attachments: attachmentsForLog(row.id),

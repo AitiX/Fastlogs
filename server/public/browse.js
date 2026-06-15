@@ -67,6 +67,31 @@
     return '/api/search?' + sp.toString();
   }
 
+  // POST a folder move for a selection of logs. Carries the viewer token as
+  // ?token= (same auth path the catalog already uses) and sends the appId, the
+  // selected ids and the target folder ('' = root). Resolves with the server's
+  // { appId, folder, moved } response, rejects with an Error on a non-2xx.
+  function moveLogsToFolder(appId, ids, folder) {
+    var sp = new URLSearchParams();
+    var t = searchParams.get('token');
+    if (t) sp.set('token', t);
+    var url = '/api/folders/move' + (sp.toString() ? '?' + sp.toString() : '');
+    return fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+      body: JSON.stringify({ appId: appId, ids: ids, folder: folder }),
+    }).then(function (r) {
+      if (r.status === 401 || r.status === 403) throw new Error('auth required');
+      return r.json().then(function (data) {
+        if (!r.ok) throw new Error((data && data.message) || ('HTTP ' + r.status));
+        return data;
+      }, function () {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return {};
+      });
+    });
+  }
+
   // ---- Utility: fetch JSON with error handling ----
 
   function fetchJson(path) {
@@ -368,6 +393,7 @@
     var levelSelect = document.getElementById('level-select');
     var statusSelect = document.getElementById('status-select');
     var sortSelect = document.getElementById('sort-select');
+    var folderSelect = document.getElementById('folder-select');
     var errorsOnlyLabel = document.getElementById('errors-only-label');
     var errorsOnlyCb = document.getElementById('errors-only-cb');
 
@@ -376,6 +402,8 @@
     statusSelect.value = '';
     sortSelect.value = 'newest';
     errorsOnlyCb.checked = false;
+    folderSelect.innerHTML = '<option value="">All folders</option>';
+    folderSelect.value = '';
 
     if (!logs || logs.length === 0) {
       showEmpty('No logs found.');
@@ -387,7 +415,27 @@
     levelSelect.style.display = '';
     statusSelect.style.display = '';
     sortSelect.style.display = '';
+    folderSelect.style.display = '';
     errorsOnlyLabel.style.display = '';
+
+    // Build the folder filter from the folders present in the loaded logs:
+    // "All folders" (default), "(root)" for the unfiled logs, then each distinct
+    // path. The dropdown only filters the current view client-side.
+    var folderSet = {};
+    var hasRoot = false;
+    logs.forEach(function (log) {
+      if (log.folder) folderSet[log.folder] = true; else hasRoot = true;
+    });
+    if (hasRoot) {
+      var rootOpt = document.createElement('option');
+      rootOpt.value = ' root'; rootOpt.textContent = '(root)';
+      folderSelect.appendChild(rootOpt);
+    }
+    Object.keys(folderSet).sort().forEach(function (f) {
+      var opt = document.createElement('option');
+      opt.value = f; opt.textContent = f;
+      folderSelect.appendChild(opt);
+    });
 
     // Collect unique platforms.
     var platforms = {};
@@ -406,11 +454,13 @@
     table.className = 'logs-table';
     table.innerHTML =
       '<thead><tr>' +
+      '<th class="th-select"><input type="checkbox" id="select-all-cb" title="Select all visible"></th>' +
       '<th>ID</th>' +
       '<th>Title</th>' +
       '<th>Platform</th>' +
       '<th>E / W / L</th>' +
       '<th>Size</th>' +
+      '<th>Folder</th>' +
       '<th>Status</th>' +
       '<th>Time</th>' +
       '<th>Pin</th>' +
@@ -435,6 +485,8 @@
       // Small engine label next to the platform; blank when null.
       var engineHtml = log.engine ? ' <span class="engine-badge">' + esc(log.engine) + '</span>' : '';
 
+      var folder = log.folder || '';
+
       var tr = document.createElement('tr');
       tr.dataset.platform = log.platform || '';
       tr.dataset.error = cntE;
@@ -443,20 +495,28 @@
       tr.dataset.status = status;
       tr.dataset.timeMs = timeMs;
       tr.dataset.logBytes = bytes;
+      tr.dataset.id = id;
+      tr.dataset.folder = folder;
+
+      var folderHtml = folder ? '<span class="folder-tag">' + esc(folder) + '</span>' : '';
 
       tr.innerHTML =
+        '<td class="td-select"><input type="checkbox" class="row-select-cb"></td>' +
         '<td class="td-id"><a href="' + withQs('/' + encodeURIComponent(id)) + '" target="_blank">' + esc(id) + '</a></td>' +
         '<td class="td-title"><span class="td-title-text" title="' + esc(log.title || '') + '">' + esc(log.title || '(no title)') + '</span></td>' +
         '<td class="td-platform">' + esc(log.platform || '') + engineHtml + '</td>' +
         '<td class="td-counts"><span class="count-e">' + cntE + '</span> / <span class="count-w">' + cntW + '</span> / <span class="count-l">' + cntL + '</span></td>' +
         '<td class="td-size">' + esc(fmtBytes(log.logBytes)) + '</td>' +
+        '<td class="td-folder">' + folderHtml + '</td>' +
         '<td class="td-status">' + statusBadge(status) + '</td>' +
         '<td class="td-time">' + esc(fmtDate(log.time || log.createdAt)) + '</td>' +
         '<td class="td-pin">' + (log.pinned ? '<span class="badge-pin">pinned</span>' : '') + '</td>';
 
       tr.addEventListener('click', function (e) {
-        // Don't intercept clicks on links inside the row.
+        // Don't intercept clicks on links or the row-select checkbox.
         if (e.target.tagName === 'A') return;
+        if (e.target.classList && e.target.classList.contains('row-select-cb')) return;
+        if (e.target.closest && e.target.closest('.td-select')) return;
         window.open(withQs('/' + encodeURIComponent(id)), '_blank');
       });
 
@@ -476,6 +536,7 @@
       var pf = platformSelect.value;
       var lv = levelSelect.value;
       var st = statusSelect.value;
+      var fd = folderSelect.value;
       var errorsOnly = errorsOnlyCb.checked;
       var sortBy = sortSelect.value;
 
@@ -490,7 +551,11 @@
         else if (lv === 'warn') lvOk = (parseInt(tr.dataset.warn, 10) || 0) > 0;
         var errOnlyOk = !errorsOnly || errCount > 0;
         var stOk = !st || tr.dataset.status === st;
-        tr.classList.toggle('hidden', !(titleOk && pfOk && lvOk && errOnlyOk && stOk));
+        // Folder filter: '' = all; ' root' (sentinel) = unfiled logs; else exact.
+        var fdOk = true;
+        if (fd === ' root') fdOk = !tr.dataset.folder;
+        else if (fd) fdOk = tr.dataset.folder === fd;
+        tr.classList.toggle('hidden', !(titleOk && pfOk && lvOk && errOnlyOk && stOk && fdOk));
       });
 
       // Sort the currently-visible rows, then re-append in order. Hidden rows
@@ -512,12 +577,119 @@
       visible.forEach(function (tr) { tbody.appendChild(tr); });
     }
 
-    filterInput.addEventListener('input', applyFilters);
-    platformSelect.addEventListener('change', applyFilters);
-    levelSelect.addEventListener('change', applyFilters);
-    statusSelect.addEventListener('change', applyFilters);
-    sortSelect.addEventListener('change', applyFilters);
-    errorsOnlyCb.addEventListener('change', applyFilters);
+    // After a filter pass, drop the selection on now-hidden rows (a hidden row
+    // must not be silently moved) and refresh the selection toolbar.
+    function applyFiltersAndSync() {
+      applyFilters();
+      tbody.querySelectorAll('tr.hidden .row-select-cb').forEach(function (cb) { cb.checked = false; });
+      syncSelection();
+    }
+
+    filterInput.addEventListener('input', applyFiltersAndSync);
+    platformSelect.addEventListener('change', applyFiltersAndSync);
+    levelSelect.addEventListener('change', applyFiltersAndSync);
+    statusSelect.addEventListener('change', applyFiltersAndSync);
+    sortSelect.addEventListener('change', applyFiltersAndSync);
+    folderSelect.addEventListener('change', applyFiltersAndSync);
+    errorsOnlyCb.addEventListener('change', applyFiltersAndSync);
+
+    // ---- Selection + Move-to-folder ----
+
+    var folderBar = document.getElementById('folder-bar');
+    var folderBarCount = document.getElementById('folder-bar-count');
+    var folderMoveInput = document.getElementById('folder-move-input');
+    var folderMoveBtn = document.getElementById('folder-move-btn');
+    var folderBarMsg = document.getElementById('folder-bar-msg');
+    var selectAllCb = document.getElementById('select-all-cb');
+    var folderDatalist = document.getElementById('folder-datalist');
+
+    // Offer the app's existing folders as datalist suggestions in the move box.
+    folderDatalist.innerHTML = '';
+    Object.keys(folderSet).sort().forEach(function (f) {
+      var opt = document.createElement('option');
+      opt.value = f;
+      folderDatalist.appendChild(opt);
+    });
+
+    // The visible, currently-checked rows.
+    function selectedRows() {
+      return Array.prototype.slice.call(tbody.querySelectorAll('tr'))
+        .filter(function (tr) {
+          var cb = tr.querySelector('.row-select-cb');
+          return cb && cb.checked && !tr.classList.contains('hidden');
+        });
+    }
+
+    // Reflect the current selection in the toolbar (count, button state) and
+    // show/hide the bar. Clears any stale status message.
+    function syncSelection() {
+      var n = selectedRows().length;
+      folderBarCount.textContent = n + ' selected';
+      folderMoveBtn.disabled = n === 0;
+      folderBar.style.display = n > 0 ? '' : 'none';
+      if (n === 0) { folderBarMsg.textContent = ''; folderBarMsg.className = 'folder-bar-msg'; }
+    }
+
+    selectAllCb.addEventListener('change', function () {
+      tbody.querySelectorAll('tr').forEach(function (tr) {
+        if (tr.classList.contains('hidden')) return;
+        var cb = tr.querySelector('.row-select-cb');
+        if (cb) cb.checked = selectAllCb.checked;
+      });
+      syncSelection();
+    });
+
+    tbody.addEventListener('change', function (e) {
+      if (e.target && e.target.classList && e.target.classList.contains('row-select-cb')) {
+        syncSelection();
+      }
+    });
+
+    folderMoveBtn.addEventListener('click', function () {
+      var rows = selectedRows();
+      if (rows.length === 0) return;
+      var ids = rows.map(function (tr) { return tr.dataset.id; });
+      var target = folderMoveInput.value;
+
+      folderMoveBtn.disabled = true;
+      folderBarMsg.textContent = 'Moving...';
+      folderBarMsg.className = 'folder-bar-msg';
+
+      moveLogsToFolder(appId, ids, target)
+        .then(function (data) {
+          folderBarMsg.textContent = 'Moved ' + data.moved + ' log' + (data.moved !== 1 ? 's' : '') +
+            (data.folder ? ' to ' + data.folder : ' to root');
+          folderBarMsg.className = 'folder-bar-msg ok';
+          // Reflect the new folder on each moved row in place (no full reload).
+          var newFolder = data.folder || '';
+          rows.forEach(function (tr) {
+            tr.dataset.folder = newFolder;
+            var cell = tr.querySelector('.td-folder');
+            if (cell) cell.innerHTML = newFolder ? '<span class="folder-tag">' + esc(newFolder) + '</span>' : '';
+            var cb = tr.querySelector('.row-select-cb');
+            if (cb) cb.checked = false;
+          });
+          if (selectAllCb) selectAllCb.checked = false;
+          // A brand-new folder should appear in the filter + datalist.
+          if (newFolder && !folderSet[newFolder]) {
+            folderSet[newFolder] = true;
+            var opt = document.createElement('option');
+            opt.value = newFolder; opt.textContent = newFolder;
+            folderSelect.appendChild(opt);
+            var dopt = document.createElement('option');
+            dopt.value = newFolder;
+            folderDatalist.appendChild(dopt);
+          }
+          syncSelection();
+        })
+        .catch(function (err) {
+          folderBarMsg.textContent = 'Move failed: ' + err.message;
+          folderBarMsg.className = 'folder-bar-msg err';
+          folderMoveBtn.disabled = false;
+        });
+    });
+
+    syncSelection();
   }
 
   // ---- View: Crash groups (GET /browse/:appId/crashes) ----

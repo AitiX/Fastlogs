@@ -105,6 +105,19 @@ function migrate() {
       count        INTEGER NOT NULL DEFAULT 0
     );
 
+    -- App aliases: an OLD appId (slug) that keeps resolving to the canonical
+    -- app after a rename. The renamer rewrites apps.app_id + logs.app_id to the
+    -- new id and records the old id here, so ingest / browse / search under the
+    -- old slug keep working without losing any log. "alias" is the old id (PK,
+    -- so an alias maps to exactly one app); "app_id" is the canonical target.
+    CREATE TABLE IF NOT EXISTS app_aliases (
+      alias  TEXT PRIMARY KEY,
+      app_id TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_app_aliases_app
+      ON app_aliases (app_id);
+
     CREATE TABLE IF NOT EXISTS files (
       id          TEXT PRIMARY KEY,
       app_id      TEXT NOT NULL,
@@ -139,11 +152,16 @@ function migrate() {
   // ADD COLUMN is the safe, idempotent way to evolve the schema; guarding with
   // table_info keeps a re-run a no-op.
   const logCols = db.prepare('PRAGMA table_info(logs)').all();
-  for (const col of ['comment', 'tester', 'context_json', 'breadcrumbs_json', 'crash_sig', 'tags', 'redmine_issue_id', 'redmine_issue_url', 'engine', 'scene_context', 'correlation_code', 'session_id']) {
+  for (const col of ['comment', 'tester', 'context_json', 'breadcrumbs_json', 'crash_sig', 'tags', 'redmine_issue_id', 'redmine_issue_url', 'engine', 'scene_context', 'correlation_code', 'session_id', 'folder']) {
     if (!logCols.some((c) => c.name === col)) {
       db.exec(`ALTER TABLE logs ADD COLUMN ${col} TEXT`);
     }
   }
+
+  // Index backing the per-app folder filter + DISTINCT folder listing. Created
+  // AFTER the loop, since `folder` only exists once that ALTER has run. Partial
+  // so it stays small (the vast majority of logs live in the root, folder NULL).
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_logs_folder ON logs (app_id, folder) WHERE folder IS NOT NULL`);
 
   // Index backing the "all logs of one session" lookup (per-app, newest-first).
   // Created AFTER the loop, since session_id only exists once that ALTER has
@@ -320,9 +338,22 @@ const stmts = {
   listLogs: db.prepare(`
     SELECT id, title, ts_utc, platform, cnt_error, cnt_warn, cnt_log,
            log_bytes, has_shot, pinned, status, tags, crash_sig, engine,
-           session_id, created_at, expires_at
+           session_id, folder, created_at, expires_at
     FROM logs
     WHERE app_id = @app_id AND app_version = @version
+    ORDER BY created_at DESC
+  `),
+
+  // Same as listLogs, but restricted to one exact folder value. A NULL @folder
+  // (bound as null) selects the ROOT (folder IS NULL); a non-null value selects
+  // that exact folder path. Used by the catalog version view's ?folder= filter.
+  listLogsByFolder: db.prepare(`
+    SELECT id, title, ts_utc, platform, cnt_error, cnt_warn, cnt_log,
+           log_bytes, has_shot, pinned, status, tags, crash_sig, engine,
+           session_id, folder, created_at, expires_at
+    FROM logs
+    WHERE app_id = @app_id AND app_version = @version
+          AND folder IS @folder
     ORDER BY created_at DESC
   `),
 
@@ -332,7 +363,7 @@ const stmts = {
   listLogsBySession: db.prepare(`
     SELECT id, title, ts_utc, platform, cnt_error, cnt_warn, cnt_log,
            log_bytes, has_shot, pinned, status, tags, crash_sig, engine,
-           app_version, session_id, created_at, expires_at
+           app_version, session_id, folder, created_at, expires_at
     FROM logs
     WHERE app_id = @app_id AND session_id = @session_id
           AND (pinned = 1 OR expires_at IS NULL OR expires_at > @now)
@@ -346,7 +377,7 @@ const stmts = {
   searchAppRows: db.prepare(`
     SELECT id, title, ts_utc, platform, cnt_error, cnt_warn, cnt_log,
            log_bytes, has_shot, pinned, status, tags, crash_sig, engine,
-           app_version, session_id, created_at, expires_at
+           app_version, session_id, folder, created_at, expires_at
     FROM logs
     WHERE app_id = @app_id
           AND (pinned = 1 OR expires_at IS NULL OR expires_at > @now)
@@ -470,6 +501,58 @@ const stmts = {
   `),
 
   markFtsIndexed: db.prepare(`UPDATE logs SET fts_indexed = 1 WHERE id = @id`),
+
+  // --- Log folders (manual organisation in the catalog) --------------------
+
+  // Assign (or clear) a single log's folder. @folder is the normalized path
+  // string, or null for the root. Scoped by app_id so a move can never reach
+  // across projects even if a stale id were passed.
+  setLogFolder: db.prepare(`
+    UPDATE logs SET folder = @folder WHERE id = @id AND app_id = @app_id
+  `),
+
+  // Distinct non-empty folder paths of an app, alphabetically. Backs the folder
+  // tree/list in the catalog. The root (folder NULL) is implicit and excluded.
+  listFolders: db.prepare(`
+    SELECT DISTINCT folder FROM logs
+    WHERE app_id = @app_id AND folder IS NOT NULL AND folder != ''
+    ORDER BY folder ASC
+  `),
+
+  // --- App aliases (rename keeps the old slug working) ---------------------
+
+  // Resolve an alias (old appId) to its canonical app_id, or undefined.
+  getAlias: db.prepare(`SELECT app_id FROM app_aliases WHERE alias = ?`),
+
+  // Insert/update an alias -> canonical mapping (idempotent on re-rename).
+  upsertAlias: db.prepare(`
+    INSERT INTO app_aliases (alias, app_id) VALUES (@alias, @app_id)
+    ON CONFLICT(alias) DO UPDATE SET app_id = excluded.app_id
+  `),
+
+  // Drop an alias row (used if the canonical id is renamed onto an old alias).
+  deleteAlias: db.prepare(`DELETE FROM app_aliases WHERE alias = ?`),
+
+  // Repoint every alias that targeted @old_app_id to @new_app_id (so a chain of
+  // renames keeps every historical slug resolving to the latest canonical id).
+  repointAliases: db.prepare(`
+    UPDATE app_aliases SET app_id = @new_app_id WHERE app_id = @old_app_id
+  `),
+
+  // Re-key an app row's primary key (slug). Run inside the rename transaction;
+  // logs are re-keyed separately so nothing is lost.
+  renameApp: db.prepare(`UPDATE apps SET app_id = @new_app_id WHERE app_id = @old_app_id`),
+
+  // Set an app's display name without touching tokens/retention/etc.
+  setAppName: db.prepare(`UPDATE apps SET name = @name WHERE app_id = @app_id`),
+
+  // Move every log of an app from @old_app_id to @new_app_id (the log id itself
+  // is unchanged, so per-id links keep working). FTS rows are keyed by log id,
+  // so they need no rewrite.
+  renameLogsApp: db.prepare(`UPDATE logs SET app_id = @new_app_id WHERE app_id = @old_app_id`),
+
+  // Move every standalone file of an app likewise (kept in lockstep with logs).
+  renameFilesApp: db.prepare(`UPDATE files SET app_id = @new_app_id WHERE app_id = @old_app_id`),
 };
 
 // ---------------------------------------------------------------------------
@@ -577,6 +660,18 @@ function getApp(appId) {
   return stmts.getApp.get(appId);
 }
 
+// Resolve an appId-or-alias to the canonical app_id. A live app row wins (so a
+// current id always resolves to itself); failing that an alias (an OLD slug
+// recorded by a rename) is followed to its target. Returns the canonical app_id
+// string, or null when neither an app nor an alias matches. Used by ingest,
+// browse and search so a renamed project's OLD appId keeps working everywhere.
+function resolveAppId(idOrAlias) {
+  if (!idOrAlias || typeof idOrAlias !== 'string') return null;
+  if (stmts.getApp.get(idOrAlias)) return idOrAlias;
+  const row = stmts.getAlias.get(idOrAlias);
+  return row ? row.app_id : null;
+}
+
 // Insert or update an app. `row` must contain all named columns (see upsertApp).
 function upsertApp(row) {
   return stmts.upsertApp.run(row);
@@ -610,6 +705,56 @@ function largestLogs(appId, limit) {
 // List logs of a given app and version, newest first.
 function listLogs(appId, version) {
   return stmts.listLogs.all({ app_id: appId, version });
+}
+
+// List logs of one app+version restricted to a single folder, newest first.
+// `folder` is the exact folder path string, or null for the ROOT (folder NULL).
+// Same row shape as listLogs (plus the `folder` column).
+function listLogsByFolder(appId, version, folder) {
+  return stmts.listLogsByFolder.all({ app_id: appId, version, folder: folder || null });
+}
+
+// Assign a log to a folder (or clear it). `folder` is the normalized path, or
+// null for the root. Scoped by app_id so the move stays within the project.
+// Returns the run info (`.changes` = 1 when the log existed in that app).
+function setLogFolder(id, appId, folder) {
+  return stmts.setLogFolder.run({ id, app_id: appId, folder: folder || null });
+}
+
+// Distinct non-empty folder paths of an app, alphabetically (array of strings).
+function listFolders(appId) {
+  return stmts.listFolders.all({ app_id: appId }).map((r) => r.folder);
+}
+
+// Rename a project: re-key the app row + all its logs/files from `oldAppId` to
+// `newAppId`, record the old slug as an alias of the new one, and repoint any
+// existing aliases onto the new id. Atomic (single transaction) so a failure
+// leaves the project untouched. Nothing is deleted: log ids are unchanged (so
+// per-id links keep working) and the blobs on disk are untouched (they are keyed
+// by log id, not app_id). `newName` (optional) updates the display name too.
+//
+// Idempotent: renaming to the SAME id only updates the name. The old slug is
+// NOT recorded as an alias of itself; and if `newAppId` happens to be an
+// existing alias, that alias row is dropped (it now resolves to itself).
+function renameApp(oldAppId, newAppId, newName) {
+  const tx = db.transaction(() => {
+    if (oldAppId !== newAppId) {
+      stmts.renameApp.run({ old_app_id: oldAppId, new_app_id: newAppId });
+      stmts.renameLogsApp.run({ old_app_id: oldAppId, new_app_id: newAppId });
+      stmts.renameFilesApp.run({ old_app_id: oldAppId, new_app_id: newAppId });
+      // Any alias that used to point at the old id now points at the new id, so
+      // a chain (a -> b -> c) keeps every historical slug resolving to c.
+      stmts.repointAliases.run({ old_app_id: oldAppId, new_app_id: newAppId });
+      // The new id must never be its own alias (it resolves via apps directly).
+      stmts.deleteAlias.run(newAppId);
+      // The old slug becomes an alias of the new canonical id.
+      stmts.upsertAlias.run({ alias: oldAppId, app_id: newAppId });
+    }
+    if (newName != null) {
+      stmts.setAppName.run({ app_id: newAppId, name: newName });
+    }
+  });
+  tx();
 }
 
 // Live logs of one session within an app, newest first. `now` is an ISO-8601
@@ -824,7 +969,12 @@ module.exports = {
   setRedmine,
   listApps,
   getApp,
+  resolveAppId,
   upsertApp,
+  renameApp,
+  setLogFolder,
+  listFolders,
+  listLogsByFolder,
   listVersions,
   statsByApp,
   enginesByApp,

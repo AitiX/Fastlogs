@@ -102,7 +102,10 @@ function browseApp(req, res, params, query) {
     return sendError(res, 401, 'unauthorized', 'Viewer token required');
   }
   if (wantsHtml(req, query)) return serveBrowseHtml(res);
-  const app = db.getApp(params.appId);
+  // Resolve the (possibly old/aliased) slug to the canonical app so a renamed
+  // project keeps browsing under its old id. All lookups below use canonicalId.
+  const canonicalId = db.resolveAppId(params.appId);
+  const app = canonicalId ? db.getApp(canonicalId) : undefined;
   if (!app) {
     // Catalog access is already authorized, so a plain 404 is fine here (no
     // enumeration concern: the caller is a trusted team member).
@@ -112,7 +115,7 @@ function browseApp(req, res, params, query) {
   // Session filter: the logs of one app launch, newest first (live rows only).
   const sessionId = query ? query.get('session') : null;
   if (sessionId) {
-    const logs = db.listLogsBySession(params.appId, sessionId, nowUtcIso()).map(catalogRowFromLog);
+    const logs = db.listLogsBySession(app.app_id, sessionId, nowUtcIso()).map(catalogRowFromLog);
     return sendJson(res, 200, {
       appId: app.app_id,
       name: app.name,
@@ -121,7 +124,7 @@ function browseApp(req, res, params, query) {
     });
   }
 
-  const versions = db.listVersions(params.appId).map((v) => ({
+  const versions = db.listVersions(app.app_id).map((v) => ({
     version: v.version,
     count: v.count,
     logCount: v.count,
@@ -129,8 +132,10 @@ function browseApp(req, res, params, query) {
     pinnedCount: v.pinnedCount,
     lastAt: v.last_at,
   }));
-  const totals = db.statsForApp(params.appId) || { logCount: 0, totalBytes: 0, pinnedCount: 0 };
-  const largestLogs = db.largestLogs(params.appId, config.statsTopN).map((r) => ({
+  const totals = db.statsForApp(app.app_id) || { logCount: 0, totalBytes: 0, pinnedCount: 0 };
+  // Existing folder paths so the catalog can offer them in the Move UI / tree.
+  const folders = db.listFolders(app.app_id);
+  const largestLogs = db.largestLogs(app.app_id, config.statsTopN).map((r) => ({
     id: r.id,
     title: r.title || null,
     version: r.app_version,
@@ -138,7 +143,7 @@ function browseApp(req, res, params, query) {
     logBytes: r.log_bytes,
     createdAt: r.created_at,
   }));
-  sendJson(res, 200, { appId: app.app_id, name: app.name, versions, totals, largestLogs });
+  sendJson(res, 200, { appId: app.app_id, name: app.name, versions, totals, folders, largestLogs });
 }
 
 // GET /browse/:appId/:version -> log records (JSON) or the catalog UI (HTML).
@@ -147,11 +152,21 @@ function browseVersion(req, res, params, query) {
     return sendError(res, 401, 'unauthorized', 'Viewer token required');
   }
   if (wantsHtml(req, query)) return serveBrowseHtml(res);
-  const app = db.getApp(params.appId);
+  const canonicalId = db.resolveAppId(params.appId);
+  const app = canonicalId ? db.getApp(canonicalId) : undefined;
   if (!app) {
     return sendError(res, 404, 'not_found', 'Unknown appId');
   }
-  const rows = db.listLogs(params.appId, params.version).map(catalogRowFromLog);
+  // Optional folder filter. A PRESENT but empty ?folder= selects the ROOT
+  // (folder NULL); a non-empty value selects that exact folder; an absent param
+  // lists every log of the version (folder column still rides along each row).
+  let rows;
+  if (query && query.has('folder')) {
+    const folder = (query.get('folder') || '').trim();
+    rows = db.listLogsByFolder(app.app_id, params.version, folder || null).map(catalogRowFromLog);
+  } else {
+    rows = db.listLogs(app.app_id, params.version).map(catalogRowFromLog);
+  }
   sendJson(res, 200, {
     appId: app.app_id,
     name: app.name,
@@ -181,7 +196,8 @@ async function browseCrashes(req, res, params, query) {
     return sendError(res, 401, 'unauthorized', 'Viewer token required');
   }
   if (wantsHtml(req, query)) return serveBrowseHtml(res);
-  const app = db.getApp(params.appId);
+  const canonicalId = db.resolveAppId(params.appId);
+  const app = canonicalId ? db.getApp(canonicalId) : undefined;
   if (!app) {
     return sendError(res, 404, 'not_found', 'Unknown appId');
   }
@@ -191,7 +207,7 @@ async function browseCrashes(req, res, params, query) {
   // migration. '' marks "computed, not a crash" so we never re-scan it.
   const batch = config.crashRecomputeBatch;
   if (batch > 0) {
-    const missing = db.listLogsMissingSig(params.appId, batch);
+    const missing = db.listLogsMissingSig(app.app_id, batch);
     for (const r of missing) {
       let sig;
       try {
@@ -210,11 +226,11 @@ async function browseCrashes(req, res, params, query) {
   }
 
   const now = nowUtcIso();
-  const rows = db.listCrashRows(params.appId, now);
+  const rows = db.listCrashRows(app.app_id, now);
 
   // Latest version across ALL app logs (not just crash rows): a version that
   // shipped with zero crashes must not make a later crash look falsely "new".
-  const allVersions = db.listVersions(params.appId).map((v) => v.version);
+  const allVersions = db.listVersions(app.app_id).map((v) => v.version);
   let latestVersion = null;
   for (const v of allVersions) {
     if (latestVersion === null || version.compareVersions(v, latestVersion) > 0) latestVersion = v;

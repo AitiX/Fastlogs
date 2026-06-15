@@ -35,6 +35,7 @@ const { createRedmineIssue } = require('./routes/redmine');
 const { awaitByCode } = require('./routes/await');
 const { browseRoot, browseApp, browseVersion, browseCrashes } = require('./routes/browse');
 const { search } = require('./routes/search');
+const folders = require('./routes/folders');
 const { handleFileUpload, fileDownload, fileViewer } = require('./routes/files');
 const staticRoutes = require('./routes/static');
 
@@ -65,6 +66,13 @@ router.get('/api/await/:appId', awaitByCode);
 // catalog page drives it. ?appId=&q=[&version=][&limit=].
 router.get('/api/search', search);
 
+// Log folders (viewer-token gated). JSON-only; the catalog drives them. GET
+// lists an app's folder paths; POST /move assigns a selection of logs to a
+// folder. The "/move" POST is a distinct method+shape from the GET listing, so
+// the two never collide in the first-fit router.
+router.get('/api/folders', folders.listFolders);
+router.post('/api/folders/move', folders.moveToFolder);
+
 // Catalog (viewer-token gated). The literal "crashes" route MUST precede the
 // "/:version" catch-all: both are 3-segment GET patterns and the router is
 // first-fit by segment count, so "/browse/:appId/:version" would otherwise
@@ -81,6 +89,14 @@ router.get('/viewer.css', (req, res) => staticRoutes.serveAsset(req, res, '/view
 router.get('/viewer.js', (req, res) => staticRoutes.serveAsset(req, res, '/viewer.js'));
 router.get('/browse.css', (req, res) => staticRoutes.serveAsset(req, res, '/browse.css'));
 router.get('/browse.js', (req, res) => staticRoutes.serveAsset(req, res, '/browse.js'));
+router.get('/fonts.css', (req, res) => staticRoutes.serveAsset(req, res, '/fonts.css'));
+
+// Self-hosted web fonts (woff2), referenced from /fonts.css. The :name param is
+// matched against a closed filename whitelist inside serveFont, so traversal
+// can never escape public/fonts/. Single 2-segment route anchored by the
+// literal first segment "fonts", so it never collides with "/:id/raw" (last
+// segment must be "raw") or "/browse/:appId".
+router.get('/fonts/:name', (req, res, params) => staticRoutes.serveFont(req, res, params.name));
 
 // Public per-id surface. These 2-segment routes are anchored by a literal last
 // segment ("raw"/"screenshot"), so they never collide with "/browse/:appId".

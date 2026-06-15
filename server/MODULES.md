@@ -38,6 +38,8 @@ Frozen config object (singleton). `require('./config')` returns:
 | `triageRequiresAdmin` | boolean | Status/tags require the admin token when true (else open by link) |
 | `triageTagMaxLen` / `triageTagMaxCount` | number | Per-tag length cap (32) / tags-per-log cap (20) |
 | `statsTopN` | number | Largest-logs count for the dashboard (5) |
+| `folderMaxLen` / `folderMaxDepth` / `folderSegmentMaxLen` | number | Folder path validation: whole-path length (200) / depth in `/`-segments (8) / one segment (60) |
+| `folderMoveMaxIds` | number | Max log ids accepted in one `POST /api/folders/move` (500) |
 | `crashSigTopK` / `crashRecomputeBatch` | number | Crash signature frame count (8) / lazy-backfill batch (200) |
 | `searchMaxResults` / `searchSnippetTokens` / `searchBackfillBatch` | number | FTS search: result cap (100) / snippet tokens (12) / lazy-index batch (200) |
 | `redmine` | object | `{ url, apiKey, projectId, trackerId, timeoutMs, enabled }`; `enabled` = url && apiKey |
@@ -73,18 +75,36 @@ on load. Exports:
   `expires_at` (ISO string or null). pin=true => pass `(id, 1, null)`.
 - `listApps(): Row[]` - all apps, ordered by `app_id`.
 - `getApp(appId): Row | undefined` - app row by id.
+- `resolveAppId(idOrAlias): string | null` - resolve an appId-or-alias to the
+  canonical `app_id` (a live app wins; else an alias from `app_aliases` is
+  followed; else null). Used by ingest / browse / search / folders so a renamed
+  project's OLD slug keeps working.
 - `upsertApp(row): RunResult` - insert/update an app. `row` keys (all required):
   `{ app_id, name, token_hash, retention_days, max_retention_days,
      sinks_json, enabled, created_at }`.
   `token_hash` is a sha256 hex string or null; `enabled` is 0|1;
   `sinks_json` is a JSON string or null.
+- `renameApp(oldAppId, newAppId, newName?): void` - rename a project in one
+  transaction: re-key the app row + all its logs/files from `oldAppId` to
+  `newAppId`, record `oldAppId` as an alias of `newAppId`, repoint any existing
+  aliases onto `newAppId`, and (if `newName != null`) update the display name.
+  Nothing is lost: log ids are unchanged (per-id links keep working) and blobs
+  (keyed by log id) are untouched. Renaming to the same id only updates the name.
 - `listVersions(appId): Array<{ version, count, last_at, totalBytes, pinnedCount }>` -
   distinct `app_version` values with per-version counts, latest `created_at`,
   total bytes and pinned count.
 - `listLogs(appId, version): Row[]` - logs of one app+version, newest first.
   Columns: `id, title, ts_utc, platform, cnt_error, cnt_warn, cnt_log,
-  log_bytes, has_shot, pinned, status, tags, crash_sig, engine, session_id, created_at, expires_at`.
+  log_bytes, has_shot, pinned, status, tags, crash_sig, engine, session_id, folder, created_at, expires_at`.
+- `listLogsByFolder(appId, version, folder): Row[]` - same as listLogs but
+  restricted to one folder. `folder` is the exact path string, or null for the
+  ROOT (folder NULL). Same row shape (incl. the `folder` column).
 - `listLogsBySession(appId, sessionId, now): Row[]` - live logs of one session, newest first (same columns plus `app_version`).
+- `setLogFolder(id, appId, folder): RunResult` - assign a log to a folder (or
+  clear it; `folder` null = root). Scoped by `app_id` (the move stays in the
+  project); `.changes` is 1 when the log existed in that app.
+- `listFolders(appId): string[]` - distinct non-empty folder paths of an app,
+  alphabetically (the root is implicit and not listed).
 - `statsByApp(): Array<{ app_id, logCount, totalBytes, pinnedCount }>` - storage rollup per app (all rows present).
 - `statsForApp(appId): { logCount, totalBytes, pinnedCount }` - storage rollup for one app.
 - `enginesByApp(): Array<{ app_id, engine, last_at }>` - engine of the latest log per app.
@@ -112,12 +132,15 @@ on load. Exports:
    expires_at NULL, pinned DEFAULT 0, ip_hash)` plus additive columns
    `comment, tester, context_json, breadcrumbs_json, crash_sig, tags,
    redmine_issue_id, redmine_issue_url, engine, scene_context, correlation_code,
-   session_id` (all nullable TEXT), `status TEXT NOT NULL DEFAULT 'new'`,
+   session_id, folder` (all nullable TEXT), `status TEXT NOT NULL DEFAULT 'new'`,
    `shot_count INTEGER NOT NULL DEFAULT 0` and `fts_indexed INTEGER NOT NULL DEFAULT 0`.
+- `app_aliases(alias PK, app_id)` - an OLD appId (`alias`) that resolves to the
+   canonical `app_id` after a rename. `idx_app_aliases_app(app_id)`.
 - Indexes: `idx_logs_expires(expires_at) WHERE pinned=0`,
    `idx_logs_app(app_id, created_at)`,
    `idx_logs_crash(app_id, crash_sig) WHERE crash_sig IS NOT NULL`,
    `idx_logs_session(app_id, session_id, created_at) WHERE session_id IS NOT NULL`,
+   `idx_logs_folder(app_id, folder) WHERE folder IS NOT NULL` (catalog folder filter),
    `idx_logs_unindexed(app_id) WHERE fts_indexed=0` (FTS backfill scan).
 - `logs_fts` - FTS5 virtual table (`content='', contentless_delete=1`) over
    `title, tester, comment, context, scene, body`; rowid derived from the log id
@@ -257,10 +280,11 @@ no new deps).
 
 ## Notes for downstream builders
 
-- `package.json` declares scripts `start`/`test`/`sweep`/`add-app`/`migrate`
+- `package.json` declares scripts `start`/`test`/`sweep`/`add-app`/`rename-app`/`list-apps`/`migrate`/`backfill-fts`
   pointing at `src/server.js`, `test/run.js`, `scripts/sweep.js`,
-  `scripts/add-app.js`, `scripts/migrate.js` - those files are not part of this
-  core and are to be created by the route/script builders.
+  `scripts/add-app.js`, `scripts/rename-app.js`, `scripts/list-apps.js`,
+  `scripts/migrate.js`, `scripts/backfill-fts.js` - those files are not part of
+  this core and are to be created by the route/script builders.
 - Error `code` strings in `auth.validateIngest` align with CONTRACT tokens; the
   route layer maps them to HTTP statuses and the `{ error, message }` body.
 - Retention: route layer clamps `retentionDays` to `[1, app.max_retention_days]`

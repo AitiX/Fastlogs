@@ -14,6 +14,7 @@
     "test": "node test/run.js",
     "sweep": "node scripts/sweep.js",
     "add-app": "node scripts/add-app.js",
+    "rename-app": "node scripts/rename-app.js",
     "list-apps": "node scripts/list-apps.js",
     "migrate": "node scripts/migrate.js",
     "backfill-fts": "node scripts/backfill-fts.js"

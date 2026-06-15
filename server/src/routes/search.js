@@ -64,14 +64,17 @@ async function search(req, res, params, query) {
     return sendError(res, 503, 'search_unavailable', 'Full-text search is not available on this server');
   }
 
-  const appId = query ? (query.get('appId') || '').trim() : '';
+  const requestedAppId = query ? (query.get('appId') || '').trim() : '';
   const q = query ? (query.get('q') || '') : '';
   const versionFilter = query ? (query.get('version') || '').trim() : '';
 
-  if (!appId) {
+  if (!requestedAppId) {
     return sendError(res, 400, 'bad_request', 'appId is required');
   }
-  const app = db.getApp(appId);
+  // Resolve the (possibly old/aliased) slug to the canonical app so a renamed
+  // project's old id keeps searching the renamed project's logs.
+  const appId = db.resolveAppId(requestedAppId);
+  const app = appId ? db.getApp(appId) : undefined;
   if (!app) {
     return sendError(res, 404, 'not_found', 'Unknown appId');
   }
