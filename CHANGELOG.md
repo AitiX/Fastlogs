@@ -6,6 +6,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **Full-text search** over the catalog: `GET /api/search?appId=&q=[&version=]`
+  (viewer-token gated) searches a project's logs by title, tester, comment,
+  context values, scene snapshot and the log body via SQLite FTS5 (contentless
+  index, so the log body is not duplicated on disk). Results are relevance-ranked
+  with a match snippet; a search box appears on the catalog versions page. Raw
+  queries are escaped into a safe FTS5 `MATCH` (injection-proof, malformed input
+  never 500s). Pre-feature logs are indexed lazily per query
+  (`SEARCH_BACKFILL_BATCH`) and/or by `npm run backfill-fts`.
+- **Sessions**: ingest gains an optional `sessionId` (per-launch id; `<=128`
+  chars). The catalog links all logs of one launch via
+  `GET /browse/:appId?session=<id>`, the viewer shows a "session logs" link, and
+  `GET /api/logs/:id` returns `sessionId`.
+
 ## [0.3.0] - 2026-06-13
 
 ### Added
