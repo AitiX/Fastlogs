@@ -101,34 +101,48 @@
   <div class="ctx-panel" id="attachments-panel" style="display:none">
     <div class="ctx-panel-header" id="attachments-panel-header">
       <span class="ctx-arrow">&#9658;</span>
-      <h3>Attachments</h3>
+      <h3>Saves / Data</h3>
       <span class="ctx-count" id="attachments-count"></span>
     </div>
     <div class="ctx-body" id="attachments-body"></div>
   </div>
 
-  <div class="log-controls">
-    <input class="search-input" id="search-input" type="search" placeholder="Search logs...">
-    <div class="level-filters">
-      <button class="level-btn level-btn-all active" data-level="all" type="button">All</button>
-      <button class="level-btn level-btn-e" data-level="error" type="button">E</button>
-      <button class="level-btn level-btn-w" data-level="warn" type="button">W</button>
-      <button class="level-btn level-btn-l" data-level="log" type="button">L</button>
+  <!-- The Log lives inside a collapsible panel (same .ctx-panel pattern as
+       Device Info / Context), but it starts EXPANDED via .open in the markup -
+       the log is the page's primary content and should be visible on load. -->
+  <div class="ctx-panel log-panel open" id="log-panel">
+    <div class="ctx-panel-header" id="log-panel-header">
+      <span class="ctx-arrow">&#9658;</span>
+      <h3>Log</h3>
+      <span class="ctx-count" id="log-panel-count"></span>
     </div>
-    <div class="view-toggle">
-      <button class="view-btn active" data-view="pretty" type="button">Pretty</button>
-      <button class="view-btn" data-view="raw" type="button">Raw</button>
-    </div>
-  </div>
+    <div class="ctx-body log-panel-body" id="log-panel-body">
 
-  <div class="log-wrap">
-    <div class="log-stats">
-      <span id="log-line-count">0 lines</span>
-      <span id="log-visible-count"></span>
-      <button class="log-copy-btn" id="log-copy-btn" type="button">Copy log</button>
+      <div class="log-controls">
+        <input class="search-input" id="search-input" type="search" placeholder="Search logs...">
+        <div class="level-filters">
+          <button class="level-btn level-btn-all active" data-level="all" type="button">All</button>
+          <button class="level-btn level-btn-e" data-level="error" type="button">E</button>
+          <button class="level-btn level-btn-w" data-level="warn" type="button">W</button>
+          <button class="level-btn level-btn-l" data-level="log" type="button">L</button>
+        </div>
+        <div class="view-toggle">
+          <button class="view-btn active" data-view="pretty" type="button">Pretty</button>
+          <button class="view-btn" data-view="raw" type="button">Raw</button>
+        </div>
+      </div>
+
+      <div class="log-wrap">
+        <div class="log-stats">
+          <span id="log-line-count">0 lines</span>
+          <span id="log-visible-count"></span>
+          <button class="log-copy-btn" id="log-copy-btn" type="button">Copy log</button>
+        </div>
+        <div class="log-body log-pretty active" id="log-pretty"></div>
+        <pre class="log-raw" id="log-raw"></pre>
+      </div>
+
     </div>
-    <div class="log-body log-pretty active" id="log-pretty"></div>
-    <pre class="log-raw" id="log-raw"></pre>
   </div>
 
 </div>

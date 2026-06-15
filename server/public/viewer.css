@@ -322,6 +322,16 @@ a:hover { color: var(--accent-h); text-decoration: underline; }
 .view-btn.active { background: var(--bg3); color: var(--text); }
 .view-btn:hover:not(.active) { background: var(--bg2); }
 
+/* ---- Log section (collapsible panel wrapping the controls + output) ---- */
+
+/* The Log reuses the .ctx-panel chrome but is the primary content, so it ships
+   .open in the markup. These rules only trim the inherited .ctx-body padding so
+   the controls/output sit flush, and drop the bottom margin since it is the last
+   block on the page. */
+.log-panel { margin-bottom: 0; }
+.log-panel-body { padding: 12px 14px 14px; }
+.log-panel-body .log-controls:first-child { margin-top: 0; }
+
 /* ---- Log output ---- */
 
 .log-wrap {

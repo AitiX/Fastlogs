@@ -798,6 +798,20 @@
 
   document.getElementById('log-line-count').textContent = logLines.length + ' lines';
 
+  // Log section collapse. The Log sits in a .ctx-panel (same pattern as Device
+  // Info / Context) but starts EXPANDED (.open is set in the markup) since it is
+  // the primary content. Clicking the header toggles it like the other panels.
+  // The header also carries a compact line-count so the count stays visible when
+  // the section is collapsed.
+  var logPanel = document.getElementById('log-panel');
+  var logPanelHeader = document.getElementById('log-panel-header');
+  if (logPanel && logPanelHeader) {
+    document.getElementById('log-panel-count').textContent = '(' + logLines.length + ')';
+    logPanelHeader.addEventListener('click', function () {
+      logPanel.classList.toggle('open');
+    });
+  }
+
   // Detect level for a log line. Returns 'error', 'warn', or 'log'.
   function detectLevel(line) {
     var low = line.toLowerCase();
@@ -825,37 +839,69 @@
     return false;
   }
 
-  // Parse an entry-header line per the fixed line-format contract:
-  //   [L|W|E] +<sec.mmm>[ f<frame>] <message>
-  // The level marker (L/W/E) and the relative timestamp are always present in
-  // the new format; the frame group (f<n>) is OPTIONAL - the client does not
-  // emit it yet, and old logs predate it. Returns null for lines that do not
-  // match the header shape (free-form / legacy lines), so callers fall back to
-  // the heuristic detectLevel() and skip the rich metadata.
-  //   -> { level: 'error'|'warn'|'log', relSec: number, frame: number|null, message: string }
+  // Parse an entry-header line. The recorder line-format is NOT a single
+  // universal shape: each engine writes its own, and this parser recognises
+  // both, returning a normalized record (or null for anything else - free-form
+  // / legacy lines fall back to the heuristic detectLevel() and render plain).
+  //
+  //   Unity:      [L|W|E] +<sec.mmm>[ f<frame>] <message>
+  //               level marker (L/W/E) + a relative offset (seconds since the
+  //               session marker) are always present; the frame group (f<n>) is
+  //               OPTIONAL. Time is reconstructed as session-start + relSec.
+  //   GameMaker:  [hh:mm:ss] LOG|WARN|ERROR: <message>
+  //               each line carries an ABSOLUTE wall-clock (UTC hh:mm:ss), so
+  //               there is no relSec to add to a session marker and no frame.
+  //
+  // Returned record (fields not applicable to the matched engine are null):
+  //   { level: 'error'|'warn'|'log',
+  //     relSec: number|null,    // Unity: seconds since session start; GM: null
+  //     frame:  number|null,    // Unity (when emitted); GM: null
+  //     clock:  string|null,    // GM: absolute "hh:mm:ss"; Unity: null
+  //     message: string }
   var HEADER_RE = /^\[([LWE])\]\s+\+([0-9.]+)(?:\s+f(\d+))?\s+(.*)$/;
   var HEADER_LEVEL = { L: 'log', W: 'warn', E: 'error' };
+  // GameMaker: "[hh:mm:ss] LEVEL: message". LEVEL words are LOG / WARN / ERROR
+  // (see scr_fastlogs_recorder.gml __fastlogs_level_tag). Matched case-insensitively
+  // for resilience; mapped to the same log/warn/error buckets as Unity.
+  var GM_HEADER_RE = /^\[(\d{2}:\d{2}:\d{2})\]\s+(LOG|WARN|ERROR):\s?(.*)$/i;
+  var GM_HEADER_LEVEL = { LOG: 'log', WARN: 'warn', ERROR: 'error' };
   function parseHeader(line) {
     if (!line) return null;
     var m = HEADER_RE.exec(line);
-    if (!m) return null;
-    var rel = parseFloat(m[2]);
-    if (isNaN(rel)) return null;
-    return {
-      level: HEADER_LEVEL[m[1]] || 'log',
-      relSec: rel,
-      frame: (m[3] !== undefined) ? parseInt(m[3], 10) : null,
-      message: m[4]
-    };
+    if (m) {
+      var rel = parseFloat(m[2]);
+      if (isNaN(rel)) return null;
+      return {
+        level: HEADER_LEVEL[m[1]] || 'log',
+        relSec: rel,
+        frame: (m[3] !== undefined) ? parseInt(m[3], 10) : null,
+        clock: null,
+        message: m[4]
+      };
+    }
+    var gm = GM_HEADER_RE.exec(line);
+    if (gm) {
+      return {
+        level: GM_HEADER_LEVEL[gm[2].toUpperCase()] || 'log',
+        relSec: null,
+        frame: null,
+        clock: gm[1],
+        message: gm[3]
+      };
+    }
+    return null;
   }
 
-  // Recognise a session marker emitted at the start of each launch:
-  //   ==== FastLogs session <guid> | <UTC> | ...
+  // Recognise a session marker emitted at the start of each launch. Both engines
+  // emit it; the case differs, so the match is case-insensitive (/i):
+  //   Unity:      ==== FastLogs session <guid> | <UTC> | ...
+  //   GameMaker:  ===== FASTLOGS SESSION <guid> | <UTC> | ... =====
   // The second pipe-delimited field is the launch wall-clock in UTC. We track
-  // the nearest preceding marker so each entry's relSec can be turned into an
-  // absolute time. Returns the parsed Date (or null when the field is missing
-  // or unparseable - then entries keep only their relative "+sec" time).
-  var SESSION_RE = /^=+\s*FastLogs session\b/;
+  // the nearest preceding marker so a Unity entry's relSec can be turned into an
+  // absolute time. (GM entries carry their own absolute clock and do not need
+  // it.) Returns the parsed Date (or null when the field is missing or
+  // unparseable - then Unity entries keep only their relative "+sec" time).
+  var SESSION_RE = /^=+\s*FastLogs session\b/i;
   function parseSessionStart(line) {
     if (!line || !SESSION_RE.test(line)) return undefined; // not a marker
     var parts = line.split('|');
@@ -948,8 +994,15 @@
     var entrySessionStart = sessionStart;
     var relSec = header ? header.relSec : null;
     var frame = header ? header.frame : null;
+    var clock = header ? header.clock : null;   // GM: absolute "hh:mm:ss"
     var wall = fmtWall(entrySessionStart, relSec);
     var rel = fmtRel(relSec);
+    // Unified Time string for tooltip / detail panel. GameMaker carries an
+    // absolute wall-clock per line (shown verbatim, no session-marker math);
+    // Unity has a relative "+sec" plus an optional reconstructed wall-clock.
+    var timeStr = clock
+      ? clock
+      : (rel ? (rel + (wall ? ' (' + wall + ')' : '')) : '');
 
     // Expandable when there is something extra to show below the line.
     var expandable = (traceLines.length > 0) || (header !== null);
@@ -999,7 +1052,7 @@
     // Hover tooltip on the row: Frame (only if present) + Time.
     var tipParts = [];
     if (frame !== null) tipParts.push('Frame ' + frame);
-    if (rel) tipParts.push('Time ' + rel + (wall ? ' (' + wall + ')' : ''));
+    if (timeStr) tipParts.push('Time ' + timeStr);
     if (tipParts.length) row.title = tipParts.join('  |  ');
 
     logPrettyEl.appendChild(row);
@@ -1020,8 +1073,7 @@
       kv.className = 'log-detail-kv-list';
       detailRow(kv, 'Level', level.charAt(0).toUpperCase() + level.slice(1));
       detailRow(kv, 'Frame', frame !== null ? String(frame) : '-');
-      var timeStr = rel ? (rel + (wall ? ' (' + wall + ')' : '')) : '-';
-      detailRow(kv, 'Time', timeStr);
+      detailRow(kv, 'Time', timeStr || '-');
       if (repeats > 1) detailRow(kv, 'Repeats', 'x' + repeats);
       detail.appendChild(kv);
 
