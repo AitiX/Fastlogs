@@ -27,6 +27,9 @@ function __fastlogs_state() {
         var ring_size = max(1, FASTLOGS_RING_SIZE);
         global.__fastlogs = {
             inited       : false,           // прошёл ли fastlogs_init
+            // sessionId (#9): GUID ТЕКУЩЕГО запуска - один на сессию, уходит в КАЖДЫЙ payload
+            //   (поле 'sessionId', опц.). Генерируется в fastlogs_init; "" пока не инициализировано.
+            session_id   : "",
             // Кольцевой буфер записей лога. Каждый элемент: { time, level, text } или undefined.
             ring         : array_create(ring_size, undefined),
             ring_size    : ring_size,
@@ -55,6 +58,13 @@ function __fastlogs_state() {
             autosend_last_sent_us : {},   // sig -> us последней авто-ДОСТАВКИ (оконный дедуп доставки)
             autosend_last_us   : -1,   // get_timer() последней авто-ОТПРАВКИ (мкс), -1 = не было
             autosend_count     : 0,    // сколько авто-отправок сделано за сессию (лимит)
+            // АВТО-ОТПРАВКА ПО ПАТТЕРНУ (#9): re-entrancy guard. Сам путь авто-отправки и её статусы
+            //   могут писать в лог (flog) - этот флаг не даёт совпадению ВНУТРИ авто-отправки
+            //   рекурсивно запустить новую авто-отправку (защита от петли).
+            in_pattern_autosend : false,
+            // ФОЛБЭК GROUP-UPLOAD (#6a): состояние ОДНОЙ активной цепочки пофайловой отправки
+            //   (заполняется в scr_fastlogs_files.__fastlogs_group_upload). undefined - нет цепочки.
+            group               : undefined,
             // Поля recorder/http заполняют свои подсостояния лениво в своих модулях.
         };
     }
@@ -73,6 +83,80 @@ function __fastlogs_cfg(key, default_value) {
         if (!is_undefined(v)) return v;
     }
     return default_value;
+}
+
+// =====================================================================================
+// Внутреннее: сгенерировать RFC4122-v4-образный GUID-строку (для sessionId, #9). В GML нет
+//   встроенного uuid. Берём 32 hex-ниббла из MD5 от энтропии запуска и патчим версию/вариант.
+//   ПОЧЕМУ не LCG вручную: арифметика в GML идёт в double (f64) - 64-битное умножение
+//   seed*множитель теряет младшие биты, а литералы-множители >2^53 ещё и парсятся округлённо,
+//   из-за чего ручной 64-битный LCG ВЫРОЖДАЕТСЯ и выдаёт почти одинаковые id у разных запусков.
+//   md5_string_utf8 (встроенная, уже используется в рекордере) даёт ровно 32 hex-символа с
+//   хорошим распределением без 64-битной арифметики. Энтропия запуска: get_timer (мкс с старта)
+//   + current_time (мс с загрузки ОС) + дата + один irandom. irandom тянем под СВОИМ временным
+//   seed (randomize), а исходный seed игры сохраняем и восстанавливаем, чтобы не сдвинуть
+//   RNG-последовательность игры и не зависеть от её детерминированного seed.
+//   Формат: xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx (версия 4, variant 8..b) - стабильный
+//   уникальный идентификатор (криптостойкость не требуется).
+// =====================================================================================
+function __fastlogs_new_guid() {
+    // Случайный компонент под собственным энтропийным seed; seed игры сохраняем/восстанавливаем,
+    //   чтобы не трогать её RNG-поток (и не зависеть от него, если игра выставила фикс-seed).
+    var rnd = 0;
+    var saved_seed = random_get_seed();
+    randomize();                          // энтропийный seed на время одного броска
+    rnd = irandom($7FFFFFFE);
+    random_set_seed(saved_seed);          // вернуть RNG игры как было
+
+    var entropy =
+        string(get_timer()) + "-" +
+        string(current_time) + "-" +
+        string(date_current_datetime()) + "-" +
+        string(rnd);
+
+    var hex = md5_string_utf8(entropy);   // 32 hex-символа (нижний регистр)
+    if (!is_string(hex) || string_length(hex) < 32) {
+        // Подстраховка: md5 неожиданно вернул не то -> дополним псевдо-hex из энтропии.
+        hex = (is_string(hex) ? hex : "") + md5_string_utf8(entropy + "-fallback");
+    }
+
+    var hexchars = "0123456789abcdef";
+    var out = "";
+    // 32 hex-ниббла + дефисы по шаблону 8-4-4-4-12.
+    for (var i = 0; i < 32; i++) {
+        // Позиции дефисов (после 8, 12, 16, 20 нибблов).
+        if (i == 8 || i == 12 || i == 16 || i == 20) out += "-";
+
+        var ch = string_char_at(hex, i + 1);   // hex 1-based
+
+        if (i == 12) {
+            ch = "4";                           // версия 4
+        } else if (i == 16) {
+            // variant 8..b: берём ниббл из md5 и форсим старшие биты в 10xx.
+            var v = (__fastlogs_hex_nibble(ch) & $3) | $8;
+            ch = string_char_at(hexchars, v + 1);   // hexchars 1-based
+        }
+        out += ch;
+    }
+    return out;
+}
+
+// Внутреннее: hex-символ ('0'..'f', любой регистр) -> число 0..15; иначе 0.
+function __fastlogs_hex_nibble(ch) {
+    var pos = string_pos(string_lower(ch), "0123456789abcdef");
+    return (pos > 0) ? (pos - 1) : 0;
+}
+
+// =====================================================================================
+// fastlogs_session_id() -> string  (фича #9)
+// GUID текущего запуска (один на сессию), уходит в КАЖДЫЙ payload как 'sessionId'. Если
+//   fastlogs_init ещё не вызван - "" (поле в payload тогда опускается). "" при !FASTLOGS_ENABLED.
+// =====================================================================================
+function fastlogs_session_id() {
+    if (!FASTLOGS_ENABLED) { return ""; }
+    var st = __fastlogs_state();
+    var s = st.session_id;
+    return is_string(s) ? s : "";
 }
 
 // =====================================================================================
@@ -103,6 +187,16 @@ function fastlogs_init(config_struct = undefined) {
 
     if (!st.inited) {
         st.inited = true;
+
+        // sessionId (#9): GUID запуска - один на всю сессию. Приоритет: runtime-override
+        //   fastlogs_init({ sessionId }) -> иначе генерируем RFC4122-v4-образный GUID. Уходит в
+        //   КАЖДЫЙ payload (поле 'sessionId'), помогает группировать отчёты одного запуска во вьюере.
+        var cfg_sess = __fastlogs_cfg("sessionId", "");
+        if (is_string(cfg_sess) && string_length(cfg_sess) > 0) {
+            st.session_id = cfg_sess;
+        } else {
+            st.session_id = __fastlogs_new_guid();
+        }
 
         // Применить автостарт записи (учитывая рантайм-оверрайд autoStartRecording).
         var auto_rec = __fastlogs_cfg("autoStartRecording", FASTLOGS_AUTO_START_RECORDING);
@@ -232,6 +326,72 @@ function __fastlogs_autosend_allowed(sig) {
     st.autosend_last_us = now_us;
     st.autosend_count  += 1;
     return { allowed: true, reason: "" };
+}
+
+// =====================================================================================
+// АВТО-ОТПРАВКА ПО ПАТТЕРНУ В ЛОГЕ (#9).
+// -------------------------------------------------------------------------------------
+// GML НЕ имеет нативного regex (сверено: см. scr_fastlogs_util) -> матч упрощённый:
+//   регистронезависимая ПОДСТРОКА + минимальный glob через '*' ТОЛЬКО по краям паттерна:
+//     "foo"   -> текст содержит "foo" (подстрока);
+//     "*foo"  -> текст ОКАНЧИВАЕТСЯ на "foo";
+//     "foo*"  -> текст НАЧИНАЕТСЯ с "foo";
+//     "*foo*" -> подстрока (как дефолт).
+//   '*' в СЕРЕДИНЕ паттерна трактуется БУКВАЛЬНО (полноценный glob/regex не поддержан -
+//   осознанное ограничение, задокументировано в config FASTLOGS_AUTOSEND_PATTERNS / PUBLIC-API).
+// =====================================================================================
+
+// Эффективный список паттернов авто-отправки: runtime-override fastlogs_init({autosendPatterns})
+//   -> иначе макрос FASTLOGS_AUTOSEND_PATTERNS. Только массив строк; иначе пустой список.
+function __fastlogs_autosend_patterns() {
+    var pats = __fastlogs_cfg("autosendPatterns", FASTLOGS_AUTOSEND_PATTERNS);
+    if (!is_array(pats)) return [];
+    return pats;
+}
+
+// Один паттерн против текста (регистронезависимо). См. правила '*' по краям выше.
+function __fastlogs_pattern_match_one(text_lower, pattern) {
+    if (!is_string(pattern)) return false;
+    var p = string_lower(pattern);
+    var pl = string_length(p);
+    if (pl == 0) return false;   // пустой паттерн ничего не матчит
+
+    var star_head = (string_char_at(p, 1) == "*");
+    var star_tail = (pl >= 1 && string_char_at(p, pl) == "*");
+
+    // Снять звёздочки по краям, получив "ядро" для сравнения.
+    var core = p;
+    if (star_head) core = string_delete(core, 1, 1);
+    if (star_tail && string_length(core) > 0) core = string_delete(core, string_length(core), 1);
+    var cl = string_length(core);
+    if (cl == 0) return true;   // паттерн был только из '*' -> матчит что угодно
+
+    var tl = string_length(text_lower);
+
+    if (star_head && !star_tail) {
+        // "*core" -> текст ОКАНЧИВАЕТСЯ на core.
+        if (tl < cl) return false;
+        return (string_copy(text_lower, tl - cl + 1, cl) == core);
+    }
+    if (!star_head && star_tail) {
+        // "core*" -> текст НАЧИНАЕТСЯ с core.
+        if (tl < cl) return false;
+        return (string_copy(text_lower, 1, cl) == core);
+    }
+    // "core" или "*core*" -> подстрока.
+    return (string_pos(core, text_lower) > 0);
+}
+
+// true если текст лога совпадает хотя бы с одним паттерном авто-отправки.
+function __fastlogs_log_matches_autosend(text) {
+    var pats = __fastlogs_autosend_patterns();
+    var np = array_length(pats);
+    if (np == 0) return false;
+    var tl = string_lower(is_string(text) ? text : string(text));
+    for (var i = 0; i < np; i++) {
+        if (__fastlogs_pattern_match_one(tl, pats[i])) return true;
+    }
+    return false;
 }
 
 // =====================================================================================
@@ -390,6 +550,11 @@ function __fastlogs_build_fallback_crash_json(ex, opts = undefined) {
         if (is_string(tester) && string_length(tester) > 0) { body.tester = tester; }
     }
 
+    // sessionId (опц., #9) - GUID запуска, чтобы фолбэк-краш группировался с обычными отчётами сессии.
+    var f_sess = "";
+    try { f_sess = fastlogs_session_id(); } catch (_esid) { f_sess = ""; }
+    if (is_string(f_sess) && string_length(f_sess) > 0) { body.sessionId = f_sess; }
+
     return json_stringify(body);
 }
 
@@ -424,7 +589,20 @@ function __fastlogs_on_unhandled_exception(ex) {
     }
 
     // Запишем как error (инкремент счётчика + кольцо + флаш на диск, если запись включена).
-    flog(msg, FASTLOGS_LEVEL_ERROR);
+    //   ВАЖНО: на время этой записи подавляем pattern-auto-send (#9). Иначе, если
+    //   FASTLOGS_AUTOSEND_PATTERNS совпадёт с текстом исключения (напр. '*EXCEPTION*'),
+    //   pattern-путь отправил бы отчёт ПЕРВЫМ - занял слот лимита сессии и обновил троттл,
+    //   из-за чего штатная крэш-авто-отправка ниже могла бы оказаться затроттлена. Крэш-путь
+    //   владеет отправкой целиком (и шлёт крэш-специфику со своим title). Гард сбрасываем
+    //   после flog (саму крэш-отправку он не трогает - она идёт ниже).
+    var __st_crash = __fastlogs_state();
+    var __prev_pat_guard = __st_crash.in_pattern_autosend;
+    __st_crash.in_pattern_autosend = true;
+    try {
+        flog(msg, FASTLOGS_LEVEL_ERROR);
+    } finally {
+        __st_crash.in_pattern_autosend = __prev_pat_guard;
+    }
 
     // Принудительный флаш на диск даже если запись была выключена: при краше важно сохранить.
     // Реализация в recorder - дозаписывает ВСЁ кольцо в персист-файл синхронно (включая батч).
@@ -577,6 +755,38 @@ function flog(message, level = FASTLOGS_LEVEL_LOG) {
 
     // Персист на диск - только при активной записи. Делегируем recorder'у (он гейтит сам).
     fastlogs_recorder_on_record(rec);
+
+    // АВТО-ОТПРАВКА ПО ПАТТЕРНУ (#9): если текст совпал с одним из FASTLOGS_AUTOSEND_PATTERNS -
+    //   авто-отправляем текущую запись через fastlogs_send, с тем же троттлом/лимитом сессии, что
+    //   и авто-отправка по крашу (__fastlogs_autosend_allowed). Re-entrancy guard защищает от петли:
+    //   статусы/логи самого пути отправки не должны рекурсивно триггерить новую авто-отправку.
+    //   best-effort: матч/отправка не должны ронять основной путь логирования.
+    if (!st.in_pattern_autosend) {
+        try {
+            if (__fastlogs_log_matches_autosend(txt)) {
+                // Сигнатура для дедупа доставки: префикс 'p' + md5(текст) (стабильный ключ структа).
+                //   Тот же повторяющийся маркер подавляется в окне minGap*2 (как краш-дедуп).
+                var psig = "p" + md5_string_utf8(txt);
+                var gate = __fastlogs_autosend_allowed(psig);
+                if (gate.allowed) {
+                    st.in_pattern_autosend = true;
+                    try {
+                        // Отправка ТЕКУЩЕЙ записи (логи берутся из кольца). Без скриншота (лёгкая
+                        //   авто-отправка по маркеру). title помечает источник в каталоге вьюера.
+                        if (script_exists(asset_get_index("fastlogs_send"))) {
+                            fastlogs_send({ title: "Auto-send (pattern)", screenshot: false });
+                        }
+                    } catch (_eas) { /* не валим логирование */ }
+                    st.in_pattern_autosend = false;
+                } else {
+                    show_debug_message("[FastLogs] pattern auto-send skipped: " + gate.reason);
+                }
+            }
+        } catch (_epat) {
+            // На случай исключения в матче/гейте: сбросить guard и проглотить.
+            st.in_pattern_autosend = false;
+        }
+    }
 }
 
 // Удобные обёртки с фиксированным уровнем (контракт PUBLIC-API).

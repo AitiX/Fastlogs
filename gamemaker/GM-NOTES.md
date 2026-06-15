@@ -323,9 +323,14 @@ size)` (как скриншот). Кап по **DECODED**-размеру (`FASTL
 ДО base64, на клиенте И на сервере. Бинарь БЕЗ PII-скраба (явный инвариант).
 
 **Папка зипуется НА КЛИЕНТЕ в один `.zip` методом STORE (без компрессии)** - вручную в буфере,
-для паритета с Unity (один архив). Запасной group-upload по `groupId` НЕ используется (zip-store
-подтверждён рабочим). Сверено по `YAL-GameMaker/zip-writer` (вариант `zip23`, GML-only) и PKZIP
-APPNOTE; built-ins сверены с `GmlSpec.xml` рантайма 2024.14.2.256 (точные сигнатуры/арность):
+для паритета с Unity (один архив). **ФОЛБЭК (#6a):** если упаковка провалилась
+(`__fastlogs_zip_store` вернул `-1`), отправка деградирует на **group-upload** - каждый файл
+уходит ОТДЕЛЬНЫМ аплоадом на `/api/files` с общим `groupId`, ЦЕПОЧКОЙ (single-flight: файл[k+1]
+стартует в `onDone` файла[k]; состояние цепочки - в `global.__fastlogs.group`). `kind` для
+папки-архива - `"folder"` (НЕ `"zip"`: сервер `VALID_KINDS`={file,folder,save,screenshot,archive,
+other}, `"zip"` -> null; паритет с Unity, который шлёт `"folder"`). Сверено по
+`YAL-GameMaker/zip-writer` (вариант `zip23`, GML-only) и PKZIP APPNOTE; built-ins сверены с
+`GmlSpec.xml` рантайма 2024.14.2.256 (точные сигнатуры/арность):
 
 - `buffer_crc32(buffer, offset, size)` -> Real. **Возвращает CRC ДО финального XOR** -> для ZIP
   нужен `(buffer_crc32(buf,0,size) ^ $FFFFFFFF) & $FFFFFFFF` (стандарт PKZIP/zlib, полином

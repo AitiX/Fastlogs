@@ -121,6 +121,16 @@ function fastlogs_build_payload(opts = undefined) {
         body.tester = tester;
     }
 
+    // --- sessionId (ОПЦ., #9): GUID ТЕКУЩЕГО запуска; уходит с КАЖДЫМ отчётом ---
+    // Источник: fastlogs_session_id() (core; генерируется в fastlogs_init). Поле называется
+    //   РОВНО 'sessionId' (сервер уже принимает). Пустое опускаем (контракт: не слать пустые).
+    if (script_exists(asset_get_index("fastlogs_session_id"))) {
+        var sess = fastlogs_session_id();
+        if (is_string(sess) && string_length(sess) > 0) {
+            body.sessionId = sess;
+        }
+    }
+
     // --- context (ОПЦ., object string->string; фича #2): едет с КАЖДЫМ отчётом ---
     // Контракт: пустое опускать. Значения чистим redaction (#3). Сервер капает ~4KB суммарно.
     if (script_exists(asset_get_index("fastlogs_context_snapshot"))) {

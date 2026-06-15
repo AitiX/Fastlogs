@@ -15,7 +15,12 @@
 //   для ПАРИТЕТА с Unity (один .zip). Структура ZIP (local headers + CRC32 + central directory
 //   + EOCD) сверена с YAL-GameMaker/zip-writer и спецификацией PKZIP APPNOTE. buffer_crc32
 //   возвращает CRC ДО финального XOR -> для ZIP нужен `^ $FFFFFFFF` (см. __fastlogs_zip_crc32).
-//   Запасной вариант (group-upload по groupId) НЕ используется: zip-store подтверждён рабочим.
+//   ФОЛБЭК: если zip-store провалился (__fastlogs_zip_store вернул -1), отправка деградирует на
+//   GROUP-UPLOAD (__fastlogs_group_upload) - каждый файл уходит ОТДЕЛЬНЫМ аплоадом на /api/files
+//   с общим groupId, цепочкой (single-flight: файл[k+1] стартует в onDone файла[k]). Так операция
+//   доедет даже без упаковки. ВНИМАНИЕ про kind: сервер VALID_KINDS = file|folder|save|screenshot|
+//   archive|other; значение "zip" НЕ валидно (сервер -> null), поэтому для папки-архива используем
+//   kind="folder" (паритет с Unity, который шлёт "folder" для папок), а НЕ "zip".
 //
 // PII: бинарь БЕЗ скраба (явный инвариант - redaction к блобу/именам файлов НЕ применяется,
 //   только кап по размеру). Это сознательно: файл/сейв должны дойти как есть.
@@ -96,9 +101,17 @@ function fastlogs_send_folder(path, opts = undefined) {
     // Зип-store всех файлов в один буфер (rel-пути сохраняют структуру внутри архива).
     var zip = __fastlogs_zip_store(entries);
     if (zip < 0) {
-        show_debug_message("[FastLogs] send_folder: zip build failed");
-        fastlogs_send_status("error", "Не удалось упаковать папку", false);
-        return false;
+        // ZIP-store не удался (например, нет ни одного читаемого файла) -> ФОЛБЭК group-upload:
+        //   шлём каждый файл папки ОТДЕЛЬНЫМ аплоадом на /api/files с общим groupId (см.
+        //   __fastlogs_group_upload). Один .zip предпочтительнее (паритет с Unity), но фолбэк
+        //   гарантирует, что операция всё равно доедет, если упаковка провалилась.
+        // ВНИМАНИЕ по охвату: __fastlogs_zip_store возвращает -1 только если ни один файл не
+        //   прочитался (cd_count==0). Фолбэк повторно делает buffer_load на ТЕХ ЖЕ файлах -
+        //   значит реально помогает лишь при ТРАНЗИЕНТНОМ сбое чтения (со второй попытки файл
+        //   прочитался). При стабильно нечитаемых файлах group-upload пропустит все entries и
+        //   честно вернёт false (без потери данных).
+        show_debug_message("[FastLogs] send_folder: zip build failed -> group-upload fallback");
+        return __fastlogs_group_upload(entries, opts);
     }
 
     var name = variable_struct_exists(opts, "name") && is_string(opts.name) && string_length(opts.name) > 0
@@ -153,9 +166,12 @@ function fastlogs_send_files(paths, opts = undefined) {
 
     var zip = __fastlogs_zip_store(entries);
     if (zip < 0) {
-        show_debug_message("[FastLogs] send_files: zip build failed");
-        fastlogs_send_status("error", "Не удалось упаковать файлы", false);
-        return false;
+        // ZIP-store не удался -> ФОЛБЭК group-upload каждого файла отдельно с общим groupId.
+        // Как и в send_folder: фолбэк реально помогает лишь при ТРАНЗИЕНТНОМ сбое чтения
+        //   (buffer_load удался со второй попытки). При стабильно нечитаемых файлах group-upload
+        //   пропустит все entries и вернёт false без потери данных.
+        show_debug_message("[FastLogs] send_files: zip build failed -> group-upload fallback");
+        return __fastlogs_group_upload(entries, opts);
     }
 
     var name = variable_struct_exists(opts, "name") && is_string(opts.name) && string_length(opts.name) > 0
@@ -171,6 +187,194 @@ function fastlogs_send_files(paths, opts = undefined) {
     var ok = __fastlogs_send_buffer(zip, name, mime, opts);
     buffer_delete(zip);
     return ok;
+}
+
+// =====================================================================================
+// ФОЛБЭК GROUP-UPLOAD (используется fastlogs_send_folder/fastlogs_send_files, КОГДА zip-store
+//   провалился). Шлёт каждый файл из entries ОТДЕЛЬНЫМ аплоадом на /api/files с ОБЩИМ groupId
+//   (групповая метка операции по контракту). Один .zip предпочтительнее (паритет с Unity), но
+//   фолбэк гарантирует доставку, если упаковка не удалась.
+//
+// SINGLE-FLIGHT: http-слой допускает только ОДИН аплоад за раз (см. fastlogs_files_post_internal:
+//   при hs.is_sending новый запрос отбивается). Поэтому НЕ шлём N запросов сразу - идём ЦЕПОЧКОЙ:
+//   отправляем файл[k], а в его onDone (по завершении) запускаем файл[k+1]. Так фолбэк уважает
+//   single-flight без параллельных запросов и не теряет файлы. Возврат относится к ПЕРВОМУ файлу
+//   (true если первый аплоад поставлен; false если ни один файл не удалось поставить).
+//
+// СОСТОЯНИЕ ЦЕПОЧКИ хранится в global.__fastlogs.group (а НЕ в замыкании локальной переменной) -
+//   так же, как http-слой держит in-flight состояние глобально, чтобы async-колбэк читал
+//   стабильную ссылку (не полагаемся на захват `var` в анонимной функции). Колбэк завершения
+//   файла - __fastlogs_group_upload_on_done, привязанный method() к global-стейту. Одна цепочка
+//   за раз (как single-flight отправки): повторный запуск во время активной цепочки отбивается.
+//
+// entries: массив { abs, rel } (rel - относительный путь; имя в каталоге = rel, чтобы сохранить
+//   структуру папки). opts - те же опции отправки; groupId берётся из opts (если задан) либо
+//   генерируется. kind по умолчанию "folder" (как у zip-пути; паритет с Unity).
+//
+// UX-ЗАМЕЧАНИЕ (ожидаемое поведение редкого фолбэка): так как каждый файл идёт ОТДЕЛЬНЫМ
+//   аплоадом, на каждый файл цепочки поднимается статус "Отправка файла..." и Other_62 на
+//   успехе показывает тост "Файл отправлен" + copy-on-send (last_url/буфер обмена). Для папки
+//   из N файлов тестер увидит N тостов и N копирований ссылки, без отдельного финального
+//   агрегатного тоста. Это ПРИЕМЛЕМО: фолбэк срабатывает только при провале упаковки в .zip
+//   (редкий путь); штатный путь шлёт один .zip с одним тостом.
+// =====================================================================================
+function __fastlogs_group_upload(entries, opts = undefined) {
+    if (!FASTLOGS_ENABLED) { return false; }
+    if (!is_struct(opts)) { opts = {}; }
+    if (!is_array(entries) || array_length(entries) == 0) { return false; }
+
+    var st = __fastlogs_state();   // core: общий global-стейт
+
+    // Одна цепочка за раз: если предыдущая ещё активна - не запускаем параллельную.
+    if (variable_struct_exists(st, "group") && is_struct(st.group) && st.group.active) {
+        show_debug_message("[FastLogs] group-upload skipped: another group-upload in progress");
+        fastlogs_send_status("info", "Отправка уже идёт...", false);
+        return false;
+    }
+
+    // Общий groupId на всю операцию: из opts (если задан) либо генерируем ("grp-" + сессия/таймер).
+    var group_id = (variable_struct_exists(opts, "groupId") && is_string(opts.groupId) && string_length(opts.groupId) > 0)
+                 ? opts.groupId
+                 : __fastlogs_make_group_id();
+
+    fastlogs_send_status("sending", "Отправка файлов (по одному)...", false);
+
+    // Состояние цепочки в global-стейте (стабильная ссылка для async-колбэка).
+    st.group = {
+        active   : true,
+        entries  : entries,
+        idx      : 0,
+        group_id : group_id,
+        // Пробрасываем только пользовательские опции, релевантные одиночному файлу.
+        title         : (variable_struct_exists(opts, "title")         ? opts.title         : undefined),
+        logId         : (variable_struct_exists(opts, "logId")         ? opts.logId         : undefined),
+        retentionDays : (variable_struct_exists(opts, "retentionDays") ? opts.retentionDays : undefined),
+        kind          : (variable_struct_exists(opts, "kind") && is_string(opts.kind) && string_length(opts.kind) > 0
+                        ? opts.kind : "folder"),
+        // Колбэк завершения ВСЕЙ операции (вызовется один раз после последнего файла).
+        on_all_done   : (variable_struct_exists(opts, "onDone") && is_method(opts.onDone) ? opts.onDone : undefined),
+        any_ok        : false,   // хоть один файл доехал
+        last_result   : undefined,
+    };
+
+    var started = __fastlogs_group_upload_step();
+    if (!started) {
+        // Ни один файл не удалось поставить (все нечитаемы/no-op) - закрываем цепочку.
+        st.group.active = false;
+    }
+    return started;
+}
+
+// =====================================================================================
+// Внутреннее: один шаг цепочки group-upload (читает состояние из global.__fastlogs.group).
+//   Шлёт group.entries[group.idx] и навешивает onDone -> __fastlogs_group_upload_on_done, который
+//   запускает следующий шаг. true если текущий аплоад поставлен; false если для текущего файла
+//   no-op (не удалось прочитать/кап/занято) И больше файлов нет.
+// =====================================================================================
+function __fastlogs_group_upload_step() {
+    if (!FASTLOGS_ENABLED) { return false; }
+    var st = __fastlogs_state();
+    if (!variable_struct_exists(st, "group") || !is_struct(st.group)) { return false; }
+    var g = st.group;
+
+    var n = array_length(g.entries);
+    // Пропускаем нечитаемые файлы вперёд, пока есть кандидаты.
+    while (g.idx < n) {
+        var e = g.entries[g.idx];
+        var abs = e.abs;
+        var rel = e.rel;
+
+        if (!is_string(abs) || string_length(abs) == 0 || !file_exists(abs)) {
+            show_debug_message("[FastLogs] group-upload: skip missing: " + string(abs));
+            g.idx += 1;
+            continue;
+        }
+        var buf = buffer_load(abs);
+        if (buf < 0) {
+            show_debug_message("[FastLogs] group-upload: buffer_load failed: " + string(abs));
+            g.idx += 1;
+            continue;
+        }
+
+        var name = rel;   // имя в каталоге = rel-путь (структура папки сохраняется)
+        var mime = __fastlogs_guess_mime(name);
+
+        // Опции одиночного аплоада: общий groupId + наследуемые поля + onDone -> следующий шаг.
+        var step_opts = { groupId: g.group_id, kind: g.kind };
+        if (!is_undefined(g.title))         { step_opts.title         = g.title; }
+        if (!is_undefined(g.logId))         { step_opts.logId         = g.logId; }
+        if (!is_undefined(g.retentionDays)) { step_opts.retentionDays = g.retentionDays; }
+        // Колбэк завершения ЭТОГО файла - бесконтекстная функция, читающая global-стейт.
+        //   method(undefined, ...) гарантирует, что значение пройдёт is_method() в http-слое
+        //   (он берёт onDone только если is_method == true).
+        step_opts.onDone = method(undefined, __fastlogs_group_upload_on_done);
+
+        var ok = __fastlogs_send_buffer(buf, name, mime, step_opts);
+        buffer_delete(buf);
+        if (ok) {
+            // Аплоад поставлен; продолжение - в onDone. Возврат true (текущий поставлен).
+            return true;
+        }
+        // Не поставился (например, занято другой отправкой): не теряем файл - но без onDone цепочка
+        //   не продолжится сама. Двигаем индекс и пробуем следующий синхронно; если все no-op - вернём false.
+        g.idx += 1;
+    }
+    // Файлов больше нет.
+    return false;
+}
+
+// =====================================================================================
+// Внутреннее: колбэк завершения ОДНОГО файла цепочки group-upload (передаётся как onDone в
+//   __fastlogs_send_buffer -> вызывается из Other_62). Фиксирует результат, двигает индекс,
+//   запускает следующий шаг; по исчерпании файлов закрывает цепочку и зовёт общий on_all_done.
+//   Состояние читается из global.__fastlogs.group (стабильная ссылка, без замыканий на var).
+// =====================================================================================
+function __fastlogs_group_upload_on_done(result) {
+    if (!FASTLOGS_ENABLED) { return; }
+    var st = __fastlogs_state();
+    if (!variable_struct_exists(st, "group") || !is_struct(st.group) || !st.group.active) { return; }
+    var g = st.group;
+
+    g.last_result = result;
+    if (is_struct(result) && variable_struct_exists(result, "success") && result.success) {
+        g.any_ok = true;
+    }
+    g.idx += 1;
+
+    // Следующий файл (или финал). Если шаг вернул false и файлов больше нет - финал цепочки.
+    if (!__fastlogs_group_upload_step()) {
+        var cb = g.on_all_done;
+        var any_ok = g.any_ok;
+        var last = g.last_result;
+        g.active = false;   // цепочка завершена
+
+        if (is_method(cb)) {
+            var agg = is_struct(last)
+                    ? last
+                    : { success: any_ok, id: "", url: "", downloadUrl: "", statusCode: 0, error: any_ok ? "" : "group_upload_failed" };
+            // success агрегата = успех ХОТЯ БЫ ОДНОГО файла группы.
+            agg.success = any_ok;
+            try { cb(agg); } catch (_eg) { /* колбэк не должен ронять обработчик */ }
+        }
+    }
+}
+
+// =====================================================================================
+// Внутреннее: сгенерировать groupId для фолбэк-операции. Привязываем к sessionId запуска
+//   (если доступен) + таймер, чтобы метка была стабильной в пределах операции и уникальной.
+// =====================================================================================
+function __fastlogs_make_group_id() {
+    var sess = "";
+    try {
+        if (script_exists(asset_get_index("fastlogs_session_id"))) { sess = fastlogs_session_id(); }
+    } catch (_es) { sess = ""; }
+    var suffix = string(get_timer());
+    if (is_string(sess) && string_length(sess) > 0) {
+        // Короткий хвост сессии для читаемости (полный GUID длинный).
+        var tail = (string_length(sess) > 8) ? string_copy(sess, string_length(sess) - 7, 8) : sess;
+        return "grp-" + tail + "-" + suffix;
+    }
+    return "grp-" + suffix;
 }
 
 // =====================================================================================
