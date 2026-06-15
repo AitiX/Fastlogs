@@ -152,7 +152,7 @@ function migrate() {
   // ADD COLUMN is the safe, idempotent way to evolve the schema; guarding with
   // table_info keeps a re-run a no-op.
   const logCols = db.prepare('PRAGMA table_info(logs)').all();
-  for (const col of ['comment', 'tester', 'context_json', 'breadcrumbs_json', 'crash_sig', 'tags', 'redmine_issue_id', 'redmine_issue_url', 'engine', 'scene_context', 'correlation_code', 'session_id', 'folder']) {
+  for (const col of ['comment', 'tester', 'context_json', 'breadcrumbs_json', 'crash_sig', 'tags', 'redmine_issue_id', 'redmine_issue_url', 'engine', 'scene_context', 'correlation_code', 'session_id', 'folder', 'caller_file']) {
     if (!logCols.some((c) => c.name === col)) {
       db.exec(`ALTER TABLE logs ADD COLUMN ${col} TEXT`);
     }
@@ -181,6 +181,22 @@ function migrate() {
   // (has_shot = shot_count > 0) for the back-compat single-screenshot path.
   if (!logCols.some((c) => c.name === 'shot_count')) {
     db.exec(`ALTER TABLE logs ADD COLUMN shot_count INTEGER NOT NULL DEFAULT 0`);
+  }
+
+  // "Sent from code" provenance flag. NOT NULL with a constant DEFAULT 0 so
+  // existing rows backfill to "overlay send" (sent_via_code = 0); ingest sets 1
+  // when the report was fired from game code (FastLogs.Send / SendReport / ...).
+  // Kept OUT of the bare-TEXT loop for the same reason as shot_count (NOT NULL +
+  // DEFAULT must be a constant to ADD onto a non-empty table).
+  if (!logCols.some((c) => c.name === 'sent_via_code')) {
+    db.exec(`ALTER TABLE logs ADD COLUMN sent_via_code INTEGER NOT NULL DEFAULT 0`);
+  }
+
+  // Code call-site line for a code send (paired with caller_file). Nullable
+  // INTEGER (no default): null for overlay sends and pre-feature rows. caller_file
+  // is a plain nullable TEXT added in the loop above.
+  if (!logCols.some((c) => c.name === 'caller_line')) {
+    db.exec(`ALTER TABLE logs ADD COLUMN caller_line INTEGER`);
   }
 
   // Whether this log's text is in the FTS index. NOT NULL with a constant
@@ -248,12 +264,14 @@ const stmts = {
     INSERT INTO logs (
       id, app_id, platform, app_version, device_json, title, comment, tester,
       context_json, breadcrumbs_json, scene_context, correlation_code, session_id,
+      sent_via_code, caller_file, caller_line,
       crash_sig, engine, ts_utc,
       cnt_error, cnt_warn, cnt_log, log_bytes, has_shot, shot_count, created_at,
       expires_at, pinned, ip_hash
     ) VALUES (
       @id, @app_id, @platform, @app_version, @device_json, @title, @comment, @tester,
       @context_json, @breadcrumbs_json, @scene_context, @correlation_code, @session_id,
+      @sent_via_code, @caller_file, @caller_line,
       @crash_sig, @engine, @ts_utc,
       @cnt_error, @cnt_warn, @cnt_log, @log_bytes, @has_shot, @shot_count, @created_at,
       @expires_at, @pinned, @ip_hash

@@ -62,11 +62,13 @@ on load. Exports:
 
 - `insertLog(row): RunResult` - insert a log. `row` keys (all required):
   `{ id, app_id, platform, app_version, device_json, title, comment, tester,
-     context_json, breadcrumbs_json, crash_sig, engine, ts_utc,
-     cnt_error, cnt_warn, cnt_log, log_bytes, has_shot, created_at,
+     context_json, breadcrumbs_json, scene_context, correlation_code, session_id,
+     sent_via_code, caller_file, caller_line, crash_sig, engine, ts_utc,
+     cnt_error, cnt_warn, cnt_log, log_bytes, has_shot, shot_count, created_at,
      expires_at, pinned, ip_hash }`.
   `device_json` is a JSON string (or null); `expires_at` is ISO string or null;
-  `has_shot`/`pinned` are 0|1.
+  `has_shot`/`pinned`/`sent_via_code` are 0|1; `caller_file` is a string or null
+  and `caller_line` an integer or null (the game-code call site of a code send).
 - `getLog(id): Row | undefined` - full log row by id.
 - `deleteLog(id): RunResult` - delete a log row by id (`.changes` = rows deleted).
 - `listExpired(now, limit): Row[]` - non-pinned logs with `expires_at <= now`
@@ -132,8 +134,10 @@ on load. Exports:
    expires_at NULL, pinned DEFAULT 0, ip_hash)` plus additive columns
    `comment, tester, context_json, breadcrumbs_json, crash_sig, tags,
    redmine_issue_id, redmine_issue_url, engine, scene_context, correlation_code,
-   session_id, folder` (all nullable TEXT), `status TEXT NOT NULL DEFAULT 'new'`,
-   `shot_count INTEGER NOT NULL DEFAULT 0` and `fts_indexed INTEGER NOT NULL DEFAULT 0`.
+   session_id, folder, caller_file` (all nullable TEXT), `caller_line INTEGER`
+   (nullable; code-send call-site line), `status TEXT NOT NULL DEFAULT 'new'`,
+   `shot_count INTEGER NOT NULL DEFAULT 0`, `sent_via_code INTEGER NOT NULL DEFAULT 0`
+   ("sent from code" provenance flag) and `fts_indexed INTEGER NOT NULL DEFAULT 0`.
 - `app_aliases(alias PK, app_id)` - an OLD appId (`alias`) that resolves to the
    canonical `app_id` after a rename. `idx_app_aliases_app(app_id)`.
 - Indexes: `idx_logs_expires(expires_at) WHERE pinned=0`,

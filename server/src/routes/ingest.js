@@ -159,6 +159,10 @@ const CODE_MAX_LEN = 64;
 // 128 leaves room for a GUID plus a short prefix without being abusable.
 const SESSION_MAX_LEN = 128;
 
+// Max length of the optional `callerFile` (the game-code call site that fired a
+// CODE send). 260 mirrors a generous path length without being abusable.
+const CALLER_FILE_MAX_LEN = 260;
+
 const byteLen = (s) => Buffer.byteLength(s, 'utf8');
 
 // Sanitize the context object into a clamped { string: string } map, or return
@@ -248,6 +252,37 @@ function sanitizeSessionId(raw) {
   if (raw === null || raw === undefined) return null;
   const sid = String(raw).trim().slice(0, SESSION_MAX_LEN);
   return sid.length ? sid : null;
+}
+
+// Sanitize the optional `sentViaCode` flag: TRUE only when the client marks the
+// report as initiated from game CODE (FastLogs.Send / SendReport / SendFile etc.
+// called directly) rather than from the overlay "Send" button. Coerced from a
+// JSON boolean; anything else (missing / non-boolean) is treated as false so the
+// stored column stays a clean 0/1 and an omitted field means "overlay send".
+function sanitizeSentViaCode(raw) {
+  return raw === true;
+}
+
+// Sanitize the optional `callerFile`: the game-code call site (source file) that
+// fired a CODE send, paired with `callerLine` for the viewer badge. Coerced to a
+// string, trimmed, and clamped to CALLER_FILE_MAX_LEN; empty collapses to null.
+// Only meaningful for code sends; overlay sends omit it (-> null).
+function sanitizeCallerFile(raw) {
+  if (raw === null || raw === undefined) return null;
+  const file = String(raw).trim().slice(0, CALLER_FILE_MAX_LEN);
+  return file.length ? file : null;
+}
+
+// Sanitize the optional `callerLine`: the 1-based source line of the code call
+// site (paired with `callerFile`). Kept only when it is a finite integer >= 0;
+// anything else (missing / non-numeric / negative) collapses to null so the
+// caller badge is simply omitted.
+function sanitizeCallerLine(raw) {
+  if (raw === null || raw === undefined) return null;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return null;
+  const line = Math.floor(n);
+  return line >= 0 ? line : null;
 }
 
 // Find a value in an object by a case/separator-insensitive key match (so the
@@ -345,6 +380,13 @@ async function handleIngest(req, res) {
   // Optional per-launch session id: groups every report from one app run so the
   // catalog can link "all logs of this session". Opaque, clamped, or null.
   const sessionId = sanitizeSessionId(body.sessionId);
+  // Optional "sent from code" provenance: sentViaCode is true when the report
+  // was fired from game CODE (FastLogs.Send / SendReport / ...) rather than the
+  // overlay "Send" button; callerFile/callerLine pin the code call site for the
+  // viewer badge (only meaningful for code sends; null for overlay sends).
+  const sentViaCode = sanitizeSentViaCode(body.sentViaCode);
+  const callerFile = sanitizeCallerFile(body.callerFile);
+  const callerLine = sanitizeCallerLine(body.callerLine);
   const retentionDaysRaw = body.retentionDays;
   // Screenshots: the new `screenshotsPng` array plus the legacy single
   // `screenshotPng` are collected and validated at step 7.
@@ -478,6 +520,12 @@ async function handleIngest(req, res) {
     correlation_code: correlationCode,
     // Per-launch session id (or null) for catalog session grouping.
     session_id: sessionId,
+    // "Sent from code" provenance: 1 when fired from game code, 0 (default) for
+    // an overlay send. caller_file/caller_line pin the code call site (null for
+    // overlay sends) so the viewer can badge "sent via code @ file:line".
+    sent_via_code: sentViaCode ? 1 : 0,
+    caller_file: callerFile,
+    caller_line: callerLine,
     // Crash signature for grouping. '' (not null) marks "computed, not a crash"
     // so the lazy backfill never re-scans this log.
     crash_sig: crashsig.computeSignature(logTextDecoded, { topK: config.crashSigTopK }) || '',

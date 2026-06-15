@@ -251,6 +251,13 @@ function publicLogObject(row) {
     // Per-launch session id (or null). When set, the viewer can link to "all
     // logs of this session" in the catalog (GET /browse/<appId>?session=...).
     sessionId: row.session_id || null,
+    // "Sent from code" provenance: true when the report was fired from game code
+    // (FastLogs.Send / SendReport / ...), false/omitted-source for an overlay
+    // send. callerFile/callerLine pin the code call site for the viewer badge,
+    // and are only meaningful (non-null) for code sends.
+    sentViaCode: row.sent_via_code === 1,
+    callerFile: row.caller_file || null,
+    callerLine: row.caller_line != null ? row.caller_line : null,
     // Manual catalog folder this log was filed under (or null for the root).
     folder: row.folder || null,
     // Standalone files attached to this log (SendFile with logId). Always an
