@@ -94,6 +94,32 @@ namespace PlayJoy.FastLogs
         /// session can be grouped/correlated on the server. Omitted when empty.
         /// </summary>
         public string SessionId;
+
+        /// <summary>
+        /// sentViaCode - true when this report was NOT a manual overlay send: a direct code
+        /// call (FastLogs.Send / SendAsync / SendSceneContext / the file-send paths) OR an
+        /// automatic send (auto-crash, auto-send-on-pattern). False only when it came from the
+        /// overlay UI "Send" button (or a manual quick-send gesture), where a QA name is
+        /// required. The serializer OMITS it when false (the server treats a missing key as
+        /// false) to keep payloads small; the viewer surfaces a "via code" badge when true.
+        /// (callerFile/callerLine are filled only for a direct code call; automatic sends have
+        /// no game call site, so they stay empty even though sentViaCode is true.)
+        /// </summary>
+        public bool SentViaCode;
+
+        /// <summary>
+        /// callerFile - file name (no path) of the game-code call site that triggered a CODE
+        /// send, for the viewer badge. Only meaningful when SentViaCode is true; left empty
+        /// (and omitted) for overlay/auto sends. Derived from the same CallerFilePath the loop
+        /// guard keys on.
+        /// </summary>
+        public string CallerFile;
+
+        /// <summary>
+        /// callerLine - 1-based source line of the CODE call site that triggered the send,
+        /// paired with CallerFile. Null (and omitted) for overlay/auto sends or when unknown.
+        /// </summary>
+        public int? CallerLine;
     }
 
     /// <summary>

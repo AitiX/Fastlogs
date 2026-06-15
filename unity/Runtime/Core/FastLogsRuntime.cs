@@ -33,11 +33,19 @@ namespace PlayJoy.FastLogs
     {
         public readonly string Key;
 
+        // File name (no path) and 1-based line of the code call site, retained separately
+        // from Key so a code send can surface them on the report DTO (callerFile/callerLine)
+        // for the viewer badge. File is null when there was no call-site info.
+        public readonly string File;
+        public readonly int Line;
+
         public CallSite(string callerFile, int callerLine)
         {
             string file = string.IsNullOrEmpty(callerFile)
                 ? null
                 : System.IO.Path.GetFileName(callerFile);
+            File = file;
+            Line = callerLine;
             Key = file != null ? (file + ":" + callerLine) : null;
         }
 
@@ -89,6 +97,8 @@ namespace PlayJoy.FastLogs
         private string _lastSendTitle;
         private string _lastSendComment;
         private bool _lastSendAttachQueued; // did this send attach the manual screenshot queue?
+        private bool _lastSendViaCode;      // was the last send initiated from game CODE (vs overlay/auto)?
+        private CallSite _lastSendSite;     // code call site of the last send (for callerFile/line); default for non-code sends
 
         // Screenshots captured in code via CaptureScreenshot(), queued for the next
         // user-initiated send and cleared once it resolves. Capped (oldest dropped).
@@ -386,8 +396,10 @@ namespace PlayJoy.FastLogs
 
         private void OnToastRetryRequested()
         {
-            // Re-run the last send with the same parameters.
-            BeginSend(_lastSendIncludeScreenshot, _lastSendTitle, _lastSendComment, _lastSendAttachQueued);
+            // Re-run the last send with the same parameters, preserving its code-vs-overlay
+            // provenance and call site so the retry's report keeps the same badge.
+            BeginSend(_lastSendIncludeScreenshot, _lastSendTitle, _lastSendComment, _lastSendAttachQueued,
+                _lastSendViaCode, _lastSendSite);
         }
 
         // ---- Quick-send (send immediately, without opening the overlay) ----
@@ -398,7 +410,7 @@ namespace PlayJoy.FastLogs
         /// there is nothing useful to send (no logs captured) it shows a hint toast
         /// instead of starting an empty upload. Never throws.
         /// </summary>
-        public void QuickSend()
+        public void QuickSend(bool viaCode = false, CallSite site = default)
         {
             try
             {
@@ -433,7 +445,7 @@ namespace PlayJoy.FastLogs
                 // A user-initiated send is unrelated to any pending crash report; drop
                 // ownership so its success does not delete a leftover crash file.
                 ForgetPendingCrashOwnership();
-                BeginSend(shot, null, null, attachQueuedShots: true);
+                BeginSend(shot, null, null, attachQueuedShots: true, viaCode: viaCode, site: site);
             }
             catch (Exception e)
             {
@@ -464,7 +476,7 @@ namespace PlayJoy.FastLogs
             switch (EvaluateLoopGuard(site, PendingLoopConfirm.QuickSend(site)))
             {
                 case LoopGuardDecision.Proceed:
-                    QuickSend();
+                    QuickSend(viaCode: true, site: site);
                     break;
                 case LoopGuardDecision.Deferred:
                 case LoopGuardDecision.Dropped:
@@ -481,7 +493,7 @@ namespace PlayJoy.FastLogs
                 case LoopGuardDecision.Proceed:
                     // A fresh, code-initiated report: detach from any pending crash file.
                     ForgetPendingCrashOwnership();
-                    return BeginSend(includeScreenshot, title, comment, attachQueuedShots: true);
+                    return BeginSend(includeScreenshot, title, comment, attachQueuedShots: true, viaCode: true, site: site);
                 case LoopGuardDecision.Dropped:
                     // No UI to confirm a looping site: resolve the awaited task with a
                     // non-success "declined" result rather than leaving it pending.
@@ -503,7 +515,7 @@ namespace PlayJoy.FastLogs
             switch (EvaluateLoopGuard(site, PendingLoopConfirm.SceneContext(site, allowRepeat)))
             {
                 case LoopGuardDecision.Proceed:
-                    SendSceneContext(allowRepeat);
+                    SendSceneContext(allowRepeat, viaCode: true, site: site);
                     break;
                 case LoopGuardDecision.Deferred:
                 case LoopGuardDecision.Dropped:
@@ -645,14 +657,14 @@ namespace PlayJoy.FastLogs
                 switch (pending.Kind)
                 {
                     case PendingLoopConfirm.SendKind.QuickSend:
-                        QuickSend();
+                        QuickSend(viaCode: true, site: pending.Site);
                         break;
                     case PendingLoopConfirm.SendKind.BeginSend:
                         ForgetPendingCrashOwnership();
                         ReplayBeginSend(pending);
                         break;
                     case PendingLoopConfirm.SendKind.SceneContext:
-                        SendSceneContext(pending.AllowRepeat);
+                        SendSceneContext(pending.AllowRepeat, viaCode: true, site: pending.Site);
                         break;
                 }
             }
@@ -668,7 +680,8 @@ namespace PlayJoy.FastLogs
         private void ReplayBeginSend(PendingLoopConfirm pending)
         {
             FlogTask<UploadResultDto> inner = BeginSend(
-                pending.IncludeScreenshot, pending.Title, pending.Comment, attachQueuedShots: true);
+                pending.IncludeScreenshot, pending.Title, pending.Comment, attachQueuedShots: true,
+                viaCode: true, site: pending.Site);
 
             FlogTask<UploadResultDto> original = pending.Task;
             if (original == null)
@@ -731,6 +744,10 @@ namespace PlayJoy.FastLogs
             public SendKind Kind;
             public string SiteKey;
 
+            // Full call site of the deferred CODE send, so a "Send" replay carries the same
+            // sentViaCode=true + callerFile/line as the original (SiteKey is the loop-guard key).
+            public CallSite Site;
+
             // BeginSend (SendAsync) params + the caller's awaited task to resolve.
             public bool IncludeScreenshot;
             public string Title;
@@ -742,7 +759,7 @@ namespace PlayJoy.FastLogs
 
             public static PendingLoopConfirm QuickSend(CallSite site)
             {
-                return new PendingLoopConfirm { Kind = SendKind.QuickSend, SiteKey = site.Key };
+                return new PendingLoopConfirm { Kind = SendKind.QuickSend, SiteKey = site.Key, Site = site };
             }
 
             public static PendingLoopConfirm BeginSend(CallSite site, bool includeScreenshot, string title, string comment, FlogTask<UploadResultDto> task)
@@ -751,6 +768,7 @@ namespace PlayJoy.FastLogs
                 {
                     Kind = SendKind.BeginSend,
                     SiteKey = site.Key,
+                    Site = site,
                     IncludeScreenshot = includeScreenshot,
                     Title = title,
                     Comment = comment,
@@ -760,7 +778,7 @@ namespace PlayJoy.FastLogs
 
             public static PendingLoopConfirm SceneContext(CallSite site, bool allowRepeat)
             {
-                return new PendingLoopConfirm { Kind = SendKind.SceneContext, SiteKey = site.Key, AllowRepeat = allowRepeat };
+                return new PendingLoopConfirm { Kind = SendKind.SceneContext, SiteKey = site.Key, Site = site, AllowRepeat = allowRepeat };
             }
         }
 
@@ -971,7 +989,10 @@ namespace PlayJoy.FastLogs
                 // no orphan, since there is no file on disk in that case.
                 _pendingCrashFilePath = capturedPath;
 
-                BeginSend(shot, title, comment);
+                // Auto-crash is not a manual overlay send: mark it as a code/automatic
+                // send (sentViaCode=true) so the viewer shows the "via code" badge and
+                // does not expect a QA name. No game call site, so callerFile/line stay null.
+                BeginSend(shot, title, comment, viaCode: true);
             }
             catch (Exception e)
             {
@@ -1082,7 +1103,9 @@ namespace PlayJoy.FastLogs
 
                 // Not a crash: own no persisted file, so a success deletes nothing.
                 ForgetPendingCrashOwnership();
-                BeginSend(shot, title, comment);
+                // Auto-pattern is not a manual overlay send: mark as code/automatic
+                // (sentViaCode=true) so the viewer shows "via code". No game call site.
+                BeginSend(shot, title, comment, viaCode: true);
             }
             catch (Exception e)
             {
@@ -1460,7 +1483,7 @@ namespace PlayJoy.FastLogs
         }
 
         /// <summary>Capture the scene context and send a report immediately (capture + Send).</summary>
-        public void SendSceneContext(bool allowRepeat)
+        public void SendSceneContext(bool allowRepeat, bool viaCode = false, CallSite site = default)
         {
             // Loop guard: send once per session unless allowRepeat is passed.
             if (!allowRepeat && _sceneContextSentOnce)
@@ -1471,7 +1494,7 @@ namespace PlayJoy.FastLogs
             CaptureSceneContextNow();
             _sceneContextSentOnce = true;
             ForgetPendingCrashOwnership();
-            BeginSend(false, null, null, attachQueuedShots: true);
+            BeginSend(false, null, null, attachQueuedShots: true, viaCode: viaCode, site: site);
         }
 
         private void CaptureSceneContextNow()
@@ -1952,7 +1975,8 @@ namespace PlayJoy.FastLogs
         /// Kick off a send and return an awaitable result. Never throws; failures
         /// surface through the returned task and OnUploaded.
         /// </summary>
-        public FlogTask<UploadResultDto> BeginSend(bool includeScreenshot, string title, string comment, bool attachQueuedShots = false)
+        public FlogTask<UploadResultDto> BeginSend(bool includeScreenshot, string title, string comment, bool attachQueuedShots = false,
+            bool viaCode = false, CallSite site = default)
         {
             var task = FlogTask.Create<UploadResultDto>();
 
@@ -1977,11 +2001,14 @@ namespace PlayJoy.FastLogs
                 return task;
             }
 
-            // Remember the parameters so a Retry toast can re-run exactly this send.
+            // Remember the parameters so a Retry toast can re-run exactly this send (keeping
+            // its code-vs-overlay provenance and call site, so retries do not flip the badge).
             _lastSendIncludeScreenshot = includeScreenshot;
             _lastSendTitle = title;
             _lastSendComment = comment;
             _lastSendAttachQueued = attachQueuedShots;
+            _lastSendViaCode = viaCode;
+            _lastSendSite = site;
 
             if (_uploader == null)
             {
@@ -1996,7 +2023,7 @@ namespace PlayJoy.FastLogs
 
             try
             {
-                StartCoroutine(SendRoutine(includeScreenshot, title, comment, attachQueuedShots, task));
+                StartCoroutine(SendRoutine(includeScreenshot, title, comment, attachQueuedShots, viaCode, site, task));
             }
             catch (Exception e)
             {
@@ -2009,7 +2036,7 @@ namespace PlayJoy.FastLogs
             return task;
         }
 
-        private IEnumerator SendRoutine(bool includeScreenshot, string title, string comment, bool attachQueuedShots, FlogTask<UploadResultDto> task)
+        private IEnumerator SendRoutine(bool includeScreenshot, string title, string comment, bool attachQueuedShots, bool viaCode, CallSite site, FlogTask<UploadResultDto> task)
         {
             _isBusy = true;
             UploadResultDto result;
@@ -2056,7 +2083,7 @@ namespace PlayJoy.FastLogs
             LogReportDto report = null;
             try
             {
-                report = BuildReport(title, comment, shots, sceneCtx);
+                report = BuildReport(title, comment, shots, sceneCtx, viaCode, site);
             }
             catch (Exception e)
             {
@@ -2310,7 +2337,8 @@ namespace PlayJoy.FastLogs
             // BeginSend below is recognised as the retry loop continuing (it must NOT
             // reset the attempt counter), not an external replacement.
             _retryCoroutine = null;
-            BeginSend(_lastSendIncludeScreenshot, _lastSendTitle, _lastSendComment, _lastSendAttachQueued);
+            BeginSend(_lastSendIncludeScreenshot, _lastSendTitle, _lastSendComment, _lastSendAttachQueued,
+                _lastSendViaCode, _lastSendSite);
         }
 
         /// <summary>
@@ -2362,7 +2390,8 @@ namespace PlayJoy.FastLogs
 
         // ---- Report assembly ----
 
-        private LogReportDto BuildReport(string title, string comment, List<string> screenshots, string sceneContext = null)
+        private LogReportDto BuildReport(string title, string comment, List<string> screenshots, string sceneContext = null,
+            bool viaCode = false, CallSite site = default)
         {
             bool includeSensitive = _config != null && _config.Diagnostics.IncludeSensitive;
             bool scrubPii = _config == null || _config.Diagnostics.ScrubPii; // default ON
@@ -2427,7 +2456,15 @@ namespace PlayJoy.FastLogs
                 Breadcrumbs = breadcrumbs,
                 SceneContextJson = string.IsNullOrEmpty(sceneContext) ? null : sceneContext,
                 CorrelationCode = string.IsNullOrEmpty(_correlationCode) ? null : Truncate(_correlationCode, 64),
-                SessionId = string.IsNullOrEmpty(_sessionId) ? null : _sessionId
+                SessionId = string.IsNullOrEmpty(_sessionId) ? null : _sessionId,
+
+                // Code-send provenance (batch B): true only for sends started from game code
+                // (FastLogs.Send*/SendAsync/SendSceneContext); the caller file/line ride along
+                // only then (and only when CallerInfo gave us a site), for the viewer badge.
+                // Overlay and auto-crash/pattern sends leave SentViaCode false and omit both.
+                SentViaCode = viaCode,
+                CallerFile = (viaCode && site.HasValue) ? site.File : null,
+                CallerLine = (viaCode && site.HasValue) ? site.Line : (int?)null
             };
 
             return report;

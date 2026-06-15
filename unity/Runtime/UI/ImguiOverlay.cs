@@ -83,6 +83,7 @@ namespace PlayJoy.FastLogs
         private GUIStyle _title;
         private GUIStyle _field;     // single-line input
         private GUIStyle _textArea;  // multi-line input (wraps)
+        private GUIStyle _hint;      // small amber hint (e.g. "enter your name to send")
         private Texture2D _panelTex;
         private Texture2D _accentTex;
 
@@ -401,15 +402,22 @@ namespace PlayJoy.FastLogs
             bool hasResult = _lastResult.Success && !string.IsNullOrEmpty(_lastResult.Url);
             float lineH = Mathf.Max(MinTouch * scale, 28f * scale);
             float commentH = CommentLogicalHeight * scale;
-            bool hasTester = _config != null && !string.IsNullOrEmpty(_config.UI.TesterName);
+            // A real (trimmed) tester name shows the read-only row; otherwise the action row
+            // shows the "enter your name" hint and Send is disabled. Mutually exclusive, so the
+            // height accounts for exactly one of them.
+            bool hasTester = HasTesterName();
 
-            // header + (title label+field) + (comment label+area) + [tester] + action
+            // header + (title label+field) + (comment label+area) + [tester | hint] + action
             float panelHeight = pad * 2f + lineH;                 // header
             panelHeight += lineH * 2f + pad;                      // title: label + field
             panelHeight += lineH + commentH + pad;               // comment: label + text area
             if (hasTester)
             {
                 panelHeight += lineH;                            // tester (read-only) row
+            }
+            else
+            {
+                panelHeight += lineH;                            // "enter your name" hint row
             }
             panelHeight += lineH + pad;                          // action row
             if (hasResult)
@@ -525,15 +533,23 @@ namespace PlayJoy.FastLogs
 
         private void DrawActionRow(float scale, float lineH)
         {
+            // A manual (overlay) send MUST carry a tester name (batch B), so the tester is
+            // accountable for what they sent. Gate Send on a non-empty trimmed name: grey the
+            // button out and show an inline hint until one is entered (in Settings -> Tester).
+            bool hasName = HasTesterName();
+
             GUILayout.BeginHorizontal();
 
-            GUI.enabled = !_isBusy;
+            // Send is enabled only when not busy AND a tester name is present.
+            GUI.enabled = !_isBusy && hasName;
 
             string sendLabel = _isBusy ? "Sending..." : (_includeScreenshot ? "Send + Shot" : "Send");
             if (GUILayout.Button(sendLabel, _button, GUILayout.Height(lineH)))
             {
                 RaiseSend();
             }
+
+            GUI.enabled = !_isBusy;
 
             // Screenshot toggle as a >= 44pt button so it is a valid touch target.
             string shotLabel = _includeScreenshot ? "[x] Shot" : "[ ] Shot";
@@ -560,6 +576,20 @@ namespace PlayJoy.FastLogs
             }
 
             GUILayout.EndHorizontal();
+
+            // Inline hint explaining why Send is greyed out: a manual send needs a tester name.
+            if (!hasName)
+            {
+                GUILayout.Label("Enter your name (Settings -> Tester) to send", _hint);
+            }
+        }
+
+        // True when a tester name is set (non-empty after trimming). Manual overlay sends are
+        // gated on this; code sends (FastLogs.Send*) are not affected.
+        private bool HasTesterName()
+        {
+            return _config != null && !string.IsNullOrEmpty(_config.UI.TesterName)
+                && _config.UI.TesterName.Trim().Length > 0;
         }
 
         private void DrawResultRow(float scale, float lineH, float innerWidth)
@@ -601,6 +631,14 @@ namespace PlayJoy.FastLogs
         private void RaiseSend()
         {
             if (_isBusy)
+            {
+                return;
+            }
+
+            // A manual overlay send is blocked until a tester name is entered (batch B). The
+            // Send button is greyed out in this state, but guard here too so no edge path
+            // (programmatic, future caller) can raise an unattributed manual send.
+            if (!HasTesterName())
             {
                 return;
             }
@@ -785,6 +823,10 @@ namespace PlayJoy.FastLogs
 
             _textArea = new GUIStyle(GUI.skin.textArea) { fontSize = fontSize, wordWrap = true };
             _textArea.normal.textColor = Color.white;
+
+            // Amber hint, a touch smaller than the body label; wraps on narrow panels.
+            _hint = new GUIStyle(GUI.skin.label) { fontSize = Mathf.Max(10, fontSize - 1), wordWrap = true };
+            _hint.normal.textColor = new Color(1f, 0.78f, 0.27f, 1f);
         }
 
         private static Texture2D SolidTexture(Color color)

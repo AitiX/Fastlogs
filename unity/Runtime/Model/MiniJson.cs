@@ -96,6 +96,13 @@ namespace PlayJoy.FastLogs
             // Optional per-run session id (one GUID per process) - omitted when empty.
             w.Field("sessionId", report.SessionId);
 
+            // Code-send provenance (batch B). sentViaCode is emitted ONLY when true (the
+            // server reads a missing key as false), keeping overlay-send payloads small. The
+            // caller file/line ride along only for code sends (empty/null for overlay/auto).
+            w.FieldTrue("sentViaCode", report.SentViaCode);
+            w.Field("callerFile", report.CallerFile);
+            w.Field("callerLine", report.CallerLine);
+
             w.EndObject();
             return sb.ToString();
         }
@@ -510,6 +517,16 @@ namespace PlayJoy.FastLogs
                 Sep();
                 AppendKey(_sb, key);
                 _sb.Append(value.Value.ToString(CultureInfo.InvariantCulture));
+            }
+
+            // Optional bool - written ONLY when true (false is omitted so the reader treats a
+            // missing key as false). Used for the small "sentViaCode" provenance flag.
+            public void FieldTrue(string key, bool value)
+            {
+                if (!value) return;
+                Sep();
+                AppendKey(_sb, key);
+                _sb.Append("true");
             }
         }
 
