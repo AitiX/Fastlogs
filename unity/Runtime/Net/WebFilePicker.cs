@@ -49,7 +49,13 @@ namespace PlayJoy.FastLogs
 
         // The task handed back to the caller of Pick(); resolved on send, cancel or error.
         private FlogTask<FileUploadResultDto> _pending;
-        private bool _picking; // one dialog at a time
+
+        // One dialog at a time (WebGL re-entrancy guard). Only READ under
+        // UNITY_WEBGL in Pick(); the resets in the lifecycle/callback methods are
+        // intentional, so non-WebGL builds would otherwise flag CS0414.
+#pragma warning disable CS0414
+        private bool _picking;
+#pragma warning restore CS0414
 
         public static WebFilePicker Create(Func<byte[], string, FlogTask<FileUploadResultDto>> sendSink)
         {
