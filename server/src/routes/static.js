@@ -12,6 +12,7 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
+const crypto = require('node:crypto');
 const config = require('../config');
 const { sendText } = require('../util/http');
 const { notFound } = require('./shared');
@@ -48,6 +49,14 @@ function isAsset(pathname) {
 // Serve an allowlisted static asset. Reads from disk on each request; these
 // files are tiny and the OS cache makes repeat reads cheap. A missing file
 // yields the uniform 404.
+//
+// Caching: viewer.js/viewer.css/browse.js/browse.css/fonts.css change on every
+// deploy, so a time-based cache (max-age) would hide a viewer/catalog update
+// from testers for up to that window - exactly the kind of "I see the old UI"
+// confusion we must avoid. We use 'no-cache' (revalidate on every load) plus a
+// content ETag, so the browser always checks but the server answers 304 (no
+// body) when nothing changed, keeping revalidation cheap. The fonts themselves
+// are immutable (served by serveFont) and keep their long cache.
 function serveAsset(req, res, pathname) {
   const entry = ASSETS[pathname];
   if (!entry) return notFound(res);
@@ -58,9 +67,16 @@ function serveAsset(req, res, pathname) {
   } catch {
     return notFound(res);
   }
+
+  const etag = '"' + crypto.createHash('sha1').update(body).digest('base64').slice(0, 27) + '"';
+  if (req.headers['if-none-match'] === etag) {
+    res.writeHead(304, { 'Cache-Control': 'no-cache', ETag: etag });
+    return res.end();
+  }
   sendText(res, 200, body, {
     'Content-Type': entry.type,
-    'Cache-Control': 'public, max-age=3600',
+    'Cache-Control': 'no-cache',
+    ETag: etag,
   });
 }
 
