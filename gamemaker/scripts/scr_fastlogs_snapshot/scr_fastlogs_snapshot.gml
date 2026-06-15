@@ -528,6 +528,10 @@ function __fastlogs_snapshot_free_buffers(bufs) {
 //   ПОЧЕМУ отдельная функция, а не reuse __fastlogs_zip_store: тот читает файлы С ДИСКА
 //   (buffer_load по abs-пути); снимок-data живут В ПАМЯТИ -> нужен вариант "из буферов". Логика
 //   записи заголовков идентична (DRY на уровне формата сверена с #6a и PKZIP APPNOTE).
+//   ВНИМАНИЕ (drift): запись ZIP-заголовков здесь - байт-в-байт копия __fastlogs_zip_store
+//   (scr_fastlogs_files). ЛЮБОЕ изменение ZIP-лэйаута в одном писателе ОБЯЗАТЕЛЬНО повторить во
+//   втором. TODO (на сессию с GM IDE): свести к одному писателю - __fastlogs_zip_store принимает
+//   список {rel, buf}, дисковый путь делает buffer_load в этот список (см. ревью снимка).
 // =====================================================================================
 function __fastlogs_snapshot_zip_store_buffers(buf_list) {
     var n = array_length(buf_list);

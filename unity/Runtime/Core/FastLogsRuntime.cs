@@ -135,6 +135,14 @@ namespace PlayJoy.FastLogs
         // on a successful send. Lets a built blob ride the report record without touching disk.
         private readonly List<BlobAttachment> _queuedBlobAttachments = new List<BlobAttachment>();
 
+        // Re-entrancy guard for SendSnapshot. The report-level _isBusy flag is only set deep in
+        // BeginSend, which the snapshot coroutine reaches AFTER a yield + the (synchronous) zip
+        // build, so two SendSnapshot calls in the SAME frame would both pass the _isBusy check
+        // and queue two snapshot.zip blobs onto one report. Set synchronously in StartSnapshotSend
+        // before the coroutine starts and cleared when the routine resolves, this closes that
+        // one-frame window the report-level guard cannot.
+        private bool _snapshotInFlight;
+
         // A pre-built in-memory attachment (bytes + name + mime + server kind) for the report.
         private struct BlobAttachment
         {
@@ -2181,7 +2189,10 @@ namespace PlayJoy.FastLogs
         {
             // Block while a send is in flight or a retry is pending, mirroring BeginSend's
             // guard (the report send underneath would refuse anyway; we stop before zipping).
-            if (_isBusy || _retryCoroutine != null)
+            // _snapshotInFlight additionally rejects a SECOND snapshot started in the same frame
+            // as the first (before the first reaches BeginSend / sets _isBusy), which would
+            // otherwise double-attach snapshot.zip onto one report.
+            if (_isBusy || _retryCoroutine != null || _snapshotInFlight)
             {
                 ShowToast(ToastKind.Info,
                     _retryCoroutine != null
@@ -2194,10 +2205,14 @@ namespace PlayJoy.FastLogs
 
             try
             {
+                // Set synchronously, before the coroutine yields, so a same-frame second call is
+                // rejected by the guard above. Cleared when SendSnapshotRoutine resolves the task.
+                _snapshotInFlight = true;
                 StartCoroutine(SendSnapshotRoutine(title, includeScreenshot, site, task));
             }
             catch (Exception e)
             {
+                _snapshotInFlight = false;
                 FlogLog.Exception(e);
                 var fail = UploadResultDto.Fail("Failed to start snapshot send: " + e.Message);
                 ShowToast(ToastKind.Error, "FastLogs: " + fail.Error, null, 0f, false);
@@ -2230,6 +2245,13 @@ namespace PlayJoy.FastLogs
             {
                 // Enforce MaxSnapshotBytes AFTER zipping (it bounds the real payload). 0 = no cap.
                 long cap = _config != null && _config.Snapshot != null ? _config.Snapshot.MaxSnapshotBytes : (25L * 1024 * 1024);
+                // The file/server upload cap is the HARD upper bound: a blob above Files.MaxFileBytes
+                // is skipped by UploadQueuedAttachments (Warn only) and would 413 server-side, so a
+                // zip between the two caps would "pass" here yet silently vanish at upload under a
+                // success toast. Clamp the snapshot cap down to the file cap so the "too large"
+                // branch below fires honestly instead.
+                long fileCap = _config != null && _config.Files != null ? _config.Files.MaxFileBytes : 0;
+                if (fileCap > 0 && (cap <= 0 || cap > fileCap)) cap = fileCap;
                 if (cap > 0 && zip.Length > cap)
                 {
                     FlogLog.Warn("Snapshot: snapshot.zip (" + (zip.Length / 1024) + " KB) exceeds MaxSnapshotBytes ("
@@ -2263,6 +2285,7 @@ namespace PlayJoy.FastLogs
                 // Could not start (e.g. no uploader): drop the queued blob so it does not ride
                 // an unrelated later send, and resolve with the last known result.
                 _queuedBlobAttachments.Clear();
+                _snapshotInFlight = false;
                 task.SetResult(_lastResult);
                 yield break;
             }
@@ -2279,6 +2302,7 @@ namespace PlayJoy.FastLogs
                 FlogLog.Exception(e);
                 result = UploadResultDto.Fail("Snapshot send faulted: " + e.Message);
             }
+            _snapshotInFlight = false;
             task.SetResult(result);
         }
 
