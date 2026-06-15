@@ -108,7 +108,7 @@ async function createRedmineIssue(req, res, params, query) {
   }
 
   if (result.ok && result.issueId != null) {
-    const issueUrl = config.redmine.url + '/issues/' + result.issueId;
+    const issueUrl = config.redmine.publicUrl + '/issues/' + result.issueId;
     db.setRedmine(row.id, result.issueId, issueUrl);
     resolveLink({ issueId: result.issueId, issueUrl });
     inFlight.delete(row.id);

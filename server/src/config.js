@@ -227,6 +227,12 @@ const config = Object.freeze({
   // API key are set (button hidden client-side, endpoint returns 503).
   redmine: Object.freeze({
     url: redmineUrl,
+    // Browser-facing base URL used to build the clickable issue link. Defaults to
+    // REDMINE_URL, but can differ when the server reaches Redmine on a private
+    // address (e.g. a Docker bridge / loopback) that the browser cannot resolve:
+    // set REDMINE_URL to the server-reachable address (API calls) and
+    // REDMINE_PUBLIC_URL to the public address (the link teammates click).
+    publicUrl: envStr('REDMINE_PUBLIC_URL', '').replace(/\/+$/, '') || redmineUrl,
     apiKey: redmineApiKey,
     projectId: envStr('REDMINE_PROJECT_ID', ''),
     trackerId: envStr('REDMINE_TRACKER_ID', ''),
