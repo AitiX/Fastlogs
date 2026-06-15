@@ -1,12 +1,14 @@
 'use strict';
 
-// Static asset serving for the viewer front-end (CSS/JS).
+// Static asset serving for the viewer front-end (CSS/JS/fonts).
 //
 // The viewer HTML shell (public/viewer.html) references external assets
-// (/viewer.css, /viewer.js). We serve those from the public/ directory. Only
-// an explicit allowlist of files is served - there is no directory traversal
-// and no arbitrary file access - so a crafted id can never read outside the
-// allowlist.
+// (/viewer.css, /viewer.js) and the catalog references (/browse.css,
+// /browse.js). Both pages also link /fonts.css, which in turn requests the
+// self-hosted web fonts under /fonts/<name>.woff2. We serve all of these from
+// the public/ directory. Only an explicit allowlist of files is served - there
+// is no directory traversal and no arbitrary file access - so a crafted id (or
+// a "../" in a font name) can never read outside the allowlist.
 
 const fs = require('node:fs');
 const path = require('node:path');
@@ -15,6 +17,7 @@ const { sendText } = require('../util/http');
 const { notFound } = require('./shared');
 
 const PUBLIC_DIR = path.join(config.serverRoot, 'public');
+const FONTS_DIR = path.join(PUBLIC_DIR, 'fonts');
 
 // Allowlisted static assets: request path -> { file, contentType }.
 const ASSETS = {
@@ -22,6 +25,19 @@ const ASSETS = {
   '/viewer.js': { file: 'viewer.js', type: 'text/javascript; charset=utf-8' },
   '/browse.css': { file: 'browse.css', type: 'text/css; charset=utf-8' },
   '/browse.js': { file: 'browse.js', type: 'text/javascript; charset=utf-8' },
+  '/fonts.css': { file: 'fonts.css', type: 'text/css; charset=utf-8' },
+};
+
+// Allowlisted web fonts served under /fonts/<name>. The set is a closed
+// whitelist of exact basenames (no extension juggling, no path separators), so
+// a request name is either one of these literals or a 404 - traversal like
+// "../viewer.js" or "..%2f..%2fetc" can never match. Each maps to its file in
+// public/fonts/. Keep this in sync with public/fonts.css @font-face urls.
+const FONTS = {
+  'atkinson-hyperlegible-regular.woff2': 'atkinson-hyperlegible-regular.woff2',
+  'atkinson-hyperlegible-bold.woff2': 'atkinson-hyperlegible-bold.woff2',
+  'jetbrains-mono-regular.woff2': 'jetbrains-mono-regular.woff2',
+  'jetbrains-mono-bold.woff2': 'jetbrains-mono-bold.woff2',
 };
 
 // Is this pathname a known static asset? (used by the router wiring)
@@ -48,4 +64,23 @@ function serveAsset(req, res, pathname) {
   });
 }
 
-module.exports = { isAsset, serveAsset, ASSETS };
+// Serve a self-hosted web font (woff2). The name is matched against the closed
+// FONTS whitelist; anything not in it (including any traversal attempt) is a
+// 404. Fonts are immutable content, so they get a long, immutable cache.
+function serveFont(req, res, name) {
+  const file = Object.prototype.hasOwnProperty.call(FONTS, name) ? FONTS[name] : null;
+  if (!file) return notFound(res);
+
+  let body;
+  try {
+    body = fs.readFileSync(path.join(FONTS_DIR, file));
+  } catch {
+    return notFound(res);
+  }
+  sendText(res, 200, body, {
+    'Content-Type': 'font/woff2',
+    'Cache-Control': 'public, max-age=31536000, immutable',
+  });
+}
+
+module.exports = { isAsset, serveAsset, serveFont, ASSETS, FONTS };

@@ -1,0 +1,52 @@
+/* FastLogs - self-hosted web fonts (@font-face).
+ *
+ * Both the viewer and the catalog link this sheet (<link rel="stylesheet"
+ * href="/fonts.css">). Fonts ship with the app instead of being pulled from a
+ * third-party CDN, so there is no external request, no privacy leak, and the
+ * UI renders identically offline / behind a firewall.
+ *
+ * Two families, both SIL Open Font License 1.1 (see fonts/OFL-*.txt):
+ *   - Atkinson Hyperlegible: UI body text. Designed by the Braille Institute
+ *     for maximum legibility (disambiguated letterforms). Regular + Bold.
+ *   - JetBrains Mono: the monospace family for log/code blocks (referenced via
+ *     the --mono custom property in viewer.css / browse.css). Regular + Bold.
+ *
+ * font-display: swap - show the fallback stack immediately and swap in the web
+ * font once it loads, so text is never invisible while the woff2 downloads.
+ *
+ * The woff2 files are served by src/routes/static.js through the validated
+ * "/fonts/:name" allowlist route (wired in src/index.js). Keep the url() names
+ * in sync with the files in public/fonts/ and that allowlist.
+ */
+
+@font-face {
+  font-family: 'Atkinson Hyperlegible';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('/fonts/atkinson-hyperlegible-regular.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'Atkinson Hyperlegible';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url('/fonts/atkinson-hyperlegible-bold.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('/fonts/jetbrains-mono-regular.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url('/fonts/jetbrains-mono-bold.woff2') format('woff2');
+}
