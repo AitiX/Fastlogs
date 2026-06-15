@@ -39,6 +39,7 @@ Frozen config object (singleton). `require('./config')` returns:
 | `triageTagMaxLen` / `triageTagMaxCount` | number | Per-tag length cap (32) / tags-per-log cap (20) |
 | `statsTopN` | number | Largest-logs count for the dashboard (5) |
 | `crashSigTopK` / `crashRecomputeBatch` | number | Crash signature frame count (8) / lazy-backfill batch (200) |
+| `searchMaxResults` / `searchSnippetTokens` / `searchBackfillBatch` | number | FTS search: result cap (100) / snippet tokens (12) / lazy-index batch (200) |
 | `redmine` | object | `{ url, apiKey, projectId, trackerId, timeoutMs, enabled }`; `enabled` = url && apiKey |
 
 (Other env-driven fields - `teamToken`, `allowAutoRegister`, `trustProxy`,
@@ -82,7 +83,8 @@ on load. Exports:
   total bytes and pinned count.
 - `listLogs(appId, version): Row[]` - logs of one app+version, newest first.
   Columns: `id, title, ts_utc, platform, cnt_error, cnt_warn, cnt_log,
-  log_bytes, has_shot, pinned, status, tags, crash_sig, engine, created_at, expires_at`.
+  log_bytes, has_shot, pinned, status, tags, crash_sig, engine, session_id, created_at, expires_at`.
+- `listLogsBySession(appId, sessionId, now): Row[]` - live logs of one session, newest first (same columns plus `app_version`).
 - `statsByApp(): Array<{ app_id, logCount, totalBytes, pinnedCount }>` - storage rollup per app (all rows present).
 - `statsForApp(appId): { logCount, totalBytes, pinnedCount }` - storage rollup for one app.
 - `enginesByApp(): Array<{ app_id, engine, last_at }>` - engine of the latest log per app.
@@ -91,6 +93,10 @@ on load. Exports:
   Columns: `id, crash_sig, app_version, title, platform, tester, created_at, cnt_error`.
 - `listLogsMissingSig(appId, limit): Array<{ id }>` - up to `limit` logs of an app with `crash_sig` NULL (lazy backfill).
 - `updateCrashSig(id, sig): RunResult` - set `crash_sig` (`''` = computed, not a crash).
+- `searchAvailable(): boolean` - whether the SQLite build has FTS5 (search live).
+- `indexLog(metaRow, body): void` - index a log's catalog text + body into the FTS5 index and mark `fts_indexed=1` (no-op without FTS).
+- `searchLogs(appId, match, limit, now): Row[]` - app's live logs matching the FTS5 `match` string, relevance-ranked, catalog-row shape.
+- `listLogsMissingFts(appId, limit): Row[]` - up to `limit` of an app's not-yet-indexed logs (with text columns) for the search backfill.
 - `setStatus(id, status): RunResult` - set the triage status enum.
 - `setTags(id, tagsJson): RunResult` - set tags (JSON-array string, or null for none).
 - `setRedmine(id, issueId, issueUrl): RunResult` - link a created Redmine issue (issueId coerced to string).
@@ -105,11 +111,18 @@ on load. Exports:
    cnt_error, cnt_warn, cnt_log, log_bytes, has_shot DEFAULT 0, created_at,
    expires_at NULL, pinned DEFAULT 0, ip_hash)` plus additive columns
    `comment, tester, context_json, breadcrumbs_json, crash_sig, tags,
-   redmine_issue_id, redmine_issue_url, engine` (all nullable TEXT) and
-   `status TEXT NOT NULL DEFAULT 'new'`.
+   redmine_issue_id, redmine_issue_url, engine, scene_context, correlation_code,
+   session_id` (all nullable TEXT), `status TEXT NOT NULL DEFAULT 'new'`,
+   `shot_count INTEGER NOT NULL DEFAULT 0` and `fts_indexed INTEGER NOT NULL DEFAULT 0`.
 - Indexes: `idx_logs_expires(expires_at) WHERE pinned=0`,
    `idx_logs_app(app_id, created_at)`,
-   `idx_logs_crash(app_id, crash_sig) WHERE crash_sig IS NOT NULL`.
+   `idx_logs_crash(app_id, crash_sig) WHERE crash_sig IS NOT NULL`,
+   `idx_logs_session(app_id, session_id, created_at) WHERE session_id IS NOT NULL`,
+   `idx_logs_unindexed(app_id) WHERE fts_indexed=0` (FTS backfill scan).
+- `logs_fts` - FTS5 virtual table (`content='', contentless_delete=1`) over
+   `title, tester, comment, context, scene, body`; rowid derived from the log id
+   (`ftsRowId`, FNV-1a folded to 52 bits). Created only when the SQLite build has
+   FTS5; search degrades to disabled otherwise.
 - `rate_counters(key PK, window_start, count)`.
 
 ---

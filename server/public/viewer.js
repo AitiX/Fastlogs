@@ -36,6 +36,7 @@
 //   breadcrumbs:  [ { t?: string, m: string, lvl?: 'info'|'warn'|'error' } ], // empty [] when none
 //   sceneContext: string | null,   // opaque JSON string (parsed + rendered here)
 //   correlationCode: string | null,// short debug/await code
+//   sessionId:    string | null,   // per-launch id; links to "all logs of this session"
 //   attachments:  [ { id, name, size, kind, mime, downloadUrl } ] // standalone files (empty [] when none)
 // }
 //
@@ -334,6 +335,26 @@
   // Debug/await correlation code (small label) when the client sent one.
   if (data.correlationCode) metaParts.push('code: ' + data.correlationCode);
   document.getElementById('counts-meta').textContent = metaParts.join(' - ');
+
+  // "All logs of this session" link (catalog, viewer-gated) when the client
+  // sent a sessionId. Appended after the meta text so it is clickable. The
+  // token (when this page carries one) is forwarded so the catalog stays
+  // authorized; without a token the link still works for token-less viewer
+  // setups and otherwise lands on the catalog auth prompt.
+  if (data.sessionId && data.appId) {
+    var sToken = new URLSearchParams(window.location.search).get('token');
+    var sHref = '/browse/' + encodeURIComponent(data.appId) +
+      (sToken ? '?token=' + encodeURIComponent(sToken) + '&' : '?') +
+      'session=' + encodeURIComponent(data.sessionId);
+    var sLink = document.createElement('a');
+    sLink.className = 'session-link';
+    sLink.href = sHref;
+    sLink.textContent = 'session logs';
+    sLink.title = 'All logs of this session';
+    var metaEl = document.getElementById('counts-meta');
+    metaEl.appendChild(document.createTextNode(metaParts.length ? ' - ' : ''));
+    metaEl.appendChild(sLink);
+  }
 
   // ---- Device info ----
 

@@ -101,6 +101,7 @@ a:hover { color: var(--accent-h); text-decoration: underline; }
 .count-warn  { color: var(--yellow); } .count-dot-w { background: var(--yellow); }
 .count-log   { color: var(--text-dim); } .count-dot-l { background: var(--text-dim); }
 .counts-meta { margin-left: auto; font-size: 12px; color: var(--text-dim); }
+.counts-meta .session-link { font-size: 12px; }
 
 /* ---- Device info ---- */
 

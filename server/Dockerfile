@@ -31,6 +31,12 @@ RUN mkdir -p /app/data /app/blobs
 # The HTTP port the server listens on (nginx/compose maps it).
 EXPOSE 8787
 
+# Liveness probe (also honoured by `docker run` without compose). Uses node -
+# always present, and the slim base ships no curl/wget - to GET /api/health on
+# the in-container loopback; exits 0 only on HTTP 200.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD node -e "require('node:http').get('http://127.0.0.1:'+(process.env.PORT||8787)+'/api/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"
+
 # Drop privileges: the node:* images ship an unprivileged "node" user.
 RUN chown -R node:node /app
 USER node

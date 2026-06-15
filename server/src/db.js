@@ -26,6 +26,37 @@ db.pragma('journal_mode = WAL');
 db.pragma('synchronous = NORMAL');
 db.pragma('foreign_keys = ON');
 
+// Whether the SQLite build has FTS5 (set during migrate). When false, the
+// search index is absent and the search helpers below are no-ops / empty, so
+// the rest of the server keeps working without full-text search.
+let ftsAvailable = false;
+
+// Map a base62 log id to a stable positive integer rowid for the FTS table.
+// FTS5 indexes by integer rowid; deriving it from the id lets us delete/replace
+// an entry by id (the FTS table is contentless, so it cannot be joined back to
+// logs.id on its own). FNV-1a over the id bytes, folded into the JS
+// safe-integer range (< 2^53) so the value survives a round-trip through
+// better-sqlite3 as a plain Number with NO precision loss (a 64-bit rowid would
+// be truncated on read, breaking the join). Returns a Number, used both to bind
+// inserts and to key the search-result map, so both sides compare identically.
+// Collisions are astronomically unlikely for short base62 ids and would only
+// cause a stale-search row, never data loss.
+function ftsRowId(id) {
+  // 64-bit FNV-1a using BigInt, then fold to 52 bits (0 .. 2^52-1) which is
+  // inside Number.MAX_SAFE_INTEGER (2^53-1). +1 so the rowid is always >= 1
+  // (FTS5/SQLite rowids are nonzero positive integers).
+  let h = 0xcbf29ce484222325n;
+  const prime = 0x100000001b3n;
+  const mask = 0xffffffffffffffffn;
+  const s = String(id);
+  for (let i = 0; i < s.length; i++) {
+    h ^= BigInt(s.charCodeAt(i) & 0xff);
+    h = (h * prime) & mask;
+  }
+  const folded = h & 0xfffffffffffffn; // low 52 bits
+  return Number(folded) + 1;
+}
+
 // ---------------------------------------------------------------------------
 // Schema (idempotent migrations).
 // ---------------------------------------------------------------------------
@@ -108,11 +139,16 @@ function migrate() {
   // ADD COLUMN is the safe, idempotent way to evolve the schema; guarding with
   // table_info keeps a re-run a no-op.
   const logCols = db.prepare('PRAGMA table_info(logs)').all();
-  for (const col of ['comment', 'tester', 'context_json', 'breadcrumbs_json', 'crash_sig', 'tags', 'redmine_issue_id', 'redmine_issue_url', 'engine', 'scene_context', 'correlation_code']) {
+  for (const col of ['comment', 'tester', 'context_json', 'breadcrumbs_json', 'crash_sig', 'tags', 'redmine_issue_id', 'redmine_issue_url', 'engine', 'scene_context', 'correlation_code', 'session_id']) {
     if (!logCols.some((c) => c.name === col)) {
       db.exec(`ALTER TABLE logs ADD COLUMN ${col} TEXT`);
     }
   }
+
+  // Index backing the "all logs of one session" lookup (per-app, newest-first).
+  // Created AFTER the loop, since session_id only exists once that ALTER has
+  // run. Partial so it stays small (most pre-feature logs have no session).
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_logs_session ON logs (app_id, session_id, created_at) WHERE session_id IS NOT NULL`);
 
   // Triage status. Kept OUT of the bare-TEXT loop because it is NOT NULL with a
   // DEFAULT: SQLite requires a constant DEFAULT to ADD a NOT NULL column to a
@@ -129,6 +165,13 @@ function migrate() {
     db.exec(`ALTER TABLE logs ADD COLUMN shot_count INTEGER NOT NULL DEFAULT 0`);
   }
 
+  // Whether this log's text is in the FTS index. NOT NULL with a constant
+  // DEFAULT 0 so pre-FTS rows backfill to "not indexed" and the lazy/scripted
+  // backfill (listLogsMissingFts) can find them. Set to 1 once indexed.
+  if (!logCols.some((c) => c.name === 'fts_indexed')) {
+    db.exec(`ALTER TABLE logs ADD COLUMN fts_indexed INTEGER NOT NULL DEFAULT 0`);
+  }
+
   // Partial index backing the per-app crash grouping scan. Created AFTER the
   // loop above, since crash_sig only exists once that ALTER has run (it is not
   // part of the inline CREATE TABLE). Idempotent via IF NOT EXISTS.
@@ -138,6 +181,42 @@ function migrate() {
   // code). Created AFTER the loop, since correlation_code only exists once that
   // ALTER has run. Idempotent via IF NOT EXISTS.
   db.exec(`CREATE INDEX IF NOT EXISTS idx_logs_code ON logs (app_id, correlation_code) WHERE correlation_code IS NOT NULL`);
+
+  // ---------------------------------------------------------------------------
+  // Full-text search index (FTS5). Created LAST so every column it references
+  // (fts_indexed) already exists from the ALTERs above.
+  //
+  // A CONTENTLESS FTS5 table (content='') indexed by a log's catalog text:
+  // title, tester, the free-text comment, the flattened context values and the
+  // scene snapshot, plus the (decompressed) log body. Contentless means FTS5
+  // stores only the inverted index, not a copy of the text, so the on-disk cost
+  // stays bounded and the log body is never duplicated. contentless_delete=1
+  // (SQLite >= 3.43) makes DELETE/replace by rowid work on a contentless table,
+  // so the index can follow log deletions (sweeper) and re-indexing without a
+  // content table. The rowid is a stable integer derived from the log id
+  // (ftsRowId) so a row can be deleted/replaced by id. Tokenizer: unicode61 +
+  // remove_diacritics for forgiving matching; '_' kept as a token char so
+  // identifiers (e.g. correlation codes) stay searchable as one token.
+  //
+  // Guarded by a try/catch: if the SQLite build lacks FTS5 (or is too old for
+  // contentless_delete) the server still runs (search degrades to disabled)
+  // instead of failing to boot.
+  ftsAvailable = false;
+  try {
+    db.exec(`
+      CREATE VIRTUAL TABLE IF NOT EXISTS logs_fts USING fts5(
+        title, tester, comment, context, scene, body,
+        content='', contentless_delete=1,
+        tokenize = "unicode61 remove_diacritics 2 tokenchars '_'"
+      );
+    `);
+    // Partial index backing the backfill scan ("logs not yet in FTS"). Only
+    // created when FTS exists, since there is nothing to backfill otherwise.
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_logs_unindexed ON logs (app_id) WHERE fts_indexed = 0`);
+    ftsAvailable = true;
+  } catch (err) {
+    console.warn('[db] FTS5 unavailable, full-text search disabled:', (err && err.message) || err);
+  }
 }
 
 migrate();
@@ -150,13 +229,13 @@ const stmts = {
   insertLog: db.prepare(`
     INSERT INTO logs (
       id, app_id, platform, app_version, device_json, title, comment, tester,
-      context_json, breadcrumbs_json, scene_context, correlation_code,
+      context_json, breadcrumbs_json, scene_context, correlation_code, session_id,
       crash_sig, engine, ts_utc,
       cnt_error, cnt_warn, cnt_log, log_bytes, has_shot, shot_count, created_at,
       expires_at, pinned, ip_hash
     ) VALUES (
       @id, @app_id, @platform, @app_version, @device_json, @title, @comment, @tester,
-      @context_json, @breadcrumbs_json, @scene_context, @correlation_code,
+      @context_json, @breadcrumbs_json, @scene_context, @correlation_code, @session_id,
       @crash_sig, @engine, @ts_utc,
       @cnt_error, @cnt_warn, @cnt_log, @log_bytes, @has_shot, @shot_count, @created_at,
       @expires_at, @pinned, @ip_hash
@@ -241,9 +320,36 @@ const stmts = {
   listLogs: db.prepare(`
     SELECT id, title, ts_utc, platform, cnt_error, cnt_warn, cnt_log,
            log_bytes, has_shot, pinned, status, tags, crash_sig, engine,
-           created_at, expires_at
+           session_id, created_at, expires_at
     FROM logs
     WHERE app_id = @app_id AND app_version = @version
+    ORDER BY created_at DESC
+  `),
+
+  // Live logs of one session within an app, newest first. Liveness mirrors
+  // getLiveLog (pinned OR not-yet-expired) so the session view never lists logs
+  // the sweeper is about to drop. Shaped like listLogs (catalog row columns).
+  listLogsBySession: db.prepare(`
+    SELECT id, title, ts_utc, platform, cnt_error, cnt_warn, cnt_log,
+           log_bytes, has_shot, pinned, status, tags, crash_sig, engine,
+           app_version, session_id, created_at, expires_at
+    FROM logs
+    WHERE app_id = @app_id AND session_id = @session_id
+          AND (pinned = 1 OR expires_at IS NULL OR expires_at > @now)
+    ORDER BY created_at DESC
+  `),
+
+  // Live logs of one app (catalog columns) for the full-text search join. The
+  // FTS index is contentless and app-agnostic, so search matches by rowid are
+  // intersected with this set in JS (see searchLogs). Liveness mirrors
+  // getLiveLog. Newest-first is a stable tiebreak when ranks coincide.
+  searchAppRows: db.prepare(`
+    SELECT id, title, ts_utc, platform, cnt_error, cnt_warn, cnt_log,
+           log_bytes, has_shot, pinned, status, tags, crash_sig, engine,
+           app_version, session_id, created_at, expires_at
+    FROM logs
+    WHERE app_id = @app_id
+          AND (pinned = 1 OR expires_at IS NULL OR expires_at > @now)
     ORDER BY created_at DESC
   `),
 
@@ -350,7 +456,56 @@ const stmts = {
   setFilePin: db.prepare(`
     UPDATE files SET pinned = @pinned, expires_at = @expires_at WHERE id = @id
   `),
+
+  // --- Full-text search bookkeeping (plain-table statements; always safe) ---
+
+  // Up to `limit` logs of an app whose body is not yet in the FTS index, for the
+  // lazy/scripted backfill. Returns the id + the catalog text columns so the
+  // caller (which already reads the log body from disk) can build the FTS row.
+  listLogsMissingFts: db.prepare(`
+    SELECT id, title, tester, comment, context_json, scene_context
+    FROM logs
+    WHERE app_id = @app_id AND fts_indexed = 0
+    LIMIT @limit
+  `),
+
+  markFtsIndexed: db.prepare(`UPDATE logs SET fts_indexed = 1 WHERE id = @id`),
 };
+
+// ---------------------------------------------------------------------------
+// Full-text search statements (FTS5).
+//
+// Prepared only when the FTS table exists (ftsAvailable). The FTS table is
+// contentless, so writes go through dedicated INSERT/delete-by-rowid forms.
+// All search reads use a MATCH against a caller-built query string and rank by
+// FTS5 bm25 (best matches first). The id list returned by `searchIds` is joined
+// back to the logs table by the route to build catalog rows.
+// ---------------------------------------------------------------------------
+
+const ftsStmts = ftsAvailable ? {
+  // Insert a row into the contentless FTS table at a derived rowid.
+  insert: db.prepare(`
+    INSERT INTO logs_fts (rowid, title, tester, comment, context, scene, body)
+    VALUES (@rowid, @title, @tester, @comment, @context, @scene, @body)
+  `),
+
+  // Delete a row by its derived rowid. Works because the table is created with
+  // contentless_delete=1, which lets a plain DELETE by rowid drop the
+  // inverted-index entries without a content table.
+  deleteByRowid: db.prepare(`DELETE FROM logs_fts WHERE rowid = ?`),
+
+  // Search within one app: the rowids matching @match, ranked by relevance.
+  // The app scope is applied by the route via the joined logs row (the FTS
+  // table holds no app_id); we fetch a bounded number of top matches and let
+  // the route filter to the app + liveness. bm25() lower = better.
+  search: db.prepare(`
+    SELECT rowid, bm25(logs_fts) AS rank
+    FROM logs_fts
+    WHERE logs_fts MATCH @match
+    ORDER BY rank
+    LIMIT @limit
+  `),
+} : null;
 
 // ---------------------------------------------------------------------------
 // Public API. Each function maps directly onto a prepared statement.
@@ -366,9 +521,17 @@ function getLog(id) {
   return stmts.getLog.get(id);
 }
 
-// Delete a log row by id. Returns the run info (changes count).
+// Delete a log row by id, and its FTS entry (if any), atomically. Keeping the
+// two in one transaction means the search index never points at a deleted log.
+// Returns the logs-table run info (changes count) so callers (sweeper) keep
+// counting deleted rows as before.
 function deleteLog(id) {
-  return stmts.deleteLog.run(id);
+  if (!ftsStmts) return stmts.deleteLog.run(id);
+  const tx = db.transaction((logId) => {
+    ftsStmts.deleteByRowid.run(ftsRowId(logId));
+    return stmts.deleteLog.run(logId);
+  });
+  return tx(id);
 }
 
 // List up to `limit` non-pinned logs whose expires_at is at or before `now`
@@ -449,6 +612,13 @@ function listLogs(appId, version) {
   return stmts.listLogs.all({ app_id: appId, version });
 }
 
+// Live logs of one session within an app, newest first. `now` is an ISO-8601
+// UTC string for the liveness filter. Rows are shaped like listLogs (plus
+// app_version), so the catalog route can render them with the same mapper.
+function listLogsBySession(appId, sessionId, now) {
+  return stmts.listLogsBySession.all({ app_id: appId, session_id: sessionId, now });
+}
+
 // Live crash rows for an app (`now` is an ISO-8601 UTC string for the liveness
 // filter). Returns raw rows; the route groups them by crash_sig.
 function listCrashRows(appId, now) {
@@ -479,6 +649,119 @@ function getLatestByCode(appId, code, now) {
 // Set a log's crash_sig. `sig` is the signature, or '' for "not a crash".
 function updateCrashSig(id, sig) {
   return stmts.updateCrashSig.run({ id, crash_sig: sig });
+}
+
+// --- Full-text search ------------------------------------------------------
+
+// True when the SQLite build has FTS5 and the index is live. The search route
+// answers 503 when this is false so the feature degrades cleanly.
+function searchAvailable() {
+  return !!ftsStmts;
+}
+
+// Flatten a context map (JSON string) into a single space-joined string of its
+// keys and values, so context values are searchable as plain text. Returns ''
+// on absence/parse error.
+function flattenContextForFts(contextJson) {
+  if (!contextJson) return '';
+  try {
+    const obj = JSON.parse(contextJson);
+    if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return '';
+    const parts = [];
+    for (const k of Object.keys(obj)) {
+      parts.push(k);
+      const v = obj[k];
+      if (v != null) parts.push(String(v));
+    }
+    return parts.join(' ');
+  } catch {
+    return '';
+  }
+}
+
+// Index (or re-index) one log's catalog text + body into the FTS table and mark
+// it indexed. `meta` carries the row's text columns (title/tester/comment/
+// context_json/scene_context); `body` is the decompressed log text (or ''). A
+// no-op when FTS is unavailable. delete-then-insert at the derived rowid makes
+// it idempotent (a re-index replaces the prior entry). Wrapped in a transaction
+// so the FTS write and the fts_indexed flag flip together.
+function indexLog(meta, body) {
+  if (!ftsStmts) return;
+  const rowid = ftsRowId(meta.id);
+  const params = {
+    rowid,
+    title: meta.title || '',
+    tester: meta.tester || '',
+    comment: meta.comment || '',
+    context: flattenContextForFts(meta.context_json),
+    scene: meta.scene_context || '',
+    body: body || '',
+  };
+  const tx = db.transaction(() => {
+    ftsStmts.deleteByRowid.run(rowid);
+    ftsStmts.insert.run(params);
+    stmts.markFtsIndexed.run({ id: meta.id });
+  });
+  tx();
+}
+
+// Up to `limit` logs of an app not yet in the FTS index, with the text columns
+// needed to build the FTS row (the caller adds the body it reads from disk).
+// Empty array when FTS is unavailable (nothing to backfill).
+function listLogsMissingFts(appId, limit) {
+  if (!ftsStmts) return [];
+  return stmts.listLogsMissingFts.all({ app_id: appId, limit });
+}
+
+// Search one app's live logs by full-text query. `match` is the FTS5 MATCH
+// string (built + escaped by the route). `now` is the ISO-8601 liveness cutoff.
+// `version` (optional) restricts to one exact app_version. Returns up to `limit`
+// catalog rows (same shape as listLogs) ranked by FTS5 relevance, restricted to
+// this app, the optional version, and live (pinned or not-yet-expired) logs.
+// Empty array when FTS is unavailable.
+//
+// The FTS table is contentless and app-agnostic, so we fetch a generous batch
+// of top matches by rowid, then join back to logs by the derived rowid to
+// apply the app + version + liveness filter and recover the catalog columns.
+// The rowid is reconstructed in JS (ftsRowId) per candidate log, since SQLite
+// cannot invert the hash; we match the FTS rowids against this app's logs. The
+// version filter is applied DURING the join (before the limit slice), so a
+// version-scoped search never loses matches that ranked below an unfiltered
+// top-`limit`.
+function searchLogs(appId, match, limit, now, version) {
+  if (!ftsStmts) return [];
+  // Pull a wider FTS candidate set than `limit`, because the contentless index
+  // spans all apps: after restricting to this app + liveness fewer may remain.
+  const ftsLimit = Math.min(Math.max(limit * 8, limit + 50), 2000);
+  let hits;
+  try {
+    hits = ftsStmts.search.all({ match, limit: ftsLimit });
+  } catch {
+    // A malformed MATCH expression throws; the route validates/escapes input,
+    // so treat any residual parse error as "no results" rather than a 500.
+    return [];
+  }
+  if (hits.length === 0) return [];
+
+  // rowid -> relevance rank (lower is better), preserving FTS order.
+  const rankByRowid = new Map();
+  for (let i = 0; i < hits.length; i++) {
+    if (!rankByRowid.has(hits[i].rowid)) rankByRowid.set(hits[i].rowid, i);
+  }
+
+  // Join back: scan this app's live logs and keep the ones whose derived rowid
+  // is in the hit set. App log counts are bounded per request by the catalog
+  // scale; the version index keeps the per-app scan cheap.
+  const appRows = stmts.searchAppRows.all({ app_id: appId, now });
+  const matched = [];
+  for (const r of appRows) {
+    if (version && r.app_version !== version) continue;
+    const order = rankByRowid.get(ftsRowId(r.id));
+    if (order === undefined) continue;
+    matched.push({ row: r, order });
+  }
+  matched.sort((a, b) => a.order - b.order);
+  return matched.slice(0, limit).map((m) => m.row);
 }
 
 // --- Standalone file uploads -----------------------------------------------
@@ -548,10 +831,15 @@ module.exports = {
   statsForApp,
   largestLogs,
   listLogs,
+  listLogsBySession,
   listCrashRows,
   listLogsMissingSig,
   getLatestByCode,
   updateCrashSig,
+  searchAvailable,
+  searchLogs,
+  indexLog,
+  listLogsMissingFts,
   insertFile,
   getFile,
   deleteFile,

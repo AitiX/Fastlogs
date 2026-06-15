@@ -18,7 +18,22 @@ services:
       - .env
     ports:
       # host:container - put nginx in front of this in production.
+      # Bound to host loopback ONLY (do NOT change to 0.0.0.0): the service must
+      # stay private behind nginx; a previous 0.0.0.0 binding exposed it.
       - "127.0.0.1:8787:8787"
+    # Liveness probe so Docker restarts the container if the HTTP server wedges.
+    # Uses node (always present in the image; slim base has no curl/wget) to GET
+    # /api/health on the in-container loopback. Exit 0 only on HTTP 200.
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "require('node:http').get('http://127.0.0.1:'+(process.env.PORT||8787)+'/api/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
     volumes:
       # Persist the SQLite DB and blob storage across container restarts.
       - ./data:/app/data

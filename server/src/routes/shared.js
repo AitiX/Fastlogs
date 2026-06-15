@@ -9,6 +9,7 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
+const auth = require('../auth');
 const db = require('../db');
 const config = require('../config');
 const { sendText, sendJson, nowUtcIso } = require('../util/http');
@@ -133,6 +134,43 @@ function notFoundJson(res) {
   });
 }
 
+// Resolve a viewer token from the Authorization header or a ?token= query and
+// authorize catalog (viewer-tier) access. Returns true when the request may see
+// the catalog. Used by the catalog and search routes; the admin token also
+// satisfies viewer access (see auth.isViewer).
+function authorizeViewer(req, query) {
+  const headerToken = auth.parseBearer(req.headers['authorization']);
+  if (headerToken && auth.isViewer(headerToken)) return true;
+  const queryToken = query ? query.get('token') : null;
+  if (queryToken && auth.isViewer(queryToken)) return true;
+  return false;
+}
+
+// Shape a catalog "log record" row (as returned by db.listLogs /
+// listLogsBySession / searchAppRows) into the public catalog JSON object used
+// by the versions/session/search views. `ts_utc` maps to `time` and the
+// catalog uses createdAt for sort tiebreaks. Extra fields a caller does not
+// need are simply ignored downstream.
+function catalogRowFromLog(r) {
+  return {
+    id: r.id,
+    title: r.title || null,
+    time: r.ts_utc,
+    createdAt: r.created_at,
+    platform: r.platform,
+    counts: { error: r.cnt_error, warn: r.cnt_warn, log: r.cnt_log },
+    logBytes: r.log_bytes,
+    hasScreenshot: r.has_shot === 1,
+    pinned: r.pinned === 1,
+    status: r.status || 'new',
+    tags: parseJsonColumn(r.tags, true, []),
+    engine: r.engine || null,
+    version: r.app_version || null,
+    sessionId: r.session_id || null,
+    expiresAt: r.expires_at || null,
+  };
+}
+
 // Parse a log row's device_json into an object (or {} on absence/parse error).
 function parseDevice(row) {
   if (!row.device_json) return {};
@@ -207,6 +245,9 @@ function publicLogObject(row) {
     // code, or null. Both are passed through verbatim.
     sceneContext: row.scene_context || null,
     correlationCode: row.correlation_code || null,
+    // Per-launch session id (or null). When set, the viewer can link to "all
+    // logs of this session" in the catalog (GET /browse/<appId>?session=...).
+    sessionId: row.session_id || null,
     // Standalone files attached to this log (SendFile with logId). Always an
     // array; live rows only (pinned or not-yet-expired). downloadUrl is relative.
     attachments: attachmentsForLog(row.id),
@@ -229,4 +270,6 @@ module.exports = {
   parseDevice,
   parseJsonColumn,
   publicLogObject,
+  authorizeViewer,
+  catalogRowFromLog,
 };

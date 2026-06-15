@@ -96,6 +96,10 @@ function setup() {
   process.env.BASE_URL = 'http://testhost';
   process.env.CORS_ALLOW_ORIGIN = '*';
   process.env.IP_SALT = 'test-salt';
+  // Disable the disk-usage monitor in tests: with the default cadence its
+  // startup pass would statfs the volume, walk blobs/, and could POST to a
+  // webhook. 0 makes diskMonitor.start() a no-op, keeping tests hermetic.
+  process.env.DISK_MONITOR_INTERVAL_SEC = '0';
 
   // Require server modules (they read config once from env).
   const { server, start } = require('../src/index');

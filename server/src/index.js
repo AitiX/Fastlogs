@@ -20,6 +20,7 @@ const { Router } = require('./router');
 const { applyCors, handlePreflight } = require('./cors');
 const { sendError, sendText } = require('./util/http');
 const sweeper = require('./sweeper');
+const diskMonitor = require('./diskmonitor');
 
 // Route handlers.
 const { health } = require('./routes/health');
@@ -33,6 +34,7 @@ const { setStatus, setTags } = require('./routes/triage');
 const { createRedmineIssue } = require('./routes/redmine');
 const { awaitByCode } = require('./routes/await');
 const { browseRoot, browseApp, browseVersion, browseCrashes } = require('./routes/browse');
+const { search } = require('./routes/search');
 const { handleFileUpload, fileDownload, fileViewer } = require('./routes/files');
 const staticRoutes = require('./routes/static');
 
@@ -58,6 +60,10 @@ router.post('/api/files', handleFileUpload);
 // Await: resolve the latest live log of an app by debug/await code (viewer-token
 // gated). The caller polls this; no long-poll on the server.
 router.get('/api/await/:appId', awaitByCode);
+
+// Full-text search over one app's logs (viewer-token gated). JSON-only; the
+// catalog page drives it. ?appId=&q=[&version=][&limit=].
+router.get('/api/search', search);
 
 // Catalog (viewer-token gated). The literal "crashes" route MUST precede the
 // "/:version" catch-all: both are 3-segment GET patterns and the router is
@@ -188,6 +194,10 @@ function start() {
     server.listen(config.port, config.host, () => {
       console.log(`[server] FastLogs listening on http://${config.host}:${config.port}`);
       scheduleSweep();
+      // Disk-usage watchdog: warns (and optionally webhooks) when the BLOB_DIR
+      // volume fills up or blobs/ grows past a threshold. Self-contained, unref'd
+      // interval; disabled when DISK_MONITOR_INTERVAL_SEC=0 or no threshold is set.
+      diskMonitor.start();
       resolve(server);
     });
   });
@@ -201,6 +211,7 @@ function shutdown(signal) {
   shuttingDown = true;
   console.log(`[server] ${signal} received, shutting down...`);
   if (sweepTimer) clearInterval(sweepTimer);
+  diskMonitor.stop();
 
   const forceTimer = setTimeout(() => {
     console.error('[server] forced shutdown (timeout)');

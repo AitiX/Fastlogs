@@ -305,6 +305,39 @@ a:hover { color: var(--accent-h); text-decoration: underline; }
 }
 .crashes-link:hover { border-color: var(--accent); text-decoration: none; }
 
+/* ---- Full-text search (versions page box + results header) ---- */
+
+.search-form {
+  display: flex; gap: 8px; margin-bottom: 14px;
+}
+.search-box {
+  flex: 1; min-width: 0; padding: 7px 10px;
+  background: var(--bg2); border: 1px solid var(--border);
+  border-radius: var(--radius); color: var(--text); font-size: 13px;
+}
+.search-box:focus { border-color: var(--accent); outline: none; }
+.search-box::placeholder { color: var(--text-dim); }
+.search-go {
+  padding: 7px 16px; background: var(--accent); border: 1px solid var(--accent);
+  border-radius: var(--radius); color: #fff; font-size: 13px; cursor: pointer;
+}
+.search-go:hover { background: var(--accent-h); border-color: var(--accent-h); }
+
+.search-head {
+  display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;
+  margin-bottom: 12px; font-size: 13px; color: var(--text-dim);
+}
+.search-head-q strong { color: var(--text); }
+.search-head-count { color: var(--text-dim); }
+
+/* Match snippet + session cell in the result tables. */
+.td-snippet {
+  font-family: var(--mono); font-size: 11px; color: var(--text-dim);
+  max-width: 360px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.td-session { white-space: nowrap; }
+.session-link { font-size: 12px; }
+
 /* ---- Scrollbar ---- */
 ::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track { background: var(--bg2); }

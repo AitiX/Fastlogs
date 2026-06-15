@@ -19,14 +19,13 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
-const auth = require('../auth');
 const db = require('../db');
 const config = require('../config');
 const storage = require('../storage');
 const crashsig = require('../crashsig');
 const version = require('../util/version');
 const { sendJson, sendError, sendText, nowUtcIso } = require('../util/http');
-const { parseJsonColumn } = require('./shared');
+const { authorizeViewer, catalogRowFromLog } = require('./shared');
 
 // Load the catalog HTML shell once at first use. browse.js (loaded by the
 // shell) reads window.location.pathname to decide which view to render and
@@ -65,16 +64,6 @@ function serveBrowseHtml(res) {
   });
 }
 
-// Resolve a viewer token from header or query, then authorize. Returns true if
-// the request may see the catalog. On failure the caller answers 401.
-function authorizeViewer(req, query) {
-  const headerToken = auth.parseBearer(req.headers['authorization']);
-  if (headerToken && auth.isViewer(headerToken)) return true;
-  const queryToken = query ? query.get('token') : null;
-  if (queryToken && auth.isViewer(queryToken)) return true;
-  return false;
-}
-
 // GET /browse -> projects (JSON) or the catalog UI (HTML for browsers).
 function browseRoot(req, res, params, query) {
   if (!authorizeViewer(req, query)) {
@@ -105,6 +94,9 @@ function browseRoot(req, res, params, query) {
 }
 
 // GET /browse/:appId -> versions (JSON) or the catalog UI (HTML for browsers).
+// With ?session=<id> it instead returns the catalog rows of that session
+// (every log of one app launch), so the viewer can link "all logs of this
+// session" to this same endpoint.
 function browseApp(req, res, params, query) {
   if (!authorizeViewer(req, query)) {
     return sendError(res, 401, 'unauthorized', 'Viewer token required');
@@ -116,6 +108,19 @@ function browseApp(req, res, params, query) {
     // enumeration concern: the caller is a trusted team member).
     return sendError(res, 404, 'not_found', 'Unknown appId');
   }
+
+  // Session filter: the logs of one app launch, newest first (live rows only).
+  const sessionId = query ? query.get('session') : null;
+  if (sessionId) {
+    const logs = db.listLogsBySession(params.appId, sessionId, nowUtcIso()).map(catalogRowFromLog);
+    return sendJson(res, 200, {
+      appId: app.app_id,
+      name: app.name,
+      sessionId,
+      logs,
+    });
+  }
+
   const versions = db.listVersions(params.appId).map((v) => ({
     version: v.version,
     count: v.count,
@@ -146,21 +151,7 @@ function browseVersion(req, res, params, query) {
   if (!app) {
     return sendError(res, 404, 'not_found', 'Unknown appId');
   }
-  const rows = db.listLogs(params.appId, params.version).map((r) => ({
-    id: r.id,
-    title: r.title || null,
-    time: r.ts_utc,
-    createdAt: r.created_at,
-    platform: r.platform,
-    counts: { error: r.cnt_error, warn: r.cnt_warn, log: r.cnt_log },
-    logBytes: r.log_bytes,
-    hasScreenshot: r.has_shot === 1,
-    pinned: r.pinned === 1,
-    status: r.status || 'new',
-    tags: parseJsonColumn(r.tags, true, []),
-    engine: r.engine || null,
-    expiresAt: r.expires_at || null,
-  }));
+  const rows = db.listLogs(params.appId, params.version).map(catalogRowFromLog);
   sendJson(res, 200, {
     appId: app.app_id,
     name: app.name,

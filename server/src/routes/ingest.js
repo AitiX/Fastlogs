@@ -155,6 +155,10 @@ const BC_LEVELS = new Set(['info', 'warn', 'error']);
 // Max length of the optional `correlationCode` (a short debug/await code).
 const CODE_MAX_LEN = 64;
 
+// Max length of the optional `sessionId` (a per-launch GUID from the client).
+// 128 leaves room for a GUID plus a short prefix without being abusable.
+const SESSION_MAX_LEN = 128;
+
 const byteLen = (s) => Buffer.byteLength(s, 'utf8');
 
 // Sanitize the context object into a clamped { string: string } map, or return
@@ -233,6 +237,17 @@ function sanitizeCorrelationCode(raw) {
   if (raw === null || raw === undefined) return null;
   const code = String(raw).trim().slice(0, CODE_MAX_LEN);
   return code.length ? code : null;
+}
+
+// Sanitize the optional `sessionId`: a per-launch identifier (the client sends
+// the same value for every report from one app run, so the catalog can group
+// them). Coerced to a string, trimmed, and clamped to SESSION_MAX_LEN; empty
+// collapses to null. Stored verbatim and treated as opaque (no GUID shape is
+// enforced, so any engine's launch id works).
+function sanitizeSessionId(raw) {
+  if (raw === null || raw === undefined) return null;
+  const sid = String(raw).trim().slice(0, SESSION_MAX_LEN);
+  return sid.length ? sid : null;
 }
 
 // Find a value in an object by a case/separator-insensitive key match (so the
@@ -322,6 +337,9 @@ async function handleIngest(req, res) {
   // and a short debug/await code; both are stored as-is and never fail ingest.
   const sceneContext = sanitizeSceneContext(body.sceneContext, config.maxSceneContextBytes);
   const correlationCode = sanitizeCorrelationCode(body.correlationCode);
+  // Optional per-launch session id: groups every report from one app run so the
+  // catalog can link "all logs of this session". Opaque, clamped, or null.
+  const sessionId = sanitizeSessionId(body.sessionId);
   const retentionDaysRaw = body.retentionDays;
   // Screenshots: the new `screenshotsPng` array plus the legacy single
   // `screenshotPng` are collected and validated at step 7.
@@ -450,6 +468,8 @@ async function handleIngest(req, res) {
     // Opaque scene snapshot JSON string + short debug/await code (or null).
     scene_context: sceneContext,
     correlation_code: correlationCode,
+    // Per-launch session id (or null) for catalog session grouping.
+    session_id: sessionId,
     // Crash signature for grouping. '' (not null) marks "computed, not a crash"
     // so the lazy backfill never re-scans this log.
     crash_sig: crashsig.computeSignature(logTextDecoded, { topK: config.crashSigTopK }) || '',
@@ -475,6 +495,16 @@ async function handleIngest(req, res) {
     storage.removeBlobs(id).catch(() => {});
     console.error('[ingest] DB insert failed:', err);
     return sendError(res, 500, 'internal_error', 'Failed to store log metadata');
+  }
+
+  // Index the log's catalog text + body into the full-text search index. The
+  // decompressed body is already in memory (logTextDecoded). Best-effort: an
+  // FTS failure must not fail an otherwise-stored ingest; the log stays
+  // searchable-later via the lazy/scripted backfill (fts_indexed = 0).
+  try {
+    db.indexLog(row, logTextDecoded);
+  } catch (err) {
+    console.error('[ingest] FTS index failed (log stored, will backfill):', err);
   }
 
   // 12. Fire sinks asynchronously (does not block response).

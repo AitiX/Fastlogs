@@ -59,6 +59,9 @@ See `.env.example` for inline docs. Full list:
 | `TRIAGE_TAG_MAX_COUNT` | `20` | Max tags kept per log (extras dropped after dedupe) |
 | `CRASH_SIG_TOP_K` | `8` | Top normalized stack frames folded into a crash signature (higher = finer grouping) |
 | `CRASH_RECOMPUTE_BATCH` | `200` | Max pre-feature logs the crashes view backfills with a signature per request. `0` disables the lazy backfill |
+| `SEARCH_MAX_RESULTS` | `100` | Max catalog rows returned by a single full-text search query |
+| `SEARCH_SNIPPET_TOKENS` | `12` | Max snippet length per search result, in whitespace tokens |
+| `SEARCH_BACKFILL_BATCH` | `200` | Max not-yet-indexed logs the search route lazily indexes per request. `0` disables it (use `npm run backfill-fts`) |
 | `REDMINE_URL` | _(none)_ | Redmine base URL. Empty disables the "create issue from log" feature (button hidden, endpoint 503) |
 | `REDMINE_API_KEY` | _(none)_ | Redmine REST API key (`X-Redmine-API-Key`). Server-side only. Empty also disables the feature |
 | `REDMINE_PROJECT_ID` | _(none)_ | Redmine project id/identifier. REQUIRED for issue creation (with URL+key set but this empty, the endpoint returns 502) |
@@ -91,6 +94,8 @@ Supported sink types: `slack`, `discord`, `webhook` (generic), `googlesheet`, `c
 The catalog (`/browse`, viewer-token gated) groups and triages logs:
 
 - **Crashes** (`/browse/:appId/crashes`): logs are grouped by a normalized stack signature (computed at ingest from the error/exception line plus the top stack frames). Each group shows the count, distinct testers, versions, and a "NEW in `<version>`" / "REGRESSION in `<version>`" badge when a crash first appears in - or returns to - the latest version.
+- **Full-text search** (`/api/search?appId=&q=`, search box on the versions page): SQLite FTS5 over each log's title, tester, comment, context values, scene snapshot and the log body. Results show a relevance-ranked list with a match snippet. Pre-feature logs are indexed lazily per query and/or via `npm run backfill-fts`.
+- **Sessions** (`/browse/:appId?session=<id>`): when a client sends a per-launch `sessionId`, the catalog and viewer link "all logs of this session" so one app run's reports group together.
 - **Size dashboard**: per-project and per-version storage totals, pinned counts, and the largest logs.
 - **Status + tags**: each log has a triage status (new / triaged / in_progress / fixed / wontfix) and free-form tags, set from the viewer page and filtered in the catalog. Open by link by default (set `TRIAGE_REQUIRES_ADMIN=1` to restrict). Triage does not affect retention.
 - **Engine**: the catalog shows each project's engine (Unity / GameMaker), detected from the log device info.

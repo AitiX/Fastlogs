@@ -161,6 +161,16 @@ const config = Object.freeze({
   crashSigTopK: envInt('CRASH_SIG_TOP_K', 8),
   crashRecomputeBatch: envInt('CRASH_RECOMPUTE_BATCH', 200),
 
+  // Full-text search (GET /api/search). searchMaxResults caps how many catalog
+  // rows a query returns; searchSnippetTokens is the max FTS5 snippet length (in
+  // tokens) per result; searchBackfillBatch is the max not-yet-indexed logs the
+  // search route lazily backfills into the FTS index per request (bounds
+  // first-query latency on a DB of pre-feature logs; 0 disables the lazy
+  // backfill and relies on the backfill script instead).
+  searchMaxResults: envInt('SEARCH_MAX_RESULTS', 100),
+  searchSnippetTokens: envInt('SEARCH_SNIPPET_TOKENS', 12),
+  searchBackfillBatch: envInt('SEARCH_BACKFILL_BATCH', 200),
+
   // Salt for hashing client IPs before storage.
   ipSalt: envStr('IP_SALT', ''),
 
@@ -179,6 +189,26 @@ const config = Object.freeze({
   // bounded. 0 disables it (use an external cron / systemd timer instead).
   sweepIntervalSec: envInt('SWEEP_INTERVAL_SEC', 3600),
   sweepBatch: envInt('SWEEP_BATCH', 500),
+
+  // Disk-usage monitor. Periodically (off the hot path) checks how full the
+  // filesystem holding BLOB_DIR is and how large blobs/ has grown; when a
+  // threshold is crossed it logs a warning and optionally POSTs to a webhook.
+  // 0 interval disables the monitor entirely.
+  diskMonitor: Object.freeze({
+    // Check cadence (seconds). Defaults to the sweep cadence so the two
+    // housekeeping passes line up; 0 disables the monitor.
+    intervalSec: envInt('DISK_MONITOR_INTERVAL_SEC', envInt('SWEEP_INTERVAL_SEC', 3600)),
+    // Alert when the BLOB_DIR filesystem is at/above this used percentage.
+    // 0 disables the percentage check (e.g. when statfs is unavailable).
+    alertPct: envInt('DISK_ALERT_PCT', 85),
+    // Alert when blobs/ on-disk size reaches this many bytes. 0 disables the
+    // absolute-size check (default), so only the percentage check runs.
+    alertBytes: envInt('DISK_ALERT_BYTES', 0),
+    // Optional webhook the alert is POSTed to (Slack/Discord incoming webhook
+    // or any endpoint). Empty = log-only. The body carries both `text` and
+    // `content` so one URL works for Slack, Discord, or a generic receiver.
+    webhook: envStr('DISK_ALERT_WEBHOOK', ''),
+  }),
 
   // Redmine "create issue from log" integration. Disabled unless both URL and
   // API key are set (button hidden client-side, endpoint returns 503).

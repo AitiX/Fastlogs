@@ -38,6 +38,13 @@
   // Preserve the query string for auth token forwarding (e.g. "?token=xyz").
   var qs = window.location.search;
 
+  // App-level query modifiers (only meaningful on /browse/:appId): a full-text
+  // search query (?q=) and a session filter (?session=). These pick a special
+  // view of one app without a new path segment.
+  var searchParams = new URLSearchParams(window.location.search);
+  var searchQuery = (appId && !version && !isCrashes) ? (searchParams.get('q') || '') : '';
+  var sessionId = (appId && !version && !isCrashes) ? (searchParams.get('session') || '') : '';
+
   // The FastLogs logo returns to the projects home, carrying the token so the
   // catalog stays authorized (a bare /browse would 401).
   var logoEl = document.querySelector('.topbar-logo');
@@ -50,10 +57,26 @@
     return path + '?' + sp.toString();
   }
 
+  // Build a /api/search URL: explicit appId + q, carrying over the token.
+  function searchApiUrl(appId, q) {
+    var sp = new URLSearchParams();
+    var t = searchParams.get('token');
+    if (t) sp.set('token', t);
+    sp.set('appId', appId);
+    sp.set('q', q);
+    return '/api/search?' + sp.toString();
+  }
+
   // ---- Utility: fetch JSON with error handling ----
 
   function fetchJson(path) {
-    return fetch(apiUrl(path), { headers: { 'Accept': 'application/json' } }).then(function (r) {
+    return fetchJsonRaw(apiUrl(path));
+  }
+
+  // Fetch JSON from an already-built URL (used for /api/search, which carries
+  // its own appId/q/token rather than the page query string).
+  function fetchJsonRaw(url) {
+    return fetch(url, { headers: { 'Accept': 'application/json' } }).then(function (r) {
       if (r.status === 401 || r.status === 403) {
         throw new Error('auth_required');
       }
@@ -109,32 +132,45 @@
     return '<span class="badge-status badge-status-' + s + '">' + esc(STATUS_LABELS[s]) + '</span>';
   }
 
+  // A token-only query string ("?token=xyz" or ""), for links that must NOT
+  // carry over ?q= / ?session= (e.g. the breadcrumb back to the app home).
+  function tokenQs() {
+    var t = searchParams.get('token');
+    return t ? '?token=' + encodeURIComponent(t) : '';
+  }
+
+  // Link to one app's version list (drops any q/session, keeps the token).
+  function appHomeHref(appId) {
+    return '/browse/' + encodeURIComponent(appId) + tokenQs();
+  }
+
   // ---- Breadcrumbs ----
 
   function renderBreadcrumbs(appId, version, isCrashes) {
     var bc = document.getElementById('breadcrumbs');
+    var catalog = '<span class="crumb"><a href="' + withQs('/browse') + '">Catalog</a></span>';
+    var sep = '<span class="crumb-sep">/</span>';
     var html = '';
     if (!appId) {
       html = '<span class="crumb">Catalog</span>';
     } else if (isCrashes) {
-      html =
-        '<span class="crumb"><a href="' + withQs('/browse') + '">Catalog</a></span>' +
-        '<span class="crumb-sep">/</span>' +
-        '<span class="crumb"><a href="' + withQs('/browse/' + encodeURIComponent(appId)) + '">' + esc(appId) + '</a></span>' +
-        '<span class="crumb-sep">/</span>' +
-        '<span class="crumb">Crashes</span>';
+      html = catalog + sep +
+        '<span class="crumb"><a href="' + appHomeHref(appId) + '">' + esc(appId) + '</a></span>' +
+        sep + '<span class="crumb">Crashes</span>';
+    } else if (searchQuery) {
+      html = catalog + sep +
+        '<span class="crumb"><a href="' + appHomeHref(appId) + '">' + esc(appId) + '</a></span>' +
+        sep + '<span class="crumb">Search</span>';
+    } else if (sessionId) {
+      html = catalog + sep +
+        '<span class="crumb"><a href="' + appHomeHref(appId) + '">' + esc(appId) + '</a></span>' +
+        sep + '<span class="crumb">Session</span>';
     } else if (!version) {
-      html =
-        '<span class="crumb"><a href="' + withQs('/browse') + '">Catalog</a></span>' +
-        '<span class="crumb-sep">/</span>' +
-        '<span class="crumb">' + esc(appId) + '</span>';
+      html = catalog + sep + '<span class="crumb">' + esc(appId) + '</span>';
     } else {
-      html =
-        '<span class="crumb"><a href="' + withQs('/browse') + '">Catalog</a></span>' +
-        '<span class="crumb-sep">/</span>' +
-        '<span class="crumb"><a href="' + withQs('/browse/' + encodeURIComponent(appId)) + '">' + esc(appId) + '</a></span>' +
-        '<span class="crumb-sep">/</span>' +
-        '<span class="crumb">' + esc(version) + '</span>';
+      html = catalog + sep +
+        '<span class="crumb"><a href="' + appHomeHref(appId) + '">' + esc(appId) + '</a></span>' +
+        sep + '<span class="crumb">' + esc(version) + '</span>';
     }
     bc.innerHTML = html;
   }
@@ -227,6 +263,23 @@
     }
 
     contentEl.innerHTML = '';
+
+    // Full-text search box: navigates to /browse/:appId?q=... (server search
+    // across this app's logs). Submitting an empty box goes back to versions.
+    var searchForm = document.createElement('form');
+    searchForm.className = 'search-form';
+    searchForm.innerHTML =
+      '<input class="search-box" type="search" placeholder="Search all logs of ' + esc(appId) + ' (title, comment, tester, context, body)...">' +
+      '<button class="search-go" type="submit">Search</button>';
+    var searchBox = searchForm.querySelector('.search-box');
+    searchForm.addEventListener('submit', function (e) {
+      e.preventDefault();
+      var q = searchBox.value.trim();
+      var dest = '/browse/' + encodeURIComponent(appId) + tokenQs();
+      if (q) dest += (tokenQs() ? '&' : '?') + 'q=' + encodeURIComponent(q);
+      window.location.href = dest;
+    });
+    contentEl.appendChild(searchForm);
 
     // One link to the grouped crashes view for this app.
     var crashesLink = document.createElement('a');
@@ -555,6 +608,124 @@
     });
   }
 
+  // ---- Shared: a catalog log-record table for the search + session views ----
+
+  // Build a "link to all logs of this session" anchor for a row, or '' when the
+  // log has no session. Carries the token so the catalog stays authorized.
+  function sessionLink(appId, sid) {
+    if (!sid) return '';
+    var href = '/browse/' + encodeURIComponent(appId) + tokenQs() +
+      (tokenQs() ? '&' : '?') + 'session=' + encodeURIComponent(sid);
+    return '<a class="session-link" href="' + esc(href) + '" title="All logs of this session">session</a>';
+  }
+
+  // Render a list of catalog log records (id, title, time, platform, counts,
+  // version, sessionId, optional snippet) as a table. `opts.showSnippet` adds a
+  // snippet column (search results); `opts.showVersion` adds a version column.
+  // Each row opens the log in a new tab; the session cell links to that
+  // session's logs. A client-side substring filter (the shared filter input)
+  // narrows by title/snippet.
+  function renderResultLogs(appId, logs, opts) {
+    opts = opts || {};
+    var filterInput = document.getElementById('filter-input');
+    filterInput.placeholder = 'Filter results...';
+
+    if (!logs || logs.length === 0) {
+      showEmpty(opts.emptyMsg || 'No logs found.');
+      return;
+    }
+
+    var wrap = document.createElement('div');
+    wrap.className = 'logs-table-wrap';
+    var table = document.createElement('table');
+    table.className = 'logs-table';
+    table.innerHTML =
+      '<thead><tr>' +
+      '<th>ID</th>' +
+      '<th>Title</th>' +
+      (opts.showVersion ? '<th>Version</th>' : '') +
+      '<th>Platform</th>' +
+      '<th>E / W / L</th>' +
+      (opts.showSnippet ? '<th>Match</th>' : '') +
+      '<th>Session</th>' +
+      '<th>Time</th>' +
+      '</tr></thead>';
+
+    var tbody = document.createElement('tbody');
+    logs.forEach(function (log) {
+      var id = log.id || '';
+      var counts = log.counts || {};
+      var cntE = counts.error != null ? counts.error : 0;
+      var cntW = counts.warn != null ? counts.warn : 0;
+      var cntL = counts.log != null ? counts.log : 0;
+      var engineHtml = log.engine ? ' <span class="engine-badge">' + esc(log.engine) + '</span>' : '';
+
+      var tr = document.createElement('tr');
+      tr.dataset.title = ((log.title || '') + ' ' + (log.snippet || '')).toLowerCase();
+
+      tr.innerHTML =
+        '<td class="td-id"><a href="' + withQs('/' + encodeURIComponent(id)) + '" target="_blank">' + esc(id) + '</a></td>' +
+        '<td class="td-title"><span class="td-title-text" title="' + esc(log.title || '') + '">' + esc(log.title || '(no title)') + '</span></td>' +
+        (opts.showVersion ? '<td class="td-platform">' + esc(log.version || '') + '</td>' : '') +
+        '<td class="td-platform">' + esc(log.platform || '') + engineHtml + '</td>' +
+        '<td class="td-counts"><span class="count-e">' + cntE + '</span> / <span class="count-w">' + cntW + '</span> / <span class="count-l">' + cntL + '</span></td>' +
+        (opts.showSnippet ? '<td class="td-snippet">' + esc(log.snippet || '') + '</td>' : '') +
+        '<td class="td-session">' + sessionLink(appId, log.sessionId) + '</td>' +
+        '<td class="td-time">' + esc(fmtDate(log.time || log.createdAt)) + '</td>';
+
+      tr.addEventListener('click', function (e) {
+        if (e.target.tagName === 'A') return;
+        window.open(withQs('/' + encodeURIComponent(id)), '_blank');
+      });
+      tbody.appendChild(tr);
+    });
+
+    table.appendChild(tbody);
+    wrap.appendChild(table);
+    contentEl.innerHTML = '';
+    contentEl.appendChild(wrap);
+
+    filterInput.addEventListener('input', function () {
+      var q = filterInput.value.toLowerCase();
+      tbody.querySelectorAll('tr').forEach(function (tr) {
+        tr.classList.toggle('hidden', !(!q || tr.dataset.title.indexOf(q) !== -1));
+      });
+    });
+  }
+
+  // ---- View: full-text search results (GET /api/search) ----
+
+  function renderSearch(appId, query, results) {
+    document.title = 'FastLogs - ' + appId + ' / Search';
+    // renderResultLogs writes the table into #content; prepend a header line
+    // echoing the query + result count above it.
+    renderResultLogs(appId, results, {
+      showSnippet: true,
+      showVersion: true,
+      emptyMsg: 'No logs match "' + query + '".',
+    });
+    var head = document.createElement('div');
+    head.className = 'search-head';
+    head.innerHTML = '<span class="search-head-q">Results for <strong>' + esc(query) + '</strong></span>' +
+      '<span class="search-head-count">' + results.length + ' match' + (results.length !== 1 ? 'es' : '') + '</span>';
+    contentEl.insertBefore(head, contentEl.firstChild);
+  }
+
+  // ---- View: one session's logs (GET /browse/:appId?session=) ----
+
+  function renderSession(appId, sid, logs) {
+    document.title = 'FastLogs - ' + appId + ' / Session';
+    renderResultLogs(appId, logs, {
+      showVersion: true,
+      emptyMsg: 'No logs for this session.',
+    });
+    var head = document.createElement('div');
+    head.className = 'search-head';
+    head.innerHTML = '<span class="search-head-q">Session <strong>' + esc(sid) + '</strong></span>' +
+      '<span class="search-head-count">' + logs.length + ' log' + (logs.length !== 1 ? 's' : '') + '</span>';
+    contentEl.insertBefore(head, contentEl.firstChild);
+  }
+
   // ---- Main: route and fetch ----
 
   renderBreadcrumbs(appId, version, isCrashes);
@@ -577,6 +748,26 @@
       .catch(function (err) {
         if (err.message === 'auth_required') showError('Authentication required. Pass ?token= in the URL.');
         else showError('Failed to load crashes: ' + err.message);
+      });
+
+  } else if (searchQuery) {
+    // Full-text search results for one app.
+    document.title = 'FastLogs - ' + appId + ' / Search';
+    fetchJsonRaw(searchApiUrl(appId, searchQuery))
+      .then(function (data) { renderSearch(appId, searchQuery, (data && data.results) || []); })
+      .catch(function (err) {
+        if (err.message === 'auth_required') showError('Authentication required. Pass ?token= in the URL.');
+        else showError('Search failed: ' + err.message);
+      });
+
+  } else if (sessionId) {
+    // All logs of one session.
+    document.title = 'FastLogs - ' + appId + ' / Session';
+    fetchJson('/browse/' + encodeURIComponent(appId))
+      .then(function (data) { renderSession(appId, sessionId, (data && data.logs) || []); })
+      .catch(function (err) {
+        if (err.message === 'auth_required') showError('Authentication required. Pass ?token= in the URL.');
+        else showError('Failed to load session: ' + err.message);
       });
 
   } else if (!version) {
