@@ -44,6 +44,13 @@ namespace PlayJoy.FastLogs
         {
             sb.Append('[').Append(LevelTag(entry.Level)).Append("] ");
             sb.Append('+').Append(entry.TimeSinceStartup.ToString("0.000", CultureInfo.InvariantCulture)).Append(' ');
+            // Optional frame token: "f<frame> " between the time and the message. Only
+            // emitted when the frame is known (>= 0); -1 means "not captured" so the
+            // token is omitted and the line stays the legacy shape the viewer also reads.
+            if (entry.FrameCount >= 0)
+            {
+                sb.Append('f').Append(entry.FrameCount.ToString(CultureInfo.InvariantCulture)).Append(' ');
+            }
             sb.Append(entry.Message ?? string.Empty);
             sb.Append('\n');
 

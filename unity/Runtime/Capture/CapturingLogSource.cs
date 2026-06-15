@@ -63,6 +63,14 @@ namespace PlayJoy.FastLogs
         private bool _captureStarted;
         private bool _disposed;
 
+        // Last Time.frameCount seen on the MAIN THREAD. Refreshed at the top of every
+        // pump (PumpOnce runs on the main thread each frame) and used to stamp entries
+        // that arrived without a frame - notably the Unity threaded hook, which builds
+        // its LogEntry on a worker thread where Time.frameCount is unavailable, and the
+        // SRDebugger poll path. -1 until the first frame is observed (then the token is
+        // omitted, keeping the legacy line shape). Never read off the main thread.
+        private int _lastMainThreadFrame = -1;
+
         public CapturingLogSource(FastLogsConfig config)
         {
             _config = config;
@@ -161,9 +169,12 @@ namespace PlayJoy.FastLogs
 
         public void Append(string message, FastLogLevel level, string stackTrace = null)
         {
+            // Manual Append runs on the main thread, so Time.frameCount is valid here:
+            // read it directly (refreshing the cache too) and stamp the entry with it.
             double t = 0;
+            int frame = RefreshMainThreadFrame();
             try { t = Time.realtimeSinceStartupAsDouble; } catch { }
-            OnEntry(new LogEntry(message, stackTrace, level, t));
+            OnEntry(new LogEntry(message, stackTrace, level, t, frame));
         }
 
         public void Clear()
@@ -238,6 +249,16 @@ namespace PlayJoy.FastLogs
         // SRDebugger poll). Runs on the main thread.
         private void OnEntry(LogEntry entry)
         {
+            // Stamp a frame for entries that arrived without one (FrameCount < 0): the
+            // Unity threaded hook builds its entry on a worker thread (no Time.frameCount
+            // there) and SRDebugger entries carry none. We're on the main thread here, so
+            // the cached last-known main-thread frame is the safe value to use. Entries
+            // that already carry a frame (manual Append) are left untouched.
+            if (entry.FrameCount < 0)
+            {
+                entry.FrameCount = _lastMainThreadFrame;
+            }
+
             // Count per session BEFORE ring de-dup so spammy duplicates still count.
             switch (entry.Level)
             {
@@ -268,6 +289,12 @@ namespace PlayJoy.FastLogs
             {
                 return;
             }
+
+            // Refresh the cached main-thread frame BEFORE draining: we're on the main
+            // thread, and entries queued off-thread (or polled from SRDebugger) below get
+            // stamped with this value in OnEntry.
+            RefreshMainThreadFrame();
+
             if (_usingSr)
             {
                 _srSource.Poll();
@@ -292,6 +319,15 @@ namespace PlayJoy.FastLogs
                 return;
             }
             _pump = CapturePump.Attach(PumpOnce);
+        }
+
+        // Read Time.frameCount (MAIN THREAD ONLY) into the cache and return it. Guarded
+        // so capture never throws if called before the engine is ready; on failure the
+        // cache (and thus the stamped frame) stays at its last value / -1.
+        private int RefreshMainThreadFrame()
+        {
+            try { _lastMainThreadFrame = Time.frameCount; } catch { }
+            return _lastMainThreadFrame;
         }
 
         // Tiny hidden MonoBehaviour that calls back every frame. Owned by this source

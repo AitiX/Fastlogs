@@ -26,12 +26,29 @@ namespace PlayJoy.FastLogs
         /// <summary>Seconds since startup (Time.realtimeSinceStartup) when captured.</summary>
         public double TimeSinceStartup;
 
+        /// <summary>
+        /// Unity frame number (Time.frameCount) when captured, or -1 when unknown
+        /// (e.g. captured off the main thread before a frame was ever stamped). -1 is
+        /// the "not captured" sentinel: LogFormat omits the f&lt;frame&gt; token for it,
+        /// so old logs without a frame stay valid.
+        /// </summary>
+        public int FrameCount;
+
+        // Frame-less overload. Kept so existing call sites (and any external code)
+        // that don't know a frame still compile; FrameCount defaults to -1 (unknown ->
+        // not emitted).
         public LogEntry(string message, string stackTrace, FastLogLevel level, double timeSinceStartup)
+            : this(message, stackTrace, level, timeSinceStartup, -1)
+        {
+        }
+
+        public LogEntry(string message, string stackTrace, FastLogLevel level, double timeSinceStartup, int frameCount)
         {
             Message = message;
             StackTrace = stackTrace;
             Level = level;
             TimeSinceStartup = timeSinceStartup;
+            FrameCount = frameCount;
         }
     }
 
