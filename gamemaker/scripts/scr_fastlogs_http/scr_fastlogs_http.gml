@@ -77,6 +77,11 @@ function __fastlogs_http_state() {
             //   { success, id, url, downloadUrl, statusCode, error }. undefined -> без колбэка
             //   (просто тост). Используется fastlogs_send_file* (см. scr_fastlogs_files).
             file_on_done  : undefined,
+            // ПОЛНЫЙ СНИМОК (фича SNAPSHOT): колбэк, который Other_62 зовёт ПОСЛЕ УСПЕХА лог-отчёта
+            //   с готовым logId - cb(log_id /*string*/). Снимок строит snapshot.zip и шлёт его как
+            //   вложение к этой записи (см. scr_fastlogs_snapshot: fastlogs_send_snapshot). undefined
+            //   -> обычный лог-отчёт (без снимка). Сбрасывается в undefined после вызова/на терминале.
+            log_on_done   : undefined,
         };
     }
     return st.http;

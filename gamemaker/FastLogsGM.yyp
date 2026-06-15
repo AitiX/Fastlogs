@@ -35,6 +35,7 @@
     {"id":{"name":"scr_fastlogs_payload","path":"scripts/scr_fastlogs_payload/scr_fastlogs_payload.yy",},},
     {"id":{"name":"scr_fastlogs_recorder","path":"scripts/scr_fastlogs_recorder/scr_fastlogs_recorder.yy",},},
     {"id":{"name":"scr_fastlogs_screenshot","path":"scripts/scr_fastlogs_screenshot/scr_fastlogs_screenshot.yy",},},
+    {"id":{"name":"scr_fastlogs_snapshot","path":"scripts/scr_fastlogs_snapshot/scr_fastlogs_snapshot.yy",},},
     {"id":{"name":"scr_fastlogs_util","path":"scripts/scr_fastlogs_util/scr_fastlogs_util.yy",},},
   ],
   "resourceType":"GMProject",

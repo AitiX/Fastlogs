@@ -220,9 +220,59 @@ basename каждого пути (при коллизии добавляется
 при сбое упаковки, что и у `fastlogs_send_folder`.
 
 > **ПРО `kind` ДЛЯ ПАПКИ/АРХИВА:** сервер принимает `kind` из набора
-> `file|folder|save|screenshot|archive|other` (иное -> `null`). Значение `"zip"` НЕ валидно,
+> `file|folder|save|snapshot|screenshot|archive|other` (иное -> `null`). Значение `"zip"` НЕ валидно,
 > поэтому для папки-архива используется `kind="folder"` (паритет с Unity-клиентом, который шлёт
 > `"folder"`), а не `"zip"`. При group-upload-фолбэке тот же `kind="folder"` на каждом файле.
+
+---
+
+## Полный снимок игры (фича SNAPSHOT)
+
+ОДИН вызов собирает **обычный ЛОГ-ОТЧЁТ** (как `fastlogs_send`: логи + контекст + breadcrumbs +
+срез устройства + опц. скриншот) И ВДОБАВОК упаковывает сохранения/данные игры в `snapshot.zip`,
+который **прикрепляется к ТОЙ ЖЕ записи** как вложение (`kind="snapshot"`, привязка по `logId`).
+Результат: одна запись лога = читаемый отчёт + кнопка **Download snapshot.zip** во вьюере.
+
+> **РАЗДЕЛЕНИЕ (важно).** В `snapshot.zip` идут **ТОЛЬКО сейвы + зарегистрированные данные**, а НЕ
+> собственные логи FastLogs - они уже являются телом отчёта, включать их в архив значило бы
+> дублировать/рекурсировать. Папка FastLogs (`FASTLOGS_PERSIST_DIR`: rolling-лог, `settings.ini`,
+> `pending/` outbox, временный PNG скриншота) **ИСКЛЮЧАЕТСЯ** из архива.
+
+> **ИНВАРИАНТ PII.** Сейвы могут содержать персональные данные - это **осознанное дев-действие**.
+> К блобу/именам файлов скраб НЕ применяется (как у файлового пути), только кап по размеру.
+
+Источник по умолчанию (без регистрации): **вся папка сейвов** = `game_save_id` (GM sandbox),
+рекурсивно, исключая папку FastLogs. `snapshot.zip` строится **в памяти** (grow-буфер), на диск
+не пишется. На платформах, где `game_save_id` не перечисляется (консоли/HTML5, см. GM-NOTES 2.9),
+дефолтный источник просто пуст - используйте `fastlogs_add_snapshot_source(...)`.
+
+### `fastlogs_send_snapshot([opts])` -> bool
+Отправить лог-отчёт и прикрепить к нему `snapshot.zip`. `opts` пробрасывается в `fastlogs_send`
+(`title`/`comment`/`screenshot`/`retentionDays`/`extraDevice`...), плюс снимок-специфичные поля:
+`includePersistent` (bool - override `FASTLOGS_SNAPSHOT_INCLUDE_PERSISTENT` на этот вызов),
+`snapshotName` (string, деф. `"snapshot.zip"`), `snapshotTitle` (string, деф. `"Game snapshot"`),
+`onSnapshotDone` (function(result) - колбэк завершения аплоада архива; структура `result` как у
+файлового `onDone`). Возврат `bool` СРАЗУ как у `fastlogs_send` (`true` если ЛОГ-отправка
+поставлена). `snapshot.zip` строится и уходит **только ПОСЛЕ УСПЕХА лог-отчёта** (`logId` присваивает
+сервер в ответе): хук `log_on_done` в http-состоянии вызывается из `Other_62.gml` по успеху с
+готовым `logId`. Если лог-отчёт окончательно не доставлен - вложение не отправляется (привязывать
+не к чему). Кап `snapshot.zip` - `FASTLOGS_MAX_SNAPSHOT_BYTES` (деф. = `FASTLOGS_MAX_FILE_BYTES`).
+
+### Реестр источников (добавляет ПОВЕРХ дефолтной папки сейвов)
+- `fastlogs_add_snapshot_source(path)` -> bool - зарегистрировать доп. папку-источник (дубликаты
+  игнорируются; путь нормализуется срезом хвостовых слешей).
+- `fastlogs_add_snapshot_data(name, buffer_or_base64)` -> bool - добавить данные **в памяти** как
+  файл архива. Второй аргумент: `buffer` (real - кодируем снимок содержимого СЕЙЧАС, владелец
+  буфера остаётся за вызывающим) либо `string` (уже готовый base64).
+- `fastlogs_remove_snapshot_source(path)` -> bool - снять источник-папку.
+- `fastlogs_clear_snapshot_sources()` -> void - очистить ВСЕ источники и данные (дефолтную папку
+  сейвов не затрагивает - ей управляет `FASTLOGS_SNAPSHOT_INCLUDE_PERSISTENT` / `opts`).
+
+Все публичные функции при `!FASTLOGS_ENABLED` - no-op (ранний `return`). В архиве дефолтная папка
+кладётся под префикс `saves/`, каждый зарегистрированный источник - под подпапку по его basename
+(анти-коллизия суффиксом ` (k)`); структура каталогов сохраняется. REUSE: `__fastlogs_zip_store`
+(#6a, файлы-только путь) и `__fastlogs_send_buffer` / `fastlogs_files_post_internal` (тот же
+файловый аплоад на `/api/files` с `logId`).
 
 ---
 
