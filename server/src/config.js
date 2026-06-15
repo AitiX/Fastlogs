@@ -237,6 +237,12 @@ const config = Object.freeze({
     projectId: envStr('REDMINE_PROJECT_ID', ''),
     trackerId: envStr('REDMINE_TRACKER_ID', ''),
     timeoutMs: envInt('REDMINE_TIMEOUT_MS', 10000),
+    // When true, the issue is created AS the log's tester (Redmine impersonation
+    // via X-Redmine-Switch-User) so the issue Author is the QA who reported it.
+    // Requires an ADMIN api key, and the tester name must be a real Redmine login
+    // with permission in the project - otherwise it falls back to the api-key user
+    // (the tester name is in the issue description regardless). Off by default.
+    impersonateTester: envBool('REDMINE_IMPERSONATE_TESTER', false),
     enabled: !!(redmineUrl && redmineApiKey),
   }),
 });

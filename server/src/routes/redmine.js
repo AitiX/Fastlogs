@@ -72,6 +72,11 @@ async function createRedmineIssue(req, res, params, query) {
   });
   const projectId = body.projectId != null && body.projectId !== '' ? body.projectId : config.redmine.projectId;
   const trackerId = body.trackerId != null && body.trackerId !== '' ? body.trackerId : config.redmine.trackerId;
+  // Impersonate the tester (issue Author = the QA who reported it) when enabled and
+  // the log carries a tester name. createIssue falls back to the api-key user if
+  // Redmine refuses the impersonation (unknown login / no permission).
+  const switchUser = (config.redmine.impersonateTester && row.tester && String(row.tester).trim())
+    ? String(row.tester).trim() : null;
 
   if (!projectId) {
     return sendError(res, 502, 'redmine_error', 'REDMINE_PROJECT_ID not set');
@@ -100,6 +105,7 @@ async function createRedmineIssue(req, res, params, query) {
       subject,
       description,
       timeoutMs: config.redmine.timeoutMs,
+      switchUser,
     });
   } catch (err) {
     resolveLink(null);
@@ -110,9 +116,30 @@ async function createRedmineIssue(req, res, params, query) {
   if (result.ok && result.issueId != null) {
     const issueUrl = config.redmine.publicUrl + '/issues/' + result.issueId;
     db.setRedmine(row.id, result.issueId, issueUrl);
+    // A log that spawned a tracked task should stick around and be visibly marked:
+    // pin it (so retention never sweeps it; null expiry = never expires) and add a
+    // "redmine-<id>" tag so the catalog shows which logs have a task.
+    try { db.setPin(row.id, true, null); } catch (e) { /* best-effort */ }
+    const tag = 'redmine-' + result.issueId;
+    try {
+      let tags = [];
+      try { tags = row.tags ? JSON.parse(row.tags) : []; } catch { tags = []; }
+      if (!Array.isArray(tags)) tags = [];
+      if (tags.indexOf(tag) === -1) {
+        tags.push(tag);
+        db.setTags(row.id, JSON.stringify(tags));
+      }
+    } catch (e) { /* best-effort */ }
     resolveLink({ issueId: result.issueId, issueUrl });
     inFlight.delete(row.id);
-    return sendJson(res, 200, { issueId: result.issueId, issueUrl, created: true });
+    return sendJson(res, 200, {
+      issueId: result.issueId,
+      issueUrl,
+      created: true,
+      pinned: true,
+      tag,
+      impersonated: !!result.impersonated,
+    });
   }
 
   // Not linked: release any waiting caller and clear the slot.
