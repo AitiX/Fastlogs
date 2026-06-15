@@ -18,7 +18,7 @@ services:
       - .env
     ports:
       # host:container - put nginx in front of this in production.
-      - "8787:8787"
+      - "127.0.0.1:8787:8787"
     volumes:
       # Persist the SQLite DB and blob storage across container restarts.
       - ./data:/app/data
