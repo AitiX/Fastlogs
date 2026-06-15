@@ -44,7 +44,14 @@ function awaitByCode(req, res, params, query) {
     return sendError(res, 400, 'bad_request', 'code is required (1..64 chars)');
   }
 
-  const hit = db.getLatestByCode(appId, code, nowUtcIso());
+  // Resolve the appId through aliases so an await under a renamed project's OLD
+  // slug still finds the report: ingest re-keys logs onto the new canonical id,
+  // so the old slug must be followed to that id before the lookup. An unknown
+  // id resolves to itself (resolveAppId returns null -> the `|| appId` fallback)
+  // and simply finds nothing, as before.
+  const canonical = db.resolveAppId(appId) || appId;
+
+  const hit = db.getLatestByCode(canonical, code, nowUtcIso());
   if (!hit) {
     return sendJson(res, 200, { found: false, id: null, url: null, rawUrl: null, createdAt: null });
   }

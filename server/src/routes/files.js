@@ -143,6 +143,14 @@ async function handleFileUpload(req, res) {
   if (!appId || typeof appId !== 'string' || !/^[a-z0-9_-]{2,32}$/.test(appId)) {
     return sendError(res, 400, 'bad_request', 'appId must be 2-32 chars [a-z0-9_-]');
   }
+  // Resolve the appId through aliases so a renamed project's OLD slug keeps
+  // uploading into the new canonical app (mirrors ingest.js). resolveAppId
+  // returns null for an unknown id, and the `|| appId` fallback then keeps the
+  // literal id so the team-token auto-register path below still applies. Using
+  // the canonical id everywhere (auth, auto-register, rate-limit, stored row)
+  // is what stops an upload under the old slug from re-creating a live app that
+  // would SHADOW the alias and silently undo the rename.
+  const canonicalAppId = db.resolveAppId(appId) || appId;
   if (!platform || !VALID_PLATFORMS.has(platform)) {
     return sendError(res, 400, 'bad_request', `platform must be one of: ${[...VALID_PLATFORMS].join(', ')}`);
   }
@@ -166,8 +174,10 @@ async function handleFileUpload(req, res) {
   const groupId = body.groupId != null ? String(body.groupId).slice(0, 64) : null;
   const retentionDaysRaw = body.retentionDays;
 
-  // 4. Auth: validate app + token (same tiers as ingest).
-  let { ok, app, code } = validateIngest(appId, req.headers['authorization']);
+  // 4. Auth: validate app + token (same tiers as ingest). The CANONICAL id is
+  // used so a request under an old (aliased) slug authenticates against the
+  // renamed app's token/state.
+  let { ok, app, code } = validateIngest(canonicalAppId, req.headers['authorization']);
   if (!ok) {
     if (code === 'unauthorized') {
       return sendError(res, 401, 'unauthorized', 'Authorization token required');
@@ -180,8 +190,8 @@ async function handleFileUpload(req, res) {
   if (code === 'auto_register') {
     try {
       db.upsertApp({
-        app_id: appId,
-        name: appId,
+        app_id: canonicalAppId,
+        name: canonicalAppId,
         token_hash: null,
         retention_days: config.defaultRetentionDays,
         max_retention_days: config.maxRetentionDays,
@@ -189,7 +199,7 @@ async function handleFileUpload(req, res) {
         enabled: 1,
         created_at: nowUtcIso(),
       });
-      app = db.getApp(appId);
+      app = db.getApp(canonicalAppId);
     } catch (err) {
       console.error('[files] auto-register failed:', err);
       return sendError(res, 500, 'internal_error', 'Failed to auto-register app');
@@ -204,7 +214,7 @@ async function handleFileUpload(req, res) {
     return sendError(res, 429, 'too_many_requests', 'Rate limit exceeded',
       { 'Retry-After': String(rlIp.retryAfter) });
   }
-  const rlApp = ratelimit.check(`files:app:${appId}`, RL_APP_LIMIT, RL_WINDOW_SEC);
+  const rlApp = ratelimit.check(`files:app:${canonicalAppId}`, RL_APP_LIMIT, RL_WINDOW_SEC);
   if (!rlApp.allowed) {
     return sendError(res, 429, 'too_many_requests', 'Rate limit exceeded',
       { 'Retry-After': String(rlApp.retryAfter) });
@@ -245,7 +255,9 @@ async function handleFileUpload(req, res) {
   try {
     db.insertFile({
       id,
-      app_id: appId,
+      // Store the CANONICAL app_id so an alias-routed upload lands in the
+      // renamed project (files are grouped by the canonical id, like logs).
+      app_id: canonicalAppId,
       app_version: appVersion,
       platform,
       log_id: logId,

@@ -304,8 +304,9 @@ async function handleIngest(req, res) {
     return sendError(res, 400, 'bad_request', 'appId must be 2-32 chars [a-z0-9_-]');
   }
   // Resolve the appId through aliases so a renamed project's OLD slug keeps
-  // ingesting into the new canonical app. A genuinely unknown id resolves to
-  // itself (resolveAppId returns null), preserving the auto-register path below.
+  // ingesting into the new canonical app. For a genuinely unknown id
+  // resolveAppId returns null, and the `|| appId` fallback keeps the literal id
+  // so the auto-register path below still applies to it.
   const canonicalAppId = db.resolveAppId(appId) || appId;
   if (!platform || !VALID_PLATFORMS.has(platform)) {
     return sendError(res, 400, 'bad_request', `platform must be one of: ${[...VALID_PLATFORMS].join(', ')}`);
