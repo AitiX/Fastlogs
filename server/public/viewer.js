@@ -347,10 +347,62 @@
   if (data.timestampUtc) {
     try { metaParts.push(new Date(data.timestampUtc).toLocaleString()); } catch (e) { metaParts.push(data.timestampUtc); }
   }
-  if (data.tester) metaParts.unshift('by ' + data.tester);
   // Debug/await correlation code (small label) when the client sent one.
   if (data.correlationCode) metaParts.push('code: ' + data.correlationCode);
   document.getElementById('counts-meta').textContent = metaParts.join(' - ');
+
+  // ---- Tester / "via code" badges (prominent, before the dim meta line) ----
+
+  // The QA/tester name and origin of the report read as distinct chips in the
+  // counts bar rather than being buried in the dim meta text. A manual overlay
+  // send is the normal case (tester present, no code badge); a code-initiated
+  // send (FastLogs.Send* called from game code) is flagged with a "via code"
+  // chip that also surfaces the call site when the client reported one. Both
+  // chips are inserted ahead of #counts-meta so they sit at the start of the
+  // line; missing fields simply render nothing (defensive, no crash).
+  var countsBar = document.getElementById('counts-bar');
+  var countsMetaEl = document.getElementById('counts-meta');
+  if (countsBar && countsMetaEl) {
+    // Tester: shown prominently when present. Trim so a whitespace-only value
+    // (shouldn't happen now that manual sends require a name) renders nothing.
+    var testerName = (typeof data.tester === 'string') ? data.tester.trim() : '';
+    if (testerName) {
+      var testerBadge = document.createElement('span');
+      testerBadge.className = 'meta-badge tester-badge';
+      testerBadge.title = 'QA / tester';
+      var testerLabel = document.createElement('span');
+      testerLabel.className = 'meta-badge-label';
+      testerLabel.textContent = 'tester';
+      var testerValue = document.createElement('span');
+      testerValue.className = 'meta-badge-value';
+      testerValue.textContent = testerName;
+      testerBadge.appendChild(testerLabel);
+      testerBadge.appendChild(testerValue);
+      countsBar.insertBefore(testerBadge, countsMetaEl);
+    }
+
+    // "via code" chip only for reports initiated from game code. The server
+    // omits sentViaCode for the common overlay send, so a strict === true keeps
+    // the normal case badge-free. When the call site is known, append it as
+    // "(callerFile:callerLine)" - guarded so a missing file or line degrades to
+    // a bare "via code" rather than a malformed "(:)".
+    if (data.sentViaCode === true) {
+      var codeBadge = document.createElement('span');
+      codeBadge.className = 'meta-badge code-badge';
+      var codeText = 'via code';
+      var callerFile = (typeof data.callerFile === 'string') ? data.callerFile.trim() : '';
+      if (callerFile) {
+        var callerSite = callerFile;
+        if (data.callerLine !== null && data.callerLine !== undefined && !isNaN(data.callerLine)) {
+          callerSite += ':' + data.callerLine;
+        }
+        codeText += ' (' + callerSite + ')';
+      }
+      codeBadge.textContent = codeText;
+      codeBadge.title = 'Report sent from game code';
+      countsBar.insertBefore(codeBadge, countsMetaEl);
+    }
+  }
 
   // "All logs of this session" link (catalog, viewer-gated) when the client
   // sent a sessionId. Appended after the meta text so it is clickable. The
