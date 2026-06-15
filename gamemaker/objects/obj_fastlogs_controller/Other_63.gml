@@ -1,8 +1,8 @@
 /// @description FastLogs controller - Async Save/Load (eventType 7 / eventNum 63)
-// Завершение асинхронных файловых операций (buffer_save_async / buffer_load_async).
-// СЕЙЧАС НЕ ИСПОЛЬЗУЕТСЯ: скриншот пишется синхронно (surface_save/screen_save) и читается в том
-//   же кадре, рекордер тоже синхронен - ни один путь не шлёт это событие. Оставлено как заглушка
-//   на случай будущего async-персиста; событие должно оставаться в obj (eventType 7 / eventNum 63).
+// Completion of async file operations (buffer_save_async / buffer_load_async).
+// NOT CURRENTLY USED: screenshot is written synchronously (surface_save/screen_save) and read in the
+//   same frame; the recorder is also synchronous - no code path sends this event. Left as a stub
+//   for future async persistence; the event must remain on obj (eventType 7 / eventNum 63).
 if (!FASTLOGS_ENABLED) { exit; }
 
-// Здесь пока нет async-операций FastLogs. При добавлении buffer_*_async сопоставлять async_load[? "id"].
+// No async FastLogs operations here yet. When adding buffer_*_async, match against async_load[? "id"].

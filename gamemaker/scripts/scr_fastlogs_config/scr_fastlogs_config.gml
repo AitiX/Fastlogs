@@ -1,221 +1,221 @@
 /// @description scr_fastlogs_config
-// FastLogs GameMaker client - КОНФИГУРАЦИЯ (дефолтные макросы).
-// НЕЙТРАЛЬНЫЕ дефолты: без playjoystudios, без секретов. Интегратор переопределяет
-// эти значения в своём проекте (например, в отдельном config-скрипте поверх).
-// Сверять GML-API по GM-NOTES.md. Контракт тела запроса: ../../CONTRACT.md.
+// FastLogs GameMaker client - CONFIGURATION (default macros).
+// NEUTRAL defaults: no playjoystudios, no secrets. Integrator overrides
+// these values in their own project (e.g. in a separate config script on top).
+// Check GML API against GM-NOTES.md. Request body contract: ../../CONTRACT.md.
 
 // =====================================================================================
-// КОНСОЛЬ-БЕЗОПАСНОСТЬ / ГЕЙТИНГ (per-config)
+// CONSOLE SAFETY / GATING (per-config)
 // -------------------------------------------------------------------------------------
-// FASTLOGS_ENABLED задаётся ПО КОНФИГУ СБОРКИ. Имена конфигов должны совпадать с .yyp:
-//   Default - релизный конфиг (клиент ВЫКЛ, контроллер не создаётся, нет http/screen_save).
-//   debug   - отладочный конфиг (клиент ВКЛ).
-// Паттерн как __INPUT_DEBUG_STEAM_INPUT / __SCRIBBLE_DEBUG.
-// В ритейле на консолях собирают Default -> запрещённые сетевые/скриншот-вызовы не исполняются.
+// FASTLOGS_ENABLED is set PER BUILD CONFIG. Config names must match the .yyp:
+//   Default - release config (client OFF, controller not created, no http/screen_save).
+//   debug   - debug config (client ON).
+// Pattern like __INPUT_DEBUG_STEAM_INPUT / __SCRIBBLE_DEBUG.
+// Retail console builds use Default -> forbidden network/screenshot calls are never executed.
 #macro Default:FASTLOGS_ENABLED false
 #macro debug:FASTLOGS_ENABLED true
 
 // =====================================================================================
-// СЕРВЕР / ИНГЕСТ (тот же сервер, что у Unity-клиента)
+// SERVER / INGEST (same server as the Unity client)
 // -------------------------------------------------------------------------------------
-// Endpoint - полный URL ингеста по контракту: <BASE_URL>/api/logs
-// Дефолт пустой -> интегратор ОБЯЗАН задать (иначе fastlogs_send делает no-op + предупреждение).
-#macro FASTLOGS_ENDPOINT      ""        // напр. "http://localhost:8787/api/logs"
-#macro FASTLOGS_APP_ID        ""        // [a-z0-9_-]{2,32}, = Project в каталоге
-#macro FASTLOGS_TOKEN         ""        // ingest-токен (Authorization: Bearer ...); "" = без заголовка
-#macro FASTLOGS_APP_VERSION   ""        // "" -> взять GM_version / задать вручную
+// Endpoint - full ingest URL per contract: <BASE_URL>/api/logs
+// Default is empty -> integrator MUST set it (otherwise fastlogs_send is a no-op + warning).
+#macro FASTLOGS_ENDPOINT      ""        // e.g. "http://localhost:8787/api/logs"
+#macro FASTLOGS_APP_ID        ""        // [a-z0-9_-]{2,32}, = Project in the catalog
+#macro FASTLOGS_TOKEN         ""        // ingest token (Authorization: Bearer ...); "" = no header
+#macro FASTLOGS_APP_VERSION   ""        // "" -> use GM_version / set manually
 
-// Ретеншн (per-request override; сервер clamp(1, app.maxRetentionDays)). -1 = не слать поле.
+// Retention (per-request override; server clamp(1, app.maxRetentionDays)). -1 = do not send the field.
 #macro FASTLOGS_RETENTION_DAYS -1
 
-// Имя тестера - уходит в поле "tester" КАЖДОГО отчёта (контракт: <=120 символов).
-// Пустая строка -> поле не отправляется (контракт: пустые опускать). Интегратор задаёт
-// своё значение в проекте (или через runtime-override fastlogs_init({ tester: "..." })).
+// Tester name - goes into the "tester" field of EVERY report (contract: <=120 characters).
+// Empty string -> field is not sent (contract: omit empty fields). Integrator sets
+// their own value in the project (or via runtime-override fastlogs_init({ tester: "..." })).
 #macro FASTLOGS_TESTER        ""
 
-// Авто-копирование короткой ссылки (url) в буфер обмена устройства после УСПЕШНОЙ отправки.
-// По умолчанию ВКЛ. На WebGL копирование требует user-gesture - там это может не сработать
-// (не падаем; в оверлее остаётся кнопка "Копировать" как fallback по клику).
+// Auto-copy of the short link (url) to the device clipboard after a SUCCESSFUL send.
+// ON by default. On WebGL copying requires a user gesture - it may not work there
+// (we don't crash; the overlay still shows a "Copy" button as a click fallback).
 #macro FASTLOGS_COPY_ON_SEND  true
 
-// HTTP timeout на установку соединения, мс. // TODO verify применимость http_set_connect_timeout.
+// HTTP connection timeout, ms. // TODO verify applicability of http_set_connect_timeout.
 #macro FASTLOGS_HTTP_TIMEOUT_MS 15000
 
-// RETRY-UNTIL-SUCCESS (отложенный повтор отправки на таймере, фича RETRY).
+// RETRY-UNTIL-SUCCESS (deferred resend on a timer, RETRY feature).
 // -------------------------------------------------------------------------------------
-// Если отправка отчёта НЕ удалась даже после немедленных ретраев аплоадера
-//   (FASTLOGS_HTTP_MAX_RETRIES в scr_fastlogs_http, мгновенные), отчёт ставится на
-//   ОТЛОЖЕННЫЙ повтор каждые N секунд и повторяется, ПОКА не пройдёт успешно (или пока
-//   не упрётся в предел попыток ниже). Реализация - на alarm-таймере контроллера
-//   (Alarm[0]), а НЕ опросом в каждом кадре: alarm тикает раз в секунду для обновления
-//   статуса "Повтор через Ns..." и запуска повтора по нулю (нет аллокаций per-frame).
-// Интервал между отложенными повторами, секунды. 0 -> отложенный повтор ВЫКЛ
-//   (поведение как раньше: при неуспехе показываем тост-ошибку с ручным "Повторить").
+// If sending a report FAILED even after immediate uploader retries
+//   (FASTLOGS_HTTP_MAX_RETRIES in scr_fastlogs_http, instant), the report is queued for
+//   DEFERRED retry every N seconds and retried UNTIL it succeeds (or until
+//   it hits the attempt limit below). Implementation uses the controller's alarm timer
+//   (Alarm[0]), NOT polling every frame: the alarm ticks once per second to update
+//   the "Retry in Ns..." status and trigger the retry at zero (no per-frame allocations).
+// Interval between deferred retries, seconds. 0 -> deferred retry OFF
+//   (old behavior: on failure show an error toast with a manual "Retry" button).
 #macro FASTLOGS_RETRY_INTERVAL_SEC 30
-// Предел числа ОТЛОЖЕННЫХ повторов. 0 -> без предела (повторять, пока приложение живо
-//   или пока отправка не пройдёт). >0 -> после стольких неуспешных отложенных повторов
-//   сдаёмся и показываем тост-ошибку с ручным "Повторить".
+// Hard limit on the number of DEFERRED retries. 0 -> no limit (retry while the app is alive
+//   or until the send succeeds). >0 -> after this many failed deferred retries
+//   we give up and show an error toast with a manual "Retry" button.
 #macro FASTLOGS_RETRY_MAX 0
 
 // =====================================================================================
-// ЗАПИСЬ ЛОГОВ (кольцо + персист)
+// LOG RECORDING (ring buffer + persist)
 // -------------------------------------------------------------------------------------
-// Размер кольцевого буфера в памяти (число строк-записей лога).
+// Ring buffer size in memory (number of log entry strings).
 #macro FASTLOGS_RING_SIZE     2000
 
-// Автостарт записи. ПО УМОЛЧАНИЮ ВЫКЛ - запись включается fastlogs_record_start()/set(true).
+// Auto-start recording. OFF BY DEFAULT - recording is enabled via fastlogs_record_start()/set(true).
 #macro FASTLOGS_AUTO_START_RECORDING false
 
-// Персист на диск: сохранять лог между сессиями (rolling-файл с лимитом, маркер сессии).
+// Persist to disk: save the log between sessions (rolling file with a size limit, session marker).
 #macro FASTLOGS_PERSIST_ENABLED   true
-// Относительный путь файла лога внутри game_save_id.
+// Relative path of the log file inside game_save_id.
 #macro FASTLOGS_PERSIST_DIR       "fastlogs"
 #macro FASTLOGS_PERSIST_FILE      "session.log"
-// Максимальный размер персист-файла на диске (байт) перед ротацией.
+// Maximum size of the persist file on disk (bytes) before rotation.
 #macro FASTLOGS_PERSIST_MAX_BYTES 1048576   // 1 MB
 
-// ПЕРФ (D): персист на диск БАТЧИНГОМ, а не на каждую строку. Строки копятся в памяти и
-//   сбрасываются на диск пачкой по таймеру (ниже) либо принудительно перед отправкой/при краше.
-//   Это убирает full-file IO на КАЖДЫЙ flog (раньше каждая строка грузила весь файл в буфер).
-// Интервал авто-сброса батча на диск, секунды. 0 -> писать сразу (старое поведение, без батча).
+// PERF (D): persist to disk via BATCHING, not on every line. Lines accumulate in memory and
+//   are flushed to disk in bulk on a timer (below) or forcibly before send/on crash.
+//   This removes full-file IO on EVERY flog (previously each line loaded the whole file into a buffer).
+// Auto-flush interval for the batch to disk, seconds. 0 -> write immediately (old behavior, no batch).
 #macro FASTLOGS_PERSIST_FLUSH_SECONDS 2
-// Жёсткий лимит размера батча в памяти (байт) - при превышении сбрасываем раньше таймера,
-//   чтобы пик памяти/потеря при краше были ограничены даже на интенсивном логировании.
+// Hard limit on the in-memory batch size (bytes) - if exceeded we flush before the timer fires,
+//   so peak memory usage / data loss on crash is bounded even under heavy logging.
 #macro FASTLOGS_PERSIST_FLUSH_MAX_BYTES 65536   // 64 KB
 
-// Усечение logText в payload (распакованный лог), байт. Контракт: усекать с пометкой.
-#macro FASTLOGS_MAX_LOG_BYTES     2000000   // ~2 MB (сервер MAX_LOG_BYTES ~20 MB - запас вниз)
+// logText truncation in the payload (unpacked log), bytes. Contract: truncate with a marker.
+#macro FASTLOGS_MAX_LOG_BYTES     2000000   // ~2 MB (server MAX_LOG_BYTES ~20 MB - headroom)
 
-// Кодировка лога в payload. На WebGL обязателен plain; держим plain везде для простоты.
+// Log encoding in the payload. On WebGL plain is required; we use plain everywhere for simplicity.
 #macro FASTLOGS_LOG_ENCODING      "plain"
 
 // =====================================================================================
-// СКРИНШОТ
+// SCREENSHOT
 // -------------------------------------------------------------------------------------
-// Включать ли скриншот в payload по умолчанию (тоггл; runtime - fastlogs_set_screenshot).
+// Whether to include a screenshot in the payload by default (toggle; runtime - fastlogs_set_screenshot).
 #macro FASTLOGS_SCREENSHOT_DEFAULT false
-// Имя временного PNG в game_save_id для пути screen_save -> buffer_load -> base64.
+// Temporary PNG filename inside game_save_id for the screen_save -> buffer_load -> base64 path.
 #macro FASTLOGS_SCREENSHOT_TMP     "fastlogs_shot_tmp.png"
 
 // =====================================================================================
-// АВТО-ОТПРАВКА ПРИ КРАШЕ (фича AUTO-SEND, C)
+// AUTO-SEND ON CRASH (AUTO-SEND feature, C)
 // -------------------------------------------------------------------------------------
-// Автоматически отправлять при необработанном исключении (best-effort + персист на диск).
-//   Дефолт: ВКЛ в дев-конфиге (handler регистрируется только при FASTLOGS_ENABLED, т.е. в debug).
+// Automatically send on an unhandled exception (best-effort + persist to disk).
+//   Default: ON in the dev config (handler is registered only when FASTLOGS_ENABLED, i.e. in debug).
 #macro FASTLOGS_AUTOSEND_ON_EXCEPTION true
 
-// ДЕДУП + ТРОТТЛИНГ авто-отправок ДОСТАВКИ (чтобы повторяющееся исключение не спамило сервер).
-//   - Дедуп ДОСТАВКИ (FIX-3, паритет с Unity): тот же стек подавляется в ОКНЕ minGap*2
-//     (FASTLOGS_AUTOSEND_THROTTLE_SECONDS*2), а НЕ навсегда за сессию. Если краш повторится
-//     позже окна - доставим снова (раньше «один раз за сессию» глушил его до перезапуска).
-//   - Троттл: не чаще одной АВТО-отправки в N секунд (любой стек).
-//   - Лимит сессии: суммарно не более K авто-ДОСТАВОК за запуск (канон Unity = 10).
-// Эти лимиты касаются ТОЛЬКО авто-отправки (ДОСТАВКИ) при краше; ручной fastlogs_send/quick-send
-//   не троттлятся. ВАЖНО: это дедуп ДОСТАВКИ; дедуп ЗАХВАТА (окно minGap, см. core
-//   __fastlogs_capture_allowed) НЕ зависит от этих значений и НЕ меняется.
+// DEDUP + THROTTLING of auto-send DELIVERIES (so a repeated exception doesn't spam the server).
+//   - DELIVERY dedup (FIX-3, parity with Unity): the same stack is suppressed within a window of minGap*2
+//     (FASTLOGS_AUTOSEND_THROTTLE_SECONDS*2), NOT forever for the session. If the crash recurs
+//     after the window - we deliver again (old "once per session" silenced it until restart).
+//   - Throttle: no more than one AUTO-send per N seconds (any stack).
+//   - Session limit: at most K auto-DELIVERIES total per launch (Unity canon = 10).
+// These limits apply ONLY to auto-send (DELIVERY) on crash; manual fastlogs_send/quick-send
+//   are not throttled. IMPORTANT: this is DELIVERY dedup; CAPTURE dedup (minGap window, see core
+//   __fastlogs_capture_allowed) does NOT depend on these values and is NOT changed.
 #macro FASTLOGS_AUTOSEND_THROTTLE_SECONDS 30
-// FIX-3: канон Unity - сессионный лимит авто-ДОСТАВОК = 10 (был 5).
+// FIX-3: Unity canon - session limit for auto-DELIVERIES = 10 (was 5).
 #macro FASTLOGS_AUTOSEND_SESSION_LIMIT    10
-// Дедуп ДОСТАВКИ одинаковых стеков (true -> повтор того же стека подавляется в окне minGap*2,
-//   а не навсегда; см. FASTLOGS_AUTOSEND_SUPPRESS_WINDOW_SECONDS).
+// DELIVERY dedup for identical stacks (true -> a repeated stack is suppressed within the minGap*2 window,
+//   not forever; see FASTLOGS_AUTOSEND_SUPPRESS_WINDOW_SECONDS).
 #macro FASTLOGS_AUTOSEND_DEDUP            true
-// FIX-3: ОКНО подавления дедупа ДОСТАВКИ (канон Unity = minGap*2). Тот же стек, доставленный
-//   менее чем SUPPRESS_WINDOW секунд назад, подавляется; позже окна - доставляется снова.
-//   Производное от троттла (minGap): окно = throttle*2. Интервал/окно берём из существующих
-//   макросов троттла (без новой ручки настройки), чтобы паритет с Unity держался автоматически.
+// FIX-3: DELIVERY dedup suppression WINDOW (Unity canon = minGap*2). The same stack delivered
+//   less than SUPPRESS_WINDOW seconds ago is suppressed; after the window it is delivered again.
+//   Derived from the throttle (minGap): window = throttle*2. Interval/window taken from existing
+//   throttle macros (no new config knob), so parity with Unity is maintained automatically.
 #macro FASTLOGS_AUTOSEND_SUPPRESS_WINDOW_SECONDS (FASTLOGS_AUTOSEND_THROTTLE_SECONDS * 2)
 
 // =====================================================================================
-// ПЕРСИСТ КРАШ-ОТЧЁТА + ДОСЫЛ ПРИ СТАРТЕ (фича #1, PENDING-QUEUE)
+// CRASH REPORT PERSIST + RESEND ON START (feature #1, PENDING-QUEUE)
 // -------------------------------------------------------------------------------------
-// При авто-отправке по краху (необработанное исключение) СНАЧАЛА синхронно пишем отчёт
-//   (готовое JSON-тело payload) в дисковую очередь pending, ЗАТЕМ пытаемся отправить;
-//   на успех файл из очереди удаляем. На старте (fastlogs_init) очередь сканируется и
-//   неотправленные отчёты досылаются - так жёсткий краш, убивший процесс до завершения
-//   HTTP, всё равно доедет на следующем запуске. Отчёт уже несёт свой timestampUtc/
-//   logText/counts/comment/tester/context/breadcrumbs (без скриншота - для краша тяжело).
+// On auto-send triggered by a crash (unhandled exception) we FIRST synchronously write the report
+//   (the ready-made JSON payload body) to the pending disk queue, THEN attempt to send;
+//   on success the file is removed from the queue. On startup (fastlogs_init) the queue is scanned and
+//   unsent reports are resent - so a hard crash that killed the process before HTTP completed
+//   will still be delivered on the next launch. The report already carries its timestampUtc/
+//   logText/counts/comment/tester/context/breadcrumbs (no screenshot - too heavy for a crash).
 //
-// Каталог pending внутри game_save_id: FASTLOGS_PERSIST_DIR + "/" + FASTLOGS_PENDING_DIR.
+// Pending directory inside game_save_id: FASTLOGS_PERSIST_DIR + "/" + FASTLOGS_PENDING_DIR.
 #macro FASTLOGS_PENDING_DIR        "pending"
-// Кап количества файлов в очереди (старые сверх лимита отбрасываем, чтобы не копить бесконечно).
+// Cap on the number of files in the queue (old files beyond the limit are discarded to avoid infinite accumulation).
 #macro FASTLOGS_PENDING_MAX        5
-// Сколько pending-отчётов досылать ЗА ОДИН старт (чтобы не блокировать главный поток надолго).
-//   Остальные подхватятся на следующих запусках. <=0 -> столько же, сколько FASTLOGS_PENDING_MAX.
+// How many pending reports to resend PER START (to avoid blocking the main thread for too long).
+//   The rest will be picked up on subsequent launches. <=0 -> same as FASTLOGS_PENDING_MAX.
 #macro FASTLOGS_PENDING_RESEND_PER_START 5
 
 // =====================================================================================
-// ПРИВАТНОСТЬ / ЧИСТКА PII (фича #3). ПО УМОЛЧАНИЮ ПРИВАТНО.
+// PRIVACY / PII SCRUBBING (feature #3). PRIVATE BY DEFAULT.
 // -------------------------------------------------------------------------------------
-// FASTLOGS_SCRUB_PII = true: перед отправкой logText, значения context и тексты breadcrumbs
-//   прогоняются через redaction (email / IPv4 / IPv6 / Bearer-токены / длинные цифровые
-//   последовательности -> "[redacted]"). Тоггл доступен в оверлее (персист ini) и через
-//   runtime-override fastlogs_init({ scrubPii: false }). Паттерны расширяемы (см. scr_fastlogs_util:
+// FASTLOGS_SCRUB_PII = true: before sending, logText, context values and breadcrumb texts
+//   are run through redaction (email / IPv4 / IPv6 / Bearer tokens / long digit sequences
+//   -> "[redacted]"). Toggle is available in the overlay (persist ini) and via
+//   runtime-override fastlogs_init({ scrubPii: false }). Patterns are extensible (see scr_fastlogs_util:
 //   fastlogs_redact_default_rules / fastlogs_redact_rules_set).
 #macro FASTLOGS_SCRUB_PII          true
-// Чем заменяем найденный PII-фрагмент.
+// Replacement string for a detected PII fragment.
 #macro FASTLOGS_REDACT_PLACEHOLDER "[redacted]"
-// Порог "длинной цифровой последовательности" (подряд идущих цифр) для редактирования
-//   (карты/телефоны/длинные id). Короткие числа (версии, счётчики) НЕ трогаем.
-//   ЕДИНЫЙ с Unity-клиентом (\d{9,}) -> 9, чтобы redaction совпадал на обоих движках.
+// Threshold for "long digit sequence" (consecutive digits) for redaction
+//   (card numbers / phone numbers / long IDs). Short numbers (versions, counters) are NOT touched.
+//   UNIFIED with the Unity client (\d{9,}) -> 9, so redaction matches on both engines.
 #macro FASTLOGS_REDACT_MIN_DIGITS  9
 
-// ВКЛЮЧАТЬ ЛИ ЧУВСТВИТЕЛЬНЫЕ ПОЛЯ устройства/URL/идентификаторов (фича #3). ПО УМОЛЧАНИЮ ВЫКЛ.
-//   В текущем клиенте device-скрипт и так НЕ собирает заведомо чувствительные идентификаторы,
-//   поэтому это - явный флаг намерения (на будущее/для совместимости с Unity-клиентом). IP
-//   тестера клиент не шлёт вовсе (сервер хеширует соль+sha256). Включается осознанно интегратором.
+// WHETHER TO INCLUDE SENSITIVE device/URL/identifier FIELDS (feature #3). OFF BY DEFAULT.
+//   In the current client the device script does NOT collect obviously sensitive identifiers anyway,
+//   so this is an explicit intent flag (for the future / for Unity client compatibility). The tester's IP
+//   is never sent by the client at all (the server hashes salt+sha256). Enable deliberately as an integrator.
 #macro FASTLOGS_INCLUDE_SENSITIVE  false
 
 // =====================================================================================
-// КОНТЕКСТ + BREADCRUMBS (фича #2)
+// CONTEXT + BREADCRUMBS (feature #2)
 // -------------------------------------------------------------------------------------
-// Кап катящегося буфера хлебных крошек (последние N). Старые вытесняются (кольцо).
+// Cap on the rolling breadcrumb buffer (last N). Old entries are evicted (ring buffer).
 #macro FASTLOGS_BREADCRUMB_MAX     100
-// Лимиты на ключ/значение контекста (мягкая клиентская защита; сервер тоже капает ~4KB суммарно,
-//   ключ<=64, значение<=512). Слишком длинное усекаем на клиенте, чтобы не слать заведомо мусор.
+// Limits on context key/value (soft client-side guard; server also caps ~4KB total,
+//   key<=64, value<=512). Too-long values are truncated on the client to avoid sending obvious garbage.
 #macro FASTLOGS_CONTEXT_KEY_MAX    64
 #macro FASTLOGS_CONTEXT_VAL_MAX    512
-// Лимит длины текста одной хлебной крошки (сервер капает ~16KB суммарно на 100 шт).
+// Character limit for a single breadcrumb text (server caps ~16KB total for 100 entries).
 #macro FASTLOGS_BREADCRUMB_MSG_MAX 512
 
 // =====================================================================================
-// УПРАВЛЕНИЕ / ХОТКЕИ
+// CONTROLS / HOTKEYS
 // -------------------------------------------------------------------------------------
-// Клавиша-тоггл оверлея (на платформах с клавиатурой). vk_* константа.
+// Overlay toggle key (on platforms with a keyboard). vk_* constant.
 #macro FASTLOGS_HOTKEY_TOGGLE  vk_f8
-// Геймпад-комбо для консолей. // TODO verify константы gp_* под целевые платформы.
+// Gamepad combo for consoles. // TODO verify gp_* constants for target platforms.
 #macro FASTLOGS_GP_TOGGLE      gp_select
 
-// БЫСТРАЯ ОТПРАВКА (фича QUICK-SEND, A): ОТДЕЛЬНЫЙ хоткей/жест, который сразу шлёт текущую
-//   запись через fastlogs_send() БЕЗ открытия оверлея. Должен отличаться от тоггла оверлея.
-//   На платформах с клавиатурой - vk_* константа. По умолчанию F9 (рядом с F8-тогглом).
+// QUICK SEND (QUICK-SEND feature, A): a SEPARATE hotkey/gesture that immediately sends the current
+//   recording via fastlogs_send() WITHOUT opening the overlay. Must differ from the overlay toggle.
+//   On platforms with a keyboard - a vk_* constant. Default F9 (next to the F8 toggle).
 #macro FASTLOGS_HOTKEY_QUICK_SEND vk_f9
-// Геймпад-кнопка быстрой отправки на консолях. Отличная от FASTLOGS_GP_TOGGLE.
-//   // TODO verify константы gp_* под целевые платформы. Дефолт gp_start (Start != Select-тоггл).
+// Gamepad button for quick send on consoles. Different from FASTLOGS_GP_TOGGLE.
+//   // TODO verify gp_* constants for target platforms. Default gp_start (Start != Select toggle).
 #macro FASTLOGS_GP_QUICK_SEND     gp_start
 
 // =====================================================================================
-// ОВЕРЛЕЙ (цвета/раскладка; рисуем ПРИМИТИВАМИ, без спрайтов)
+// OVERLAY (colors/layout; drawn with PRIMITIVES, no sprites)
 // -------------------------------------------------------------------------------------
-#macro FASTLOGS_COL_BG        $000000     // фон панели (BGR в GM make_colour_rgb-нотации hex - см. ниже)
+#macro FASTLOGS_COL_BG        $000000     // panel background (BGR in GM make_colour_rgb hex notation - see below)
 #macro FASTLOGS_COL_PANEL     $1A1A1A
 #macro FASTLOGS_COL_TEXT      $E6E6E6
-#macro FASTLOGS_COL_ERROR     $4040FF     // красный (GM hex = $BBGGRR)
-#macro FASTLOGS_COL_WARN      $20C0FF     // жёлто-оранжевый
-#macro FASTLOGS_COL_LOG       $C0C0C0     // серый
+#macro FASTLOGS_COL_ERROR     $4040FF     // red (GM hex = $BBGGRR)
+#macro FASTLOGS_COL_WARN      $20C0FF     // yellow-orange
+#macro FASTLOGS_COL_LOG       $C0C0C0     // grey
 #macro FASTLOGS_COL_BTN       $303030
 #macro FASTLOGS_COL_BTN_HOVER $4A4A4A
-#macro FASTLOGS_COL_ACCENT    $50C878     // акцент (зелёный)
+#macro FASTLOGS_COL_ACCENT    $50C878     // accent (green)
 
-#macro FASTLOGS_BG_ALPHA      0.85        // прозрачность фоновой панели
-#macro FASTLOGS_BTN_MIN_SIZE  64          // мин. размер тап-зоны (px), крупные кнопки для тача
+#macro FASTLOGS_BG_ALPHA      0.85        // background panel opacity
+#macro FASTLOGS_BTN_MIN_SIZE  64          // min tap-zone size (px), large buttons for touch
 
 // =====================================================================================
-// ТОСТ-СТАТУС (фича STATUS, B) - лёгкое уведомление поверх игры даже без оверлея
+// STATUS TOAST (STATUS feature, B) - lightweight notification over the game even without the overlay
 // -------------------------------------------------------------------------------------
-// Показывать игроку статус отправки тостом (Отправка/Готово+ссылка/Ошибка) поверх игры,
-//   даже когда оверлей закрыт. Тост рисуется ТОЛЬКО когда есть что показать (иначе ноль работы).
+// Show the send status to the player as a toast (Sending / Done+link / Error) over the game,
+//   even when the overlay is closed. The toast is drawn ONLY when there is something to show (zero work otherwise).
 #macro FASTLOGS_TOAST_ENABLED          true
-// Длительность показа коротких тостов (успех/инфо), секунды. "Отправка..." висит, пока идёт отправка.
+// Duration for short toasts (success/info), seconds. "Sending..." stays until the send finishes.
 #macro FASTLOGS_TOAST_SECONDS          3
-// Длительность показа тоста-ошибки (даём прочитать причину + подсказку повтора), секунды.
+// Duration for the error toast (give the user time to read the reason + retry hint), seconds.
 #macro FASTLOGS_TOAST_ERROR_SECONDS    6

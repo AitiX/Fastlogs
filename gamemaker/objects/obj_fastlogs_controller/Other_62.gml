@@ -1,49 +1,49 @@
 /// @description FastLogs controller - Async HTTP (eventType 7 / eventNum 62)
-// Разбор ответа ингеста. Сверяем async_load[? "id"] с http-состоянием (request_id);
-//   при status<=0 (финал) читаем http_status: 2xx (контракт - 201) = успех -> json_parse(result)
-//   -> {id,url} -> заполняем last_url, копируем ссылку. Ошибки -> ретрай (сеть/5xx) или Error.
-// Состояние http в global.__fastlogs.http (см. scr_fastlogs_http: fastlogs_http_get_state()).
-// Сверено (GM-NOTES 2.1 + WebSearch июнь 2026):
-//   async_load["status"]: 1 = качается, 0 = готово, <0 = ошибка;
+// Parse ingest response. Match async_load[? "id"] against the http state (request_id);
+//   when status<=0 (final) read http_status: 2xx (contract - 201) = success -> json_parse(result)
+//   -> {id,url} -> populate last_url, copy link. Errors -> retry (network/5xx) or Error.
+// HTTP state is in global.__fastlogs.http (see scr_fastlogs_http: fastlogs_http_get_state()).
+// Verified (GM-NOTES 2.1 + WebSearch June 2026):
+//   async_load["status"]: 1 = downloading, 0 = done, <0 = error;
 //   async_load["id"], ["http_status"], ["result"](string), ["response_headers"](ds_map).
 if (!FASTLOGS_ENABLED) { exit; }
 
-var hs = fastlogs_http_get_state();   // http-подсостояние
+var hs = fastlogs_http_get_state();   // http sub-state
 
-// Это событие приходит на ВСЕ http-запросы игры. Реагируем только на свой.
+// This event fires for ALL http requests in the game. We only react to our own.
 var ev_id = async_load[? "id"];
 if (is_undefined(ev_id)) { exit; }
-if (ev_id != hs.request_id) { exit; }       // не наш запрос
+if (ev_id != hs.request_id) { exit; }       // not our request
 
 var status      = async_load[? "status"];
 var http_status = async_load[? "http_status"];
 var result      = async_load[? "result"];
 
-// status == 1 -> данные ещё качаются (прогресс). Ждём финала (0) или ошибки (<0).
+// status == 1 -> data still downloading (progress). Wait for final (0) or error (<0).
 if (is_real(status) && status == 1) { exit; }
 
-// --- ФИНАЛ запроса (status <= 0) ---
+// --- REQUEST FINAL (status <= 0) ---
 hs.is_sending  = false;
 hs.request_id  = -1;
 hs.last_status = is_real(http_status) ? http_status : 0;
 
-// Успешный ingest по контракту -> 201 Created (принимаем любой 2xx).
+// Successful ingest per contract -> 201 Created (we accept any 2xx).
 var ok       = is_real(http_status) && (http_status >= 200 && http_status < 300);
-// status < 0 -> сетевая ошибка/обрыв (http_status может быть 0).
+// status < 0 -> network error/drop (http_status may be 0).
 var net_error = is_real(status) && (status < 0);
 
 if (ok && !net_error) {
-    // RETRY-UNTIL-SUCCESS (фича RETRY): успех - финал. Гасим любой pending отложенный повтор
-    //   и его alarm (этот успех мог прийти как раз от отложенной попытки). Существующий
-    //   success-тост ниже уведомит тестера об итоговом успехе.
+    // RETRY-UNTIL-SUCCESS (feature RETRY): success - final. Cancel any pending deferred retry
+    //   and its alarm (this success may have come from a deferred attempt). The existing
+    //   success toast below will notify the tester of the final success.
     if (script_exists(asset_get_index("fastlogs_retry_cancel"))) {
         fastlogs_retry_cancel();
     }
 
-    // ПЕРСИСТ КРАШ-ОТЧЁТА (фича #1): если этот успешный отчёт пришёл из дисковой очереди
-    //   pending - удалить его файл (доставлен). Путь привязан к запросу в hs.pending_file.
-    //   Запоминаем путь только что доставленного файла, чтобы дренаж-цепочка ниже не
-    //   попыталась переслать его повторно (и чтобы знать, что это была pending/дренаж-отправка).
+    // CRASH-REPORT PERSIST (feature #1): if this successful report came from the disk queue
+    //   pending - delete its file (delivered). Path is bound to the request in hs.pending_file.
+    //   Remember the path of the just-delivered file so the drain chain below does not
+    //   try to resend it (and to know it was a pending/drain send).
     var just_sent_file = is_string(hs.pending_file) ? hs.pending_file : "";
     if (string_length(just_sent_file) > 0) {
         if (script_exists(asset_get_index("fastlogs_pending_delete"))) {
@@ -52,16 +52,16 @@ if (ok && !net_error) {
         hs.pending_file = "";
     }
 
-    // Тело ответа: { "id", "url", "rawUrl", "expiresAt" }.
+    // Response body: { "id", "url", "rawUrl", "expiresAt" }.
     var url = "";
     var log_id = "";
     if (is_string(result) && string_length(result) > 0) {
-        // json_parse в struct-режиме (option_legacy_json_parsing=false).
+        // json_parse in struct mode (option_legacy_json_parsing=false).
         var parsed = undefined;
         try {
             parsed = json_parse(result);
         } catch (_e) {
-            parsed = undefined;                 // тело не JSON -> деградируем мягко
+            parsed = undefined;                 // body is not JSON -> degrade gracefully
         }
         if (is_struct(parsed)) {
             if (variable_struct_exists(parsed, "url") && is_string(parsed.url)) { url = parsed.url; }
@@ -74,123 +74,123 @@ if (ok && !net_error) {
         hs.last_url = url;
         show_debug_message("[FastLogs] ingest OK (" + string(http_status) + ") id=" + log_id + " url=" + url);
 
-        // COPY-ON-SEND: при включённом флаге авто-копируем короткую ссылку в буфер устройства.
-        //   best-effort; clipboard-скрипт сам гейтит платформу (консоли -> no-op).
-        //   На WebGL копирование требует user-gesture и тут может не сработать - НЕ падаем
-        //   (исключение проглатываем), кнопка "Копировать" в оверлее остаётся как fallback.
+        // COPY-ON-SEND: when the flag is enabled, auto-copy the short link to the device clipboard.
+        //   best-effort; the clipboard script gates the platform itself (consoles -> no-op).
+        //   On WebGL copying requires a user-gesture and may not work here - do NOT crash
+        //   (swallow the exception), the "Copy" button in the overlay remains as a fallback.
         var copied = false;
         if (FASTLOGS_COPY_ON_SEND && script_exists(asset_get_index("fastlogs_copy_url"))) {
             try {
                 copied = fastlogs_copy_url();
             } catch (_ce) {
-                copied = false;                 // WebGL без жеста / платформенный отказ - не падаем
+                copied = false;                 // WebGL without gesture / platform refusal - do not crash
             }
         }
-        // STATUS (B): тост "Готово" + ссылка поверх игры, даже без открытого оверлея.
-        //   Ссылка уже авто-скопирована (copied) - в тосте даём её показ + клик для повторной копии.
+        // STATUS (B): "Done" toast + link over the game, even without the overlay open.
+        //   Link already auto-copied (copied) - the toast shows it + click to copy again.
         if (script_exists(asset_get_index("fastlogs_status_toast"))) {
             var ok_text = copied ? "Готово (ссылка скопирована)" : "Готово";
             fastlogs_status_toast("ok", ok_text, { url: url });
         }
-        // Комментарий ушёл с отчётом -> очищаем поле, чтобы он не уходил повторно (фича COMMENT).
+        // Comment went with the report -> clear the field so it does not get sent again (feature COMMENT).
         if (script_exists(asset_get_index("fastlogs_comment_clear"))) {
             fastlogs_comment_clear();
         }
     } else {
         show_debug_message("[FastLogs] ingest OK (" + string(http_status) + ") but no url in response: " + string(result));
-        // Успех, но сервер не вернул url - всё равно "Готово" (без ссылки).
+        // Success, but the server did not return a url - still "Done" (no link).
         if (script_exists(asset_get_index("fastlogs_status_toast"))) {
             fastlogs_status_toast("ok", "Готово");
         }
     }
 
-    // ДРЕНАЖ OUTBOX "ПРИ ПЕРВОЙ ВОЗМОЖНОСТИ" (фича #1): отправка успешно завершилась и клиент
-    //   теперь простаивает (is_sending уже сброшен выше). Если в outbox остались файлы (краши,
-    //   захваченные во время занятости/троттла/сверх капа доставки) - дошлём СЛЕДУЮЩИЙ по одному,
-    //   мягко. Это и есть цепочка: каждый успех тянет следующий файл, пока очередь не опустеет
-    //   (раньше resend_all упирался в single-flight и слал лишь один за сессию). Не дублируем
-    //   только что отправленный (передаём just_sent_file в exclude).
+    // OUTBOX DRAIN "AT FIRST OPPORTUNITY" (feature #1): send completed successfully and the client
+    //   is now idle (is_sending already cleared above). If files remain in outbox (crashes
+    //   captured during busy/throttle/over delivery cap) - send the NEXT one by one,
+    //   gracefully. This is the chain: each success pulls the next file until the queue is empty
+    //   (previously resend_all hit single-flight and sent only one per session). Do not duplicate
+    //   the just-sent file (pass just_sent_file as exclude).
     //
-    //   FIX-1 (idle-дренаж не должен глохнуть): PER_START-лимит (FASTLOGS_PENDING_RESEND_PER_START)
-    //   применяем ТОЛЬКО к СТАРТ-цепочке (init_chain_active, запущенной fastlogs_pending_resend_all
-    //   при init) - чтобы старт не молотил весь outbox за раз. ЖИВОЙ idle-дренаж (после обычной
-    //   отправки/немедленного краша или ПОСЛЕ завершения старт-цепочки) этим лимитом НЕ гейтится:
-    //   тянем следующий pending, пока outbox непуст. Раньше единый session-cumulative drain_count
-    //   против PER_START(=5) НИКОГДА не сбрасывался и общий со стартом -> после 5 досылок за сессию
-    //   idle-цепочка вставала до перезапуска (ослабляло «при первой возможности»). Объём всё равно
-    //   ограничен FASTLOGS_PENDING_MAX/enforce_cap, поэтому idle-цепочка не может молотить бесконечно.
+    //   FIX-1 (idle drain must not stall): PER_START limit (FASTLOGS_PENDING_RESEND_PER_START)
+    //   applied ONLY to the START chain (init_chain_active, launched by fastlogs_pending_resend_all
+    //   at init) - so the start does not hammer the entire outbox at once. LIVE idle drain (after a normal
+    //   send/immediate crash or AFTER the start chain completes) is NOT gated by this limit:
+    //   pull the next pending while outbox is non-empty. Previously the single session-cumulative drain_count
+    //   against PER_START(=5) was NEVER reset and shared with start -> after 5 resends per session the
+    //   idle chain stalled until restart (weakening "at first opportunity"). Volume is still
+    //   capped by FASTLOGS_PENDING_MAX/enforce_cap, so the idle chain cannot run indefinitely.
     var retry_pending = script_exists(asset_get_index("fastlogs_retry_is_pending"))
                       && fastlogs_retry_is_pending();
-    if (!retry_pending) {   // не вмешиваемся, если запланирован отложенный повтор
+    if (!retry_pending) {   // do not interfere if a deferred retry is scheduled
         if (script_exists(asset_get_index("fastlogs_pending_drain_next"))) {
             if (hs.init_chain_active) {
-                // СТАРТ-цепочка: соблюдаем PER_START. 0/отриц. -> без предела (тогда старт = idle).
+                // START chain: honor PER_START. 0/negative -> no limit (then start = idle).
                 var per = FASTLOGS_PENDING_RESEND_PER_START;
                 var unlimited = (!is_real(per) || per <= 0);
                 if (unlimited || hs.init_drain_count < per) {
                     if (fastlogs_pending_drain_next(just_sent_file)) {
-                        hs.init_drain_count += 1;   // ещё один файл старт-бэкстопа
+                        hs.init_drain_count += 1;   // one more start-backstop file
                     } else {
-                        // Outbox пуст или слой занят -> старт-цепочка завершена. Снимаем флаг,
-                        //   дальнейшие успехи пойдут как живой idle-дренаж (без PER_START).
+                        // Outbox empty or layer busy -> start chain complete. Clear the flag,
+                        //   further successes will go as live idle drain (no PER_START).
                         hs.init_chain_active = false;
                     }
                 } else {
-                    // PER_START исчерпан за этот старт -> завершаем СТАРТ-цепочку (бэкстоп). Остаток
-                    //   outbox доедет живым idle-дренажём (он не гейтится) или на следующем старте.
+                    // PER_START exhausted for this start -> end the START chain (backstop). Remaining
+                    //   outbox will arrive via live idle drain (not gated) or on the next start.
                     hs.init_chain_active = false;
                 }
             } else {
-                // ЖИВОЙ idle-дренаж: тянем следующий pending БЕЗ лимита, пока outbox непуст.
-                //   single-flight внутри fastlogs_pending_send: если занято - вернёт false (подхватим позже).
+                // LIVE idle drain: pull the next pending WITHOUT a limit while outbox is non-empty.
+                //   single-flight inside fastlogs_pending_send: if busy - returns false (we will pick it up later).
                 fastlogs_pending_drain_next(just_sent_file);
             }
         }
     }
 } else {
-    // Ошибка: 4xx/5xx или сетевой обрыв.
+    // Error: 4xx/5xx or network drop.
     show_debug_message("[FastLogs] ingest FAILED status=" + string(status) + " http_status=" + string(http_status) + " result=" + string(result));
 
-    // Ретраим только сетевые ошибки и 5xx (4xx - проблема в теле, ретрай не поможет
-    //   ни немедленно, ни отложенно -> такие сразу терминальный тост-ошибка).
-    //   Транзиентным считаем: сеть/обрыв (net_error||status<=0) ИЛИ http_status>=500.
+    // Retry only network errors and 5xx (4xx - problem in the body, retry will not help
+    //   immediately or deferred -> these get an immediate terminal error toast).
+    //   Considered transient: network/drop (net_error||status<=0) OR http_status>=500.
     var retryable = net_error || (is_real(http_status) && http_status >= 500) || (is_real(status) && status <= 0);
 
-    // POISON-PILL (фича #1): если это была отправка pending-файла из дискового outbox
-    //   (hs.pending_file задан) и ошибка ПОСТОЯННАЯ непереходящая (4xx: 400/401/403/413/415,
-    //   т.е. !retryable) - файл вечно слать бессмысленно: УДАЛЯЕМ его из outbox (+лог), чтобы
-    //   он не блокировал дренаж навсегда. Для ТРАНЗИЕНТНЫХ (сеть/0/5xx) файл ОСТАВЛЯЕМ -
-    //   доедет на следующем старте/при простое. Делаем это ДО ретраев/планировщика, т.к. для
-    //   4xx ретраи не ставятся (retryable=false) и это терминал для данного файла.
+    // POISON-PILL (feature #1): if this was a send of a pending file from the disk outbox
+    //   (hs.pending_file is set) and the error is PERMANENT non-transient (4xx: 400/401/403/413/415,
+    //   i.e. !retryable) - retrying the file forever is pointless: DELETE it from outbox (+log) so
+    //   it does not block draining indefinitely. For TRANSIENT errors (network/0/5xx) KEEP the file -
+    //   it will arrive on the next start/during idle. Do this BEFORE retries/scheduler because for
+    //   4xx no retries are scheduled (retryable=false) and this is terminal for this file.
     if (!retryable && is_string(hs.pending_file) && string_length(hs.pending_file) > 0) {
         show_debug_message("[FastLogs] poison-pill: dropping pending file (permanent HTTP "
             + string(http_status) + "): " + hs.pending_file);
         if (script_exists(asset_get_index("fastlogs_pending_delete"))) {
             fastlogs_pending_delete(hs.pending_file);
         }
-        hs.pending_file = "";   // отвязали: файла больше нет
+        hs.pending_file = "";   // unlinked: file no longer exists
     }
 
-    // 1) Сначала - НЕМЕДЛЕННЫЕ ретраи аплоадера (мгновенные, до FASTLOGS_HTTP_MAX_RETRIES).
+    // 1) First - IMMEDIATE uploader retries (instant, up to FASTLOGS_HTTP_MAX_RETRIES).
     var retried = false;
     if (retryable) {
-        retried = fastlogs_http_retry();        // ставит новый запрос, переустанавливает is_sending
+        retried = fastlogs_http_retry();        // starts a new request, re-sets is_sending
     }
 
     if (retried) {
-        // Авто-ретрай (немедленный) поставлен - держим статус "Отправка..." (повтор N/2).
+        // Auto-retry (immediate) started - keep status "Sending..." (retry N/2).
         if (script_exists(asset_get_index("fastlogs_status_toast"))) {
             fastlogs_status_toast("sending", "Отправка... (повтор)");
         }
     } else {
-        // 2) Немедленные ретраи исчерпаны/неуместны. RETRY-UNTIL-SUCCESS (фича RETRY):
-        //   для транзиентных ошибок (сеть/5xx) ставим ОТЛОЖЕННЫЙ повтор на таймере, пока
-        //   не пройдёт успешно (или пока не упрёмся в предел FASTLOGS_RETRY_MAX). Один
-        //   pending за раз обеспечивается самим планировщиком (заменяет тело/отсчёт).
-        //   4xx сюда не попадает (retryable=false) -> сразу терминальный тост-ошибка.
+        // 2) Immediate retries exhausted/not applicable. RETRY-UNTIL-SUCCESS (feature RETRY):
+        //   for transient errors (network/5xx) schedule a DEFERRED retry on a timer, until
+        //   it succeeds (or until FASTLOGS_RETRY_MAX is reached). One
+        //   pending at a time is guaranteed by the scheduler itself (replaces body/countdown).
+        //   4xx does not reach here (retryable=false) -> immediate terminal error toast.
         var scheduled = false;
         if (retryable && script_exists(asset_get_index("fastlogs_retry_schedule"))) {
-            // Предел отложенных повторов: 0 = без предела; >0 = после стольких сдаёмся.
+            // Deferred retry limit: 0 = no limit; >0 = give up after that many.
             var under_limit = (!is_real(FASTLOGS_RETRY_MAX) || FASTLOGS_RETRY_MAX <= 0)
                             || (hs.dretry_count < FASTLOGS_RETRY_MAX);
             if (under_limit) {
@@ -199,17 +199,17 @@ if (ok && !net_error) {
         }
 
         if (scheduled) {
-            // Отложенный повтор поставлен - НЕ ошибка для тестера: показываем отсчёт
-            //   "Повтор через Ns..." (его поднимает сам fastlogs_retry_schedule).
-            //   Дальнейший отсчёт ведёт Alarm[0] (fastlogs_retry_tick), без работы в кадре.
+            // Deferred retry scheduled - NOT an error for the tester: show countdown
+            //   "Retry in Ns..." (raised by fastlogs_retry_schedule itself).
+            //   Further countdown is driven by Alarm[0] (fastlogs_retry_tick), no per-frame work.
         } else {
-            // Отложенный повтор выключен/неуместен/предел исчерпан - терминальная ошибка.
-            //   Гасим любой остаточный pending, чтобы состояние было чистым.
+            // Deferred retry disabled/not applicable/limit exhausted - terminal error.
+            //   Cancel any residual pending so the state is clean.
             if (script_exists(asset_get_index("fastlogs_retry_cancel"))) {
                 fastlogs_retry_cancel();
             }
             hs.state = "error";
-            // STATUS (B): тост "Ошибка: <причина>" + кликабельная зона "Повторить" поверх игры.
+            // STATUS (B): "Error: <reason>" toast + clickable "Retry" zone over the game.
             if (script_exists(asset_get_index("fastlogs_status_toast"))) {
                 var reason;
                 if (net_error)                                  reason = "сеть недоступна";

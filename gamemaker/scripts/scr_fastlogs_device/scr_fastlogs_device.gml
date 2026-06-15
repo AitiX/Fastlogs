@@ -1,17 +1,17 @@
 /// @description scr_fastlogs_device
-// FastLogs GameMaker client - УСТРОЙСТВО (сбор device{} по контракту).
-// Назначение: максимально полный срез железа/ОС/дисплея/рантайма в struct,
-//   сгруппированный по группам контракта (system/graphics/display/application/
-//   runtime/web). Пустые/недоступные поля ОПУСКАЕМ (см. CONTRACT.md инвариант 3).
-// Гейтинг: при !FASTLOGS_ENABLED возвращаем пустой struct {}.
-// Сверка GML-API - GM-NOTES.md раздел 2.3. Неуверенное помечено // TODO verify.
+// FastLogs GameMaker client - DEVICE (collects device{} per contract).
+// Purpose: the most complete snapshot of hardware/OS/display/runtime in a struct,
+//   grouped by contract groups (system/graphics/display/application/
+//   runtime/web). Empty/unavailable fields are OMITTED (see CONTRACT.md invariant 3).
+// Gating: when !FASTLOGS_ENABLED returns an empty struct {}.
+// GML-API reference - GM-NOTES.md section 2.3. Uncertain items marked // TODO verify.
 
 // =====================================================================================
 // fastlogs_platform_string() -> string
-// Маппинг os_type -> значение поля "platform" контракта.
-// Допустимые: WebGL|Android|iOS|Windows|macOS|Linux|GameMaker|PS4|PS5|Switch|Xbox|Other.
-// Шлём конкретную ОС, когда известна; "GameMaker" как обобщённый фолбэк не используем,
-//   потому что почти всегда знаем os_type. "Other" - для неизвестных.
+// Maps os_type -> value of the "platform" contract field.
+// Allowed: WebGL|Android|iOS|Windows|macOS|Linux|GameMaker|PS4|PS5|Switch|Xbox|Other.
+// We send the concrete OS when known; "GameMaker" as a generic fallback is not used,
+//   because os_type is almost always known. "Other" - for unknown platforms.
 // =====================================================================================
 function fastlogs_platform_string() {
     switch (os_type) {
@@ -20,45 +20,45 @@ function fastlogs_platform_string() {
         case os_linux:          return "Linux";
         case os_android:        return "Android";
         case os_ios:            return "iOS";
-        case os_tvos:           return "iOS";          // tvOS близок к iOS; контракт tvOS не знает -> iOS // TODO verify уместность
+        case os_tvos:           return "iOS";          // tvOS is close to iOS; contract doesn't know tvOS -> iOS // TODO verify appropriateness
         case os_ps4:            return "PS4";
         case os_ps5:            return "PS5";
         case os_switch:         return "Switch";
     }
-    // HTML5 / WebGL: на части рантаймов os_type=os_browser, на части - отдельная константа.
-    // Надёжнее проверить браузер отдельно (см. fastlogs_is_html5()).
+    // HTML5 / WebGL: on some runtimes os_type=os_browser, on others - a separate constant.
+    // More reliable to check for browser separately (see fastlogs_is_html5()).
     if (fastlogs_is_html5()) { return "WebGL"; }
 
-    // Xbox-семейство: разные рантаймы экспонируют разные константы; проверяем все известные.
+    // Xbox family: different runtimes expose different constants; check all known ones.
     if (fastlogs_os_is_xbox()) { return "Xbox"; }
 
     return "Other";
 }
 
-// HTML5/WebGL детект: на HTML5 os_browser != browser_not_a_browser.
+// HTML5/WebGL detection: on HTML5 os_browser != browser_not_a_browser.
 function fastlogs_is_html5() {
-    // os_browser определена на всех платформах; на нативных = browser_not_a_browser.
+    // os_browser is defined on all platforms; on native platforms = browser_not_a_browser.
     return (os_browser != browser_not_a_browser);
 }
 
-// Xbox детект устойчиво к набору констант рантайма (os_xboxone / os_xboxseriesxs / os_uwp на GDK).
+// Xbox detection, robust to the set of runtime constants (os_xboxone / os_xboxseriesxs / os_uwp on GDK).
 function fastlogs_os_is_xbox() {
-    // Некоторые константы могут отсутствовать в части рантаймов - обращаемся осторожно.
-    // В GML необъявленная встроенная константа - ошибка компиляции, поэтому перечисляем
-    //   только заведомо существующие в 2024.x. // TODO verify полный список Xbox-констант в целевом рантайме.
+    // Some constants may be absent on certain runtimes - access carefully.
+    // In GML an undeclared built-in constant is a compile error, so we enumerate
+    //   only those known to exist in 2024.x. // TODO verify full Xbox constant list in the target runtime.
     if (os_type == os_xboxone) { return true; }
     if (os_type == os_xboxseriesxs) { return true; }
-    if (os_type == os_uwp) { return true; }            // UWP-сборки под Xbox/PC // TODO verify трактовку
+    if (os_type == os_uwp) { return true; }            // UWP builds for Xbox/PC // TODO verify interpretation
     return false;
 }
 
 // =====================================================================================
 // fastlogs_collect_device([extra_struct]) -> struct
-// Собирает device{} по группам контракта. Пустые ключи опускаются на этапе payload
-//   (fastlogs_struct_compact) - здесь кладём всё, что удалось получить, не кладём
-//   заведомо пустые строки/невалидные значения.
-// extra_struct (опц.) - доп. поля от интегратора (fastlogs_send opts.extraDevice),
-//   мелко-мёржатся поверх собранных групп.
+// Collects device{} by contract groups. Empty keys are dropped at the payload stage
+//   (fastlogs_struct_compact) - here we store everything we managed to retrieve, and do
+//   not store known-empty strings/invalid values.
+// extra_struct (opt.) - additional fields from the integrator (fastlogs_send opts.extraDevice),
+//   shallow-merged on top of the collected groups.
 // =====================================================================================
 function fastlogs_collect_device(extra_struct = undefined) {
     if (!FASTLOGS_ENABLED) { return {}; }
@@ -66,46 +66,46 @@ function fastlogs_collect_device(extra_struct = undefined) {
     var dev = {};
 
     // -------------------------------------------------------------------------------
-    // os_get_info() -> ds_map платформо-зависимых ключей. Читаем целиком в локальный
-    //   struct, чтобы маппить known-ключи и не падать на отсутствующих.
-    //   Карту ОБЯЗАТЕЛЬНО уничтожаем (ds_map_destroy).
+    // os_get_info() -> ds_map of platform-dependent keys. Read entirely into a local
+    //   struct so we can map known keys without crashing on missing ones.
+    //   The map MUST be destroyed (ds_map_destroy).
     // -------------------------------------------------------------------------------
-    var info = fastlogs_os_info_to_struct();   // struct (может быть пустым)
+    var info = fastlogs_os_info_to_struct();   // struct (may be empty)
 
     // ===== system =====
     var system = {};
-    system.os       = fastlogs_os_name_string();           // человекочитаемая ОС
-    system.osFamily = fastlogs_platform_string();          // семейство (= platform)
-    // os_version -> real; формат платформо-зависим. Кладём как строку, если ненулевой.
-    var osv = os_version;                                    // real // TODO verify формат на iOS/Android
-    if (is_real(osv) && osv != 0) { system.osVersion = string(osv); } // расширение группы (контракт допускает)
+    system.os       = fastlogs_os_name_string();           // human-readable OS name
+    system.osFamily = fastlogs_platform_string();          // family (= platform)
+    // os_version -> real; format is platform-dependent. Store as string if non-zero.
+    var osv = os_version;                                    // real // TODO verify format on iOS/Android
+    if (is_real(osv) && osv != 0) { system.osVersion = string(osv); } // group extension (contract allows it)
     system.deviceType = fastlogs_device_type_string();      // Handheld/Console/Desktop/Phone/Tablet/Unknown
-    system.locale     = os_get_language();                  // напр. "en"; регион отдельно
-    var region = os_get_region();                           // напр. "US" (может быть "")
+    system.locale     = os_get_language();                  // e.g. "en"; region separately
+    var region = os_get_region();                           // e.g. "US" (may be "")
     if (is_string(region) && string_length(region) > 0) {
-        // locale в контракте - напр. "ru-RU"; склеиваем language-REGION если есть оба
+        // locale in the contract - e.g. "ru-RU"; concatenate language-REGION if both are present
         if (is_string(system.locale) && string_length(system.locale) > 0) {
             system.locale = system.locale + "-" + region;
         }
     }
-    // Память/ядра: из os_get_info, если рантайм отдал (ключи платформо-зависимы).
-    // Windows DX11 / часть платформ отдают объём памяти; ключи разнятся -> мягко.
+    // Memory/cores: from os_get_info, if the runtime provided them (keys are platform-dependent).
+    // Windows DX11 / some platforms return memory size; keys vary -> soft lookup.
     var mem_mb = fastlogs_info_pick_memory_mb(info);
     if (mem_mb > 0) { system.memoryMB = mem_mb; }
-    // is64bit (есть на всех нативных платформах из os_get_info).
+    // is64bit (available on all native platforms via os_get_info).
     if (variable_struct_exists(info, "is64bit")) { system.is64bit = info[$ "is64bit"]; }
 
     // ===== graphics =====
     var graphics = {};
-    // Имя адаптера: чистого кроссплатформенного GML-геттера нет; на Windows DX11 оно лежит
-    //   в os_get_info под ключом video_adapter_description (прочие ключи - в supports ниже).
+    // Adapter name: there is no clean cross-platform GML getter; on Windows DX11 it lives
+    //   in os_get_info under key video_adapter_description (other keys - in supports below).
     var gpu_name = fastlogs_info_pick_string(info, ["video_adapter_description", "gpu", "graphics_adapter"]);
     if (gpu_name != "") { graphics.gpu = gpu_name; }
-    // Тип графического API (Direct3D11/OpenGL/Metal/Vulkan) GM не отдаёт стандартной
-    //   функцией; оставляем платформенный фолбэк по os_type. // TODO verify точную графику API в рантайме.
+    // The graphics API type (Direct3D11/OpenGL/Metal/Vulkan) is not exposed by a standard
+    //   GM function; use a platform-based fallback via os_type. // TODO verify exact graphics API in runtime.
     var gapi = fastlogs_graphics_api_string();
     if (gapi != "") { graphics.deviceType = gapi; }
-    // Прочие video_adapter_* складываем в supports{} (отладочно полезно, контракт допускает supports{}).
+    // Other video_adapter_* keys are stored in supports{} (useful for debugging; contract allows supports{}).
     var gsup = fastlogs_info_collect_prefixed(info, "video_adapter_");
     if (variable_struct_names_count(gsup) > 0) { graphics.supports = gsup; }
 
@@ -114,12 +114,12 @@ function fastlogs_collect_device(extra_struct = undefined) {
     var dw = display_get_width();
     var dh = display_get_height();
     if (dw > 0 && dh > 0) { display.screen = string(dw) + "x" + string(dh); }
-    var dpi = fastlogs_display_dpi();                       // 0 если недоступно
+    var dpi = fastlogs_display_dpi();                       // 0 if unavailable
     if (dpi > 0) { display.dpi = dpi; }
     display.fullScreen = bool(window_get_fullscreen());     // bool
-    var hz = fastlogs_display_refresh_hz();                 // 0 если недоступно
+    var hz = fastlogs_display_refresh_hz();                 // 0 if unavailable
     if (hz > 0) { display.refreshHz = hz; }
-    var orient = fastlogs_display_orientation();            // "" если неизвестно
+    var orient = fastlogs_display_orientation();            // "" if unknown
     if (orient != "") { display.orientation = orient; }
 
     // ===== application =====
@@ -128,51 +128,51 @@ function fastlogs_collect_device(extra_struct = undefined) {
     application.platform       = fastlogs_platform_string();
     var fps_target = fastlogs_target_framerate();
     if (fps_target > 0) { application.targetFrameRate = fps_target; }
-    var cfg = os_get_config();                              // имя build-конфига
+    var cfg = os_get_config();                              // build config name
     if (is_string(cfg) && string_length(cfg) > 0) { application.qualityLevel = cfg; }
 
     // ===== runtime =====
     var runtime = {};
-    // room_get_name(room) - текущая сцена. room валиден после старта комнаты.
+    // room_get_name(room) - current scene. room is valid after the room has started.
     if (room >= 0) {
         var rn = room_get_name(room);
         if (is_string(rn) && string_length(rn) > 0) { runtime.scene = rn; }
     }
-    runtime.fps      = fps;            // целевые кадры (real)
-    runtime.fpsReal  = fps_real;       // фактическая нагрузка (доп. поле; контракт допускает расширение группы)
-    runtime.uptimeSec = floor(get_timer() / 1000000); // get_timer - микросекунды с запуска
-    // frameCount: GM не даёт прямого глобального счётчика кадров -> опускаем (контроллер может вести свой). // TODO verify
+    runtime.fps      = fps;            // target frames (real)
+    runtime.fpsReal  = fps_real;       // actual load (extra field; contract allows group extension)
+    runtime.uptimeSec = floor(get_timer() / 1000000); // get_timer - microseconds since launch
+    // frameCount: GM has no direct global frame counter -> omit (the controller can maintain its own). // TODO verify
 
-    // ===== web (только HTML5/WebGL) =====
-    // ВАЖНО: чистым GML на HTML5 доступны только размеры вьюпорта (browser_width/height).
-    //   userAgent/url/referrer/language/hardwareConcurrency/deviceMemory/connection - НЕТ
-    //   чистого GML API (нужен JS-extension через navigator). Интегратор может прокинуть их
-    //   через opts.extraDevice.web.* (см. fastlogs_send). // TODO verify JS-extension путь.
+    // ===== web (HTML5/WebGL only) =====
+    // NOTE: pure GML on HTML5 only exposes viewport dimensions (browser_width/height).
+    //   userAgent/url/referrer/language/hardwareConcurrency/deviceMemory/connection - NO
+    //   pure GML API exists (a JS-extension via navigator is required). The integrator can pass
+    //   them via opts.extraDevice.web.* (see fastlogs_send). // TODO verify JS-extension path.
     if (fastlogs_is_html5()) {
         var bw = browser_width;
         var bh = browser_height;
         if (bw > 0 && bh > 0) {
-            // Размер вьюпорта браузера кладём в display как доп. инфо (web-группу оставляем
-            //   интегратору через extraDevice, т.к. её поля недоступны чистым GML).
+            // Browser viewport size stored in display as extra info (web group is left to
+            //   the integrator via extraDevice, since its fields are not accessible from pure GML).
             display.browser = string(bw) + "x" + string(bh);
         }
     }
 
-    // Сборка групп (пустые группы не кладём; компакт уберёт пустые ключи внутри).
+    // Assemble groups (empty groups are not added; compact will remove empty keys inside).
     if (variable_struct_names_count(system) > 0)      { dev.system = system; }
     if (variable_struct_names_count(graphics) > 0)    { dev.graphics = graphics; }
     if (variable_struct_names_count(display) > 0)     { dev.display = display; }
     if (variable_struct_names_count(application) > 0) { dev.application = application; }
     if (variable_struct_names_count(runtime) > 0)     { dev.runtime = runtime; }
 
-    // Мерж extraDevice от интегратора (поверх; глубина 1 уровень групп).
+    // Merge extraDevice from the integrator (on top; depth 1 group level).
     if (is_struct(extra_struct)) {
         var gnames = variable_struct_get_names(extra_struct);
         for (var i = 0; i < array_length(gnames); i++) {
             var gk = gnames[i];
             var gv = variable_struct_get(extra_struct, gk);
             if (is_struct(gv) && variable_struct_exists(dev, gk) && is_struct(dev[$ gk])) {
-                // мелкий мерж полей внутрь существующей группы
+                // shallow-merge fields into the existing group
                 var fnames = variable_struct_get_names(gv);
                 for (var j = 0; j < array_length(fnames); j++) {
                     dev[$ gk][$ fnames[j]] = gv[$ fnames[j]];
@@ -187,21 +187,21 @@ function fastlogs_collect_device(extra_struct = undefined) {
 }
 
 // =====================================================================================
-// Вспомогательные хелперы устройства
+// Device helper functions
 // =====================================================================================
 
-// os_get_info() -> struct (копия ds_map). Карта уничтожается. {} если функции/данных нет.
+// os_get_info() -> struct (copy of ds_map). The map is destroyed. {} if function/data not available.
 function fastlogs_os_info_to_struct() {
     var out = {};
-    // os_get_info есть на нативных платформах; на HTML5 возвращает пустую/частичную карту.
+    // os_get_info is available on native platforms; on HTML5 it returns an empty/partial map.
     var m = os_get_info();
     if (!ds_exists(m, ds_type_map)) { return out; }
-    // Безопасная итерация через массив ключей (не ломается на тонкостях find_next).
+    // Safe iteration via a keys array (avoids edge cases with find_next).
     var keys = ds_map_keys_to_array(m);
     for (var i = 0; i < array_length(keys); i++) {
         var key = keys[i];
-        // Значение может быть real/string/bool/ds_map(вложенная). Вложенные карты пропускаем
-        //   (в supports кладём только скаляры/строки во избежание утечек ds-ресурсов).
+        // Value may be real/string/bool/ds_map (nested). Skip nested maps
+        //   (only store scalars/strings in supports to avoid ds-resource leaks).
         var val = ds_map_find_value(m, key);
         if (is_real(val) || is_string(val) || is_bool(val)) {
             out[$ string(key)] = val;
@@ -211,7 +211,7 @@ function fastlogs_os_info_to_struct() {
     return out;
 }
 
-// Достаёт первую непустую строку по списку возможных ключей из info-struct.
+// Returns the first non-empty string found under any of the given keys in info-struct.
 function fastlogs_info_pick_string(info, keys) {
     for (var i = 0; i < array_length(keys); i++) {
         var k = keys[i];
@@ -224,10 +224,10 @@ function fastlogs_info_pick_string(info, keys) {
     return "";
 }
 
-// Достаёт объём памяти (MB) из известных ключей os_get_info (платформо-зависимо).
+// Returns memory size (MB) from known os_get_info keys (platform-dependent).
 function fastlogs_info_pick_memory_mb(info) {
-    // Возможные ключи (байты): "TotalPhys"/"memory"/"total_memory" - набор зависит от рантайма.
-    // // TODO verify точные ключи памяти os_get_info по платформам.
+    // Possible keys (bytes): "TotalPhys"/"memory"/"total_memory" - set depends on runtime.
+    // // TODO verify exact memory keys of os_get_info per platform.
     var candidates_bytes = ["TotalPhys", "total_memory", "memory_total"];
     for (var i = 0; i < array_length(candidates_bytes); i++) {
         var k = candidates_bytes[i];
@@ -239,7 +239,7 @@ function fastlogs_info_pick_memory_mb(info) {
     return 0;
 }
 
-// Собирает все ключи info с заданным префиксом в отдельный struct (для supports{}).
+// Collects all keys from info that start with the given prefix into a separate struct (for supports{}).
 function fastlogs_info_collect_prefixed(info, prefix) {
     var out = {};
     var names = variable_struct_get_names(info);
@@ -253,7 +253,7 @@ function fastlogs_info_collect_prefixed(info, prefix) {
     return out;
 }
 
-// Человекочитаемое имя ОС (для system.os).
+// Human-readable OS name (for system.os).
 function fastlogs_os_name_string() {
     var p = fastlogs_platform_string();
     var v = os_version;
@@ -261,14 +261,14 @@ function fastlogs_os_name_string() {
     return p;
 }
 
-// deviceType по контракту (Handheld/Console/Desktop/Phone/Tablet/Unknown).
+// deviceType per contract (Handheld/Console/Desktop/Phone/Tablet/Unknown).
 function fastlogs_device_type_string() {
     switch (os_type) {
         case os_windows:
         case os_macosx:
         case os_linux:        return "Desktop";
         case os_android:
-        case os_ios:          return "Handheld";        // мобильные; точнее Phone/Tablet GML не различает надёжно
+        case os_ios:          return "Handheld";        // mobile; GML cannot reliably distinguish Phone/Tablet
         case os_switch:       return "Handheld";
         case os_ps4:
         case os_ps5:
@@ -279,14 +279,14 @@ function fastlogs_device_type_string() {
     return "Unknown";
 }
 
-// Графический API по платформе (фолбэк; GM не отдаёт это стандартной функцией).
+// Graphics API string by platform (fallback; GM does not expose this via a standard function).
 function fastlogs_graphics_api_string() {
-    // // TODO verify: на Windows GM по умолчанию DX11; на macOS/iOS - Metal или GL;
-    //   на Android/Linux/HTML5 - OpenGL ES/WebGL. Это эвристика по умолчанию рантайма.
+    // // TODO verify: on Windows GM defaults to DX11; on macOS/iOS - Metal or GL;
+    //   on Android/Linux/HTML5 - OpenGL ES/WebGL. This is a heuristic based on runtime defaults.
     switch (os_type) {
         case os_windows:      return "Direct3D11";
         case os_macosx:
-        case os_ios:          return "OpenGL";          // часть рантаймов Metal // TODO verify
+        case os_ios:          return "OpenGL";          // some runtimes use Metal // TODO verify
         case os_android:
         case os_linux:        return "OpenGL";
     }
@@ -294,25 +294,25 @@ function fastlogs_graphics_api_string() {
     return "";
 }
 
-// DPI экрана (0 если недоступно). Стандартных функций две: display_get_dpi_x/_y
-//   (простого display_get_dpi в GML НЕТ). Берём по оси X. На Mac/iOS значения могут
-//   быть неточными (Apple не отдаёт корректный DPI) - но лучше что-то, чем ничего.
+// Screen DPI (0 if unavailable). There are two standard functions: display_get_dpi_x/_y
+//   (a plain display_get_dpi does NOT exist in GML). Using X-axis. On Mac/iOS values may
+//   be inaccurate (Apple does not expose correct DPI) - but something is better than nothing.
 function fastlogs_display_dpi() {
-    var d = display_get_dpi_x();                        // // TODO verify доступность на консолях
+    var d = display_get_dpi_x();                        // // TODO verify availability on consoles
     if (is_real(d) && d > 0) { return floor(d); }
     return 0;
 }
 
-// Частота обновления экрана, Гц (0 если недоступно).
+// Screen refresh rate in Hz (0 if unavailable).
 function fastlogs_display_refresh_hz() {
-    var hz = display_get_frequency();                   // // TODO verify имя/доступность на всех платформах
+    var hz = display_get_frequency();                   // // TODO verify name/availability on all platforms
     if (is_real(hz) && hz > 0) { return floor(hz); }
     return 0;
 }
 
-// Ориентация дисплея ("" если неизвестно). Предпочитаем display_get_orientation()
-//   (возвращает display_landscape / display_landscape_flipped / display_portrait /
-//   display_portrait_flipped); фолбэк - по соотношению сторон экрана.
+// Display orientation ("" if unknown). Prefers display_get_orientation()
+//   (returns display_landscape / display_landscape_flipped / display_portrait /
+//   display_portrait_flipped); falls back to screen aspect ratio.
 function fastlogs_display_orientation() {
     var o = display_get_orientation();
     switch (o) {
@@ -329,24 +329,24 @@ function fastlogs_display_orientation() {
     return "";
 }
 
-// Целевой FPS (0 если не задан/неизвестен).
+// Target FPS (0 if not set/unknown).
 function fastlogs_target_framerate() {
-    var g = game_get_speed(gamespeed_fps);              // целевой game speed в кадрах/сек
+    var g = game_get_speed(gamespeed_fps);              // target game speed in frames/sec
     if (is_real(g) && g > 0) { return floor(g); }
     return 0;
 }
 
-// Версия движка/рантайма для application.engineVersion.
+// Engine/runtime version string for application.engineVersion.
 function fastlogs_engine_version_string() {
     var s = "";
-    // GM_version - версия проекта (Game Options); GM_runtime_version - версия рантайма.
+    // GM_version - project version (Game Options); GM_runtime_version - runtime version.
     var rt = GM_runtime_version;                        // string
     if (is_string(rt) && string_length(rt) > 0) {
         s = "GM " + rt;
     } else {
         s = "GameMaker";
     }
-    var bd = GM_build_date;                             // datetime real -> человекочитаемо
+    var bd = GM_build_date;                             // datetime real -> human-readable
     if (is_real(bd) && bd != 0) {
         s += " (build " + date_datetime_string(bd) + ")";
     }

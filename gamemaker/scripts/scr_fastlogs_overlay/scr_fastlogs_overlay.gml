@@ -1,59 +1,59 @@
 /// @description scr_fastlogs_overlay
-// FastLogs GameMaker client - ОВЕРЛЕЙ (рисование примитивами, без спрайтов).
-// Рисует: счётчики E/W/L цветом, кнопку "Отправить", тоггл "Скриншот", область URL +
-//   кнопку "Копировать", и НЕЗАВИСИМУЮ панель настроек (endpoint/appId показ, тоггл
-//   скриншота, autosend, Start/Stop Recording с индикатором, Clear, ёмкость буфера).
-// Раскладка масштабируется под display_get_gui_width/height. Крупные тап-зоны (hit-test).
-// Настройки персистятся через ini_* (см. fastlogs_ui_settings_load/save).
+// FastLogs GameMaker client - OVERLAY (drawn with primitives, no sprites).
+// Draws: E/W/L counters with color, a "Send" button, a "Screenshot" toggle, a URL area +
+//   a "Copy" button, and an INDEPENDENT settings panel (endpoint/appId display, screenshot
+//   toggle, autosend, Start/Stop Recording with indicator, Clear, buffer capacity).
+// Layout scales to display_get_gui_width/height. Large tap zones (hit-test).
+// Settings are persisted via ini_* (see fastlogs_ui_settings_load/save).
 //
-// АРХИТЕКТУРА: всё UI-состояние держим в global.__fastlogs_ui (ленивая инициализация),
-//   чтобы overlay/input были самодостаточны и безопасны к вызову до fastlogs_init
-//   (инвариант PUBLIC-API). Публичные функции при !FASTLOGS_ENABLED делают no-op.
+// ARCHITECTURE: all UI state is held in global.__fastlogs_ui (lazy initialization),
+//   so that overlay/input are self-contained and safe to call before fastlogs_init
+//   (PUBLIC-API invariant). Public functions are no-op when !FASTLOGS_ENABLED.
 //
-// Сверка GML-API: GM-NOTES.md. Рисование (draw_rectangle/draw_text/draw_set_*),
-//   display_get_gui_* и ini_* - стандартные функции (подтверждены поиском, июнь 2026).
+// GML-API reference: GM-NOTES.md. Drawing (draw_rectangle/draw_text/draw_set_*),
+//   display_get_gui_* and ini_* are standard functions (confirmed by search, June 2026).
 
 // =====================================================================================
-// СОСТОЯНИЕ UI (ленивая инициализация). Хранит флаги оверлея, hover/нажатые зоны,
-//   собранные на этот кадр прямоугольники-кнопки (hit-rects) и кэш ini-настроек.
+// UI STATE (lazy initialization). Stores overlay flags, hover/pressed zones,
+//   button rectangles (hit-rects) gathered this frame, and the ini-settings cache.
 // =====================================================================================
 function fastlogs_ui_state() {
     if (!variable_global_exists("__fastlogs_ui")) {
         global.__fastlogs_ui = {
-            open:            false,   // показан ли оверлей
-            settings_open:   false,   // показана ли панель настроек
-            // Зоны клика на ТЕКУЩИЙ кадр: массив структур {x1,y1,x2,y2,id}.
-            //   Заполняется при отрисовке (Draw GUI), читается вводом (input) на след. опросе.
+            open:            false,   // whether the overlay is visible
+            settings_open:   false,   // whether the settings panel is visible
+            // Click zones for the CURRENT frame: array of structs {x1,y1,x2,y2,id}.
+            //   Populated during drawing (Draw GUI), read by input on the next poll.
             hit:             [],
-            // Указатель ввода в координатах GUI на этот кадр (input заполняет).
+            // Input pointer in GUI coordinates for this frame (filled by input).
             px:              0,
             py:              0,
-            pressed:         false,   // был ли pressed-тап в этом кадре
-            hover_id:        "",      // id зоны под указателем (для подсветки)
-            __prev_touches:  0,       // число касаний на прошлом кадре (для фронта жеста)
-            // Тост (clipboard + STATUS, B): текст + таймер кадров до скрытия + тип/доп.поля.
+            pressed:         false,   // whether a pressed tap occurred this frame
+            hover_id:        "",      // id of the zone under the pointer (for highlight)
+            __prev_touches:  0,       // touch count in the previous frame (for gesture edge detection)
+            // Toast (clipboard + STATUS, B): text + frame timer until hidden + type/extra fields.
             toast_text:      "",
-            toast_frames:    0,       // кадров до скрытия (0 -> нет тоста). -1 -> держать (sending).
+            toast_frames:    0,       // frames until hidden (0 -> no toast). -1 -> hold (sending).
             toast_kind:      "info",  // "info" | "sending" | "ok" | "error"
-            toast_url:       "",      // ссылка для тоста "ok" (показываем + клик копирует)
-            toast_retry:     false,   // показывать ли подсказку/зону "Повторить" (тост "error")
-            // Комментарий тестера (фича COMMENT). Накапливается inline через keyboard_string;
-            //   уходит в opts.comment при отправке. Контракт: <=4000 символов.
-            comment_text:    "",      // текущий введённый текст
-            comment_editing: false,   // активен ли режим ввода (фокус на поле комментария)
-            // Настройки (персист ini). Значения подгружаются fastlogs_ui_settings_load().
+            toast_url:       "",      // link for the "ok" toast (shown + click copies it)
+            toast_retry:     false,   // whether to show the "Retry" hint/zone (toast "error")
+            // Tester comment (feature COMMENT). Accumulated inline via keyboard_string;
+            //   goes into opts.comment on send. Contract: <=4000 characters.
+            comment_text:    "",      // currently entered text
+            comment_editing: false,   // whether input mode is active (focus on comment field)
+            // Settings (ini persist). Values loaded by fastlogs_ui_settings_load().
             settings_loaded: false,
             cfg_screenshot:  FASTLOGS_SCREENSHOT_DEFAULT,
-            cfg_autosend:    false,                       // авто-отправка по кнопке (UI-уровень)
-            cfg_ring_size:   FASTLOGS_RING_SIZE,          // ёмкость буфера (показ/правка)
-            cfg_scrub_pii:   FASTLOGS_SCRUB_PII,          // чистка PII (#3); ДЕФОЛТ приватно (true)
+            cfg_autosend:    false,                       // auto-send on button press (UI level)
+            cfg_ring_size:   FASTLOGS_RING_SIZE,          // buffer capacity (display/edit)
+            cfg_scrub_pii:   FASTLOGS_SCRUB_PII,          // PII scrubbing (#3); DEFAULT private (true)
         };
     }
     return global.__fastlogs_ui;
 }
 
 // =====================================================================================
-// ПУБЛИЧНОЕ API ОВЕРЛЕЯ (PUBLIC-API.md): open/close/toggle. no-op при !FASTLOGS_ENABLED.
+// OVERLAY PUBLIC API (PUBLIC-API.md): open/close/toggle. no-op when !FASTLOGS_ENABLED.
 // =====================================================================================
 function fastlogs_open() {
     if (!FASTLOGS_ENABLED) return;
@@ -73,30 +73,31 @@ function fastlogs_toggle() {
     if (ui.open) fastlogs_close(); else fastlogs_open();
 }
 
-/// @returns {bool} открыт ли оверлей сейчас
+/// @returns {bool} whether the overlay is currently open
 function fastlogs_is_open() {
     if (!FASTLOGS_ENABLED) return false;
     return fastlogs_ui_state().open;
 }
 
 // =====================================================================================
-// КОММЕНТАРИЙ ТЕСТЕРА (фича COMMENT). Многострочный inline-ввод через keyboard_string.
-//   Путь keyboard_string выбран как надёжный для inline-накопления в оверлее (desktop/HTML5);
-//   нативный get_string_async на части платформ однострочный/модальный - не подходит.
-//   // TODO verify доступность keyboard_string на целевых консолях (там обычно экранная
-//   клавиатура через get_string_async; для консолей COMMENT можно не предлагать).
+// TESTER COMMENT (feature COMMENT). Multi-line inline input via keyboard_string.
+//   keyboard_string was chosen as the reliable approach for inline accumulation in the overlay
+//   (desktop/HTML5); the native get_string_async is single-line/modal on some platforms -
+//   not suitable.
+//   // TODO verify keyboard_string availability on target consoles (they usually use an on-screen
+//   keyboard via get_string_async; COMMENT could be omitted for consoles).
 // =====================================================================================
 
-// Максимальная длина комментария (контракт: <=4000). Локальный макрос, чтобы не трогать config.
+// Maximum comment length (contract: <=4000). Local macro to avoid touching config.
 #macro FASTLOGS_COMMENT_MAX 4000
 
-/// @returns {string} текущий введённый комментарий тестера ("" если пуст)
+/// @returns {string} the currently entered tester comment ("" if empty)
 function fastlogs_comment_get() {
     if (!FASTLOGS_ENABLED) return "";
     return fastlogs_ui_state().comment_text;
 }
 
-/// Очистить комментарий и выйти из режима ввода (напр. после успешной отправки).
+/// Clear the comment and exit input mode (e.g. after a successful send).
 function fastlogs_comment_clear() {
     if (!FASTLOGS_ENABLED) return;
     var ui = fastlogs_ui_state();
@@ -104,44 +105,44 @@ function fastlogs_comment_clear() {
     ui.comment_editing = false;
 }
 
-/// Войти/выйти из режима ввода комментария. При входе синхронизируем keyboard_string
-///   с текущим текстом, чтобы редактирование продолжалось с уже введённого.
+/// Enter/exit comment input mode. On entry, keyboard_string is synchronized
+///   with the current text so editing continues from where it left off.
 /// @param {bool} on
 function fastlogs_comment_set_editing(on) {
     if (!FASTLOGS_ENABLED) return;
     var ui = fastlogs_ui_state();
     ui.comment_editing = bool(on);
     if (ui.comment_editing) {
-        // keyboard_string - встроенная строка-аккумулятор ввода (учитывает backspace).
-        //   Засеваем её текущим текстом, чтобы продолжить с места.
+        // keyboard_string is the built-in input accumulator string (handles backspace).
+        //   Seed it with the current text so editing resumes from the existing content.
         keyboard_string = ui.comment_text;
     }
 }
 
-/// Опрос ввода комментария. Вызывать каждый Step ПОКА оверлей открыт и поле в фокусе.
-///   Накапливает символы из keyboard_string; Enter добавляет перевод строки (многострочно);
-///   обрезает до FASTLOGS_COMMENT_MAX. Вызывается из fastlogs_input_poll (input-скрипт).
+/// Poll comment input. Call every Step WHILE the overlay is open and the field has focus.
+///   Accumulates characters from keyboard_string; Enter appends a newline (multi-line);
+///   truncates to FASTLOGS_COMMENT_MAX. Called from fastlogs_input_poll (input script).
 function fastlogs_comment_poll_input() {
     if (!FASTLOGS_ENABLED) return;
     var ui = fastlogs_ui_state();
     if (!ui.open || !ui.comment_editing) return;
 
-    // 1) Базовый текст = текущий keyboard_string (GM сам обрабатывает печать и backspace).
-    //    На платформах без keyboard_string останется пустым - тогда поле просто не наполняется.
+    // 1) Base text = current keyboard_string (GM handles printing and backspace itself).
+    //    On platforms without keyboard_string it stays empty - the field simply receives no input.
     var s = is_string(keyboard_string) ? keyboard_string : "";
 
-    // 2) Многострочность: GM кладёт в keyboard_string печатные символы; Enter обычно НЕ
-    //    попадает в keyboard_string. Ловим нажатие Enter отдельно и вставляем "\n".
-    //    Делаем это, дописывая перевод строки прямо в аккумулятор keyboard_string, чтобы
-    //    последующий backspace тоже корректно его удалял.
-    //    // TODO verify: на части рантаймов keyboard_string может сам содержать \r/\n от Enter
-    //    (тогда возможен двойной перевод) - проверить при импорте в IDE на целевой платформе.
+    // 2) Multi-line: GM puts printable characters into keyboard_string; Enter usually does NOT
+    //    appear in keyboard_string. We catch Enter separately and insert "\n".
+    //    We do this by appending the newline directly into the keyboard_string accumulator so that
+    //    a subsequent backspace also removes it correctly.
+    //    // TODO verify: on some runtimes keyboard_string may itself contain \r/\n from Enter
+    //    (which would cause a double newline) - check when importing into the IDE on the target platform.
     if (keyboard_check_pressed(vk_enter)) {
         keyboard_string += "\n";
         s = keyboard_string;
     }
 
-    // 3) Лимит длины (контракт <=4000). Режем аккумулятор, чтобы UI и отправка совпадали.
+    // 3) Length limit (contract <=4000). Trim the accumulator so that UI and send stay in sync.
     if (string_length(s) > FASTLOGS_COMMENT_MAX) {
         s = string_copy(s, 1, FASTLOGS_COMMENT_MAX);
         keyboard_string = s;
@@ -151,42 +152,42 @@ function fastlogs_comment_poll_input() {
 }
 
 // =====================================================================================
-// ПЕРСИСТ НАСТРОЕК (ini_*). Файл - в game_save_id (sandbox). Безопасно к платформам:
-//   ini_* стандартны; на консолях/HTML5 при отсутствии записи просто откатываемся к дефолтам.
-//   Ключи настроек храним в секции [fastlogs]. Применяем настройки к рантайму через
-//   публичные сеттеры (fastlogs_set_screenshot), не трогая приватное состояние модулей.
+// SETTINGS PERSISTENCE (ini_*). File is stored in game_save_id (sandbox). Platform-safe:
+//   ini_* are standard; on consoles/HTML5 we simply fall back to defaults if reading fails.
+//   Setting keys are stored in the [fastlogs] section. Settings are applied to the runtime via
+//   public setters (fastlogs_set_screenshot), without touching private module state.
 // =====================================================================================
 function fastlogs_ui_settings_load() {
     if (!FASTLOGS_ENABLED) return;
     var ui = fastlogs_ui_state();
     try {
-        // FASTLOGS_PERSIST_FILE лежит в FASTLOGS_PERSIST_DIR; настройки кладём рядом в .ini.
+        // FASTLOGS_PERSIST_FILE lives in FASTLOGS_PERSIST_DIR; settings are placed alongside it in .ini.
         var fname = fastlogs_ui_ini_path();
         ini_open(fname);
         ui.cfg_screenshot = (ini_read_real("fastlogs", "screenshot", FASTLOGS_SCREENSHOT_DEFAULT ? 1 : 0) >= 1);
         ui.cfg_autosend   = (ini_read_real("fastlogs", "autosend",   0) >= 1);
         ui.cfg_ring_size  = ini_read_real("fastlogs", "ring_size",   FASTLOGS_RING_SIZE);
-        // Чистка PII (#3): дефолт приватный (FASTLOGS_SCRUB_PII). Сохранённое значение перекрывает.
+        // PII scrubbing (#3): default is private (FASTLOGS_SCRUB_PII). A saved value overrides it.
         ui.cfg_scrub_pii  = (ini_read_real("fastlogs", "scrub_pii",  FASTLOGS_SCRUB_PII ? 1 : 0) >= 1);
         ini_close();
     } catch (_e) {
-        // На платформах без ini-записи - тихо остаёмся на дефолтах.
+        // On platforms without ini write support - silently stay on defaults.
         ui.cfg_screenshot = FASTLOGS_SCREENSHOT_DEFAULT;
         ui.cfg_autosend   = false;
         ui.cfg_ring_size  = FASTLOGS_RING_SIZE;
         ui.cfg_scrub_pii  = FASTLOGS_SCRUB_PII;
     }
     ui.settings_loaded = true;
-    // Применить подгруженный тоггл скриншота к рантайму через публичный сеттер.
+    // Apply the loaded screenshot toggle to the runtime via the public setter.
     if (script_exists(asset_get_index("fastlogs_set_screenshot"))) {
         fastlogs_set_screenshot(ui.cfg_screenshot);
     }
-    // Применить подгруженный тоггл чистки PII к рантайм-конфигу (#3), чтобы payload его читал.
+    // Apply the loaded PII scrubbing toggle to the runtime config (#3) so the payload reads it.
     fastlogs_ui_apply_scrub_pii(ui.cfg_scrub_pii);
 }
 
-/// Применить тоггл чистки PII к рантайм-конфигу (st.cfg.scrubPii), чтобы fastlogs_redact его учёл.
-///   Пишем напрямую в общий cfg через тот же механизм, что и fastlogs_init({scrubPii}).
+/// Apply the PII scrubbing toggle to the runtime config (st.cfg.scrubPii) so fastlogs_redact respects it.
+///   Writes directly into the shared cfg via the same mechanism as fastlogs_init({scrubPii}).
 /// @param {bool} on
 function fastlogs_ui_apply_scrub_pii(on) {
     if (!FASTLOGS_ENABLED) return;
@@ -205,47 +206,48 @@ function fastlogs_ui_settings_save() {
         ini_write_real("fastlogs", "screenshot", ui.cfg_screenshot ? 1 : 0);
         ini_write_real("fastlogs", "autosend",   ui.cfg_autosend ? 1 : 0);
         ini_write_real("fastlogs", "ring_size",  ui.cfg_ring_size);
-        ini_write_real("fastlogs", "scrub_pii",  ui.cfg_scrub_pii ? 1 : 0);   // чистка PII (#3)
+        ini_write_real("fastlogs", "scrub_pii",  ui.cfg_scrub_pii ? 1 : 0);   // PII scrubbing (#3)
         ini_close();
     } catch (_e) {
-        // Запись недоступна (консоль/песочница) - игнорируем, настройки живут только в сессии.
+        // Writing unavailable (console/sandbox) - ignore; settings live only for the session.
     }
 }
 
-/// @returns {string} путь к ini-файлу настроек оверлея в game_save_id
+/// @returns {string} path to the overlay settings ini file inside game_save_id
 function fastlogs_ui_ini_path() {
-    // game_save_id уже содержит завершающий слеш (GM-NOTES 2.6).
-    // Кладём в ту же папку, что и персист-лог, имя settings.ini.
+    // game_save_id already includes a trailing slash (GM-NOTES 2.6).
+    // Placed in the same folder as the persist log, named settings.ini.
     return game_save_id + FASTLOGS_PERSIST_DIR + "/settings.ini";
 }
 
 // =====================================================================================
-// ТОСТ-СТАТУС (фича STATUS, B). Лёгкое уведомление поверх игры ДАЖЕ без открытого оверлея.
-//   Рисуется только когда есть что показать (toast_frames != 0) - иначе ноль работы в Draw.
-//   Типы: "info" (нейтральный), "sending" (держится, пока идёт отправка), "ok" (успех + ссылка),
-//   "error" (причина + подсказка/зона "Повторить"). Длительности из FASTLOGS_TOAST_*.
+// TOAST STATUS (feature STATUS, B). Lightweight notification shown over the game EVEN without
+//   the overlay open. Drawn only when there is something to show (toast_frames != 0) -
+//   otherwise zero work in Draw.
+//   Types: "info" (neutral), "sending" (held while a send is in progress), "ok" (success + link),
+//   "error" (reason + "Retry" hint/zone). Durations from FASTLOGS_TOAST_*.
 // =====================================================================================
 
-/// @returns {real} кадров для заданной длительности в секундах (по реальному game speed)
+/// @returns {real} frames for the given duration in seconds (based on actual game speed)
 function fastlogs_ui_toast_frames_for(seconds) {
-    // game_get_speed(gamespeed_fps) - целевой FPS логики; фолбэк 60 если недоступно/0.
-    var fps = 60;
+    // game_get_speed(gamespeed_fps) - target logic FPS; fallback to 60 if unavailable/0.
+    var _fps = 60;
     try {
         var f = game_get_speed(gamespeed_fps);
-        if (is_real(f) && f > 0) fps = f;
-    } catch (_e) { fps = 60; }
-    return max(1, round(seconds * fps));
+        if (is_real(f) && f > 0) _fps = f;
+    } catch (_e) { _fps = 60; }
+    return max(1, round(seconds * _fps));
 }
 
-/// Базовый тост (совместимость со старым API: clipboard зовёт fastlogs_ui_toast(text)).
-///   Это короткий info-тост. no-op при !FASTLOGS_ENABLED / выключенном тосте.
+/// Basic toast (backward compatibility: clipboard calls fastlogs_ui_toast(text)).
+///   This is a short info toast. no-op when !FASTLOGS_ENABLED or toast is disabled.
 function fastlogs_ui_toast(text) {
     if (!FASTLOGS_ENABLED) return;
     fastlogs_status_toast("info", string(text));
 }
 
-/// Статус-тост с типом. kind: "info"|"sending"|"ok"|"error". opt - struct { url, retry }.
-///   "sending" держится до следующего статуса (таймер -1). Остальные гаснут по таймеру.
+/// Status toast with type. kind: "info"|"sending"|"ok"|"error". opt - struct { url, retry }.
+///   "sending" is held until the next status (timer -1). Others expire on a timer.
 /// @param {string} kind
 /// @param {string} text
 /// @param {struct} [opt] { url:string, retry:bool }
@@ -260,7 +262,7 @@ function fastlogs_status_toast(kind, text, opt = undefined) {
 
     switch (ui.toast_kind) {
         case "sending":
-            ui.toast_frames = -1;   // держать, пока идёт отправка (снимется следующим статусом)
+            ui.toast_frames = -1;   // hold until send completes (cleared by the next status)
             break;
         case "error":
             ui.toast_frames = fastlogs_ui_toast_frames_for(FASTLOGS_TOAST_ERROR_SECONDS);
@@ -271,7 +273,7 @@ function fastlogs_status_toast(kind, text, opt = undefined) {
     }
 }
 
-/// Скрыть тост немедленно (например, при ручном открытии оверлея).
+/// Hide the toast immediately (e.g. when the overlay is opened manually).
 function fastlogs_status_toast_clear() {
     if (!FASTLOGS_ENABLED) return;
     var ui = fastlogs_ui_state();
@@ -282,30 +284,30 @@ function fastlogs_status_toast_clear() {
 }
 
 // =====================================================================================
-// ОТРИСОВКА. Вызывается из Draw GUI (obj_fastlogs_controller -> Draw_64.gml).
-//   Заполняет ui.hit зонами для последующего ввода. Применяет нажатия, накопленные
-//   вводом на ЭТОТ кадр (ui.pressed/ui.px/ui.py), сразу здесь, чтобы клики реагировали
-//   по тем же координатам/зонам, что и нарисованы (один источник истины - hit-rects).
+// DRAWING. Called from Draw GUI (obj_fastlogs_controller -> Draw_64.gml).
+//   Populates ui.hit with zones for subsequent input. Applies presses accumulated
+//   by input THIS frame (ui.pressed/ui.px/ui.py) right here, so clicks respond
+//   to the same coordinates/zones as drawn (single source of truth - hit-rects).
 // =====================================================================================
 function fastlogs_ui_draw() {
     if (!FASTLOGS_ENABLED) return;
     var ui = fastlogs_ui_state();
 
-    // Тост уменьшаем по кадрам даже когда оверлей закрыт. toast_frames == -1 -> держим (sending).
+    // Decrement the toast frame counter even when the overlay is closed. toast_frames == -1 -> hold (sending).
     if (ui.toast_frames > 0) ui.toast_frames -= 1;
 
     if (!ui.open) {
-        // Оверлей закрыт: рисуем ТОЛЬКО тост и только если он активен (иначе полный ноль работы -
-        //   ни сборки hit-rects, ни draw-стейта). Тост виден поверх игры (фича STATUS, B).
+        // Overlay is closed: draw ONLY the toast and only if it is active (otherwise zero work -
+        //   no hit-rect collection, no draw state). Toast is visible over the game (feature STATUS, B).
         if (ui.toast_frames != 0) {
-            // Свежие зоны клика только для тоста (повтор/копирование ссылки).
+            // Fresh click zones only for the toast (retry/copy link).
             ui.hit = [];
             var old_col_t  = draw_get_colour();
             var old_alpha_t = draw_get_alpha();
             var old_hal_t  = draw_get_halign();
             var old_val_t  = draw_get_valign();
             fastlogs_ui_draw_toast(ui);
-            // Потребить клик по зонам тоста (Повторить/Копировать), если был тап в этом кадре.
+            // Consume click on toast zones (Retry/Copy) if a tap occurred this frame.
             if (ui.pressed) {
                 var hid_t = fastlogs_ui_hit_test(ui, ui.px, ui.py);
                 if (hid_t != "") fastlogs_ui_action(hid_t, ui);
@@ -319,19 +321,19 @@ function fastlogs_ui_draw() {
         return;
     }
 
-    // Свежий список зон на этот кадр.
+    // Fresh zone list for this frame.
     ui.hit = [];
 
     var gw = display_get_gui_width();
     var gh = display_get_gui_height();
 
-    // Масштаб элементов: базовый под ~1080p, не меньше минимального тач-размера.
+    // Element scale: base for ~1080p, no smaller than the minimum touch size.
     var ui_scale = max(1, min(gw, gh) / 720);
     var btn_h    = max(FASTLOGS_BTN_MIN_SIZE, round(56 * ui_scale));
     var pad      = max(8, round(12 * ui_scale));
     var fsize    = max(1, ui_scale);
 
-    // Сохранить и задать draw-состояние (восстановим в конце, чтобы не ломать игру).
+    // Save and set draw state (restored at the end to avoid breaking the game).
     var old_col   = draw_get_colour();
     var old_alpha = draw_get_alpha();
     var old_hal   = draw_get_halign();
@@ -340,35 +342,35 @@ function fastlogs_ui_draw() {
     draw_set_halign(fa_left);
     draw_set_valign(fa_top);
 
-    // --- Главная панель (слева сверху). Ширина ~ половина экрана, но в разумных пределах.
+    // --- Main panel (top-left). Width ~ half the screen, within reasonable bounds.
     var panel_w = clamp(round(gw * 0.42), 360, gw - pad * 2);
     var panel_x = pad;
     var panel_y = pad;
     var x1 = panel_x;
-    var y  = panel_y;
+    var _y = panel_y;
 
-    // Высоту панели посчитаем как сумму строк ниже; для простоты рисуем фон достаточной высоты.
-    // +1 строка под "Тестер:" (line_h) и +поле комментария (comment_h) к исходным 5 рядам кнопок.
-    var line_h    = round(28 * ui_scale);          // высота однострочной подписи
-    var comment_h = btn_h * 2;                      // высота многострочного поля комментария
+    // Panel height is the sum of the rows below; for simplicity we draw the background tall enough.
+    // +1 row for "Tester:" (line_h) and +comment field (comment_h) on top of the original 5 button rows.
+    var line_h    = round(28 * ui_scale);          // height of a single-line label
+    var comment_h = btn_h * 2;                      // height of the multi-line comment field
     var panel_h = btn_h * 5 + pad * 9 + line_h + comment_h;
-    fastlogs_ui_panel_bg(x1, y, x1 + panel_w, y + panel_h);
+    fastlogs_ui_panel_bg(x1, _y, x1 + panel_w, _y + panel_h);
 
     var inner_x = x1 + pad;
     var inner_w = panel_w - pad * 2;
-    var cy = y + pad;
+    var cy = _y + pad;
 
-    // Заголовок.
+    // Header.
     draw_set_alpha(1);
     draw_set_colour(FASTLOGS_COL_TEXT);
     fastlogs_ui_text(inner_x, cy, "FastLogs", fsize * 1.2);
-    // Кнопка-настройки (шестерёнка) и кнопка-закрыть в правом верхнем углу панели.
+    // Settings button (gear) and close button in the top-right corner of the panel.
     var gear_x2 = x1 + panel_w - pad;
     var gear_x1 = gear_x2 - btn_h;
     fastlogs_ui_button(gear_x1, cy - 4, gear_x2, cy - 4 + btn_h, "Настройки", "settings_toggle", fsize, ui);
     cy += btn_h + pad;
 
-    // --- Счётчики E/W/L (цветом). Берём из публичного геттера; безопасно если ещё нет данных.
+    // --- E/W/L counters (with color). Fetched from the public getter; safe if no data yet.
     var counts = fastlogs_ui_get_counts_safe();
     var third  = inner_w / 3;
     fastlogs_ui_counter(inner_x,             cy, third - pad, btn_h, "E", counts.error, FASTLOGS_COL_ERROR, fsize);
@@ -376,8 +378,8 @@ function fastlogs_ui_draw() {
     fastlogs_ui_counter(inner_x + third * 2, cy, third - pad, btn_h, "L", counts.log,   FASTLOGS_COL_LOG,   fsize);
     cy += btn_h + pad;
 
-    // --- Имя тестера (из конфига FASTLOGS_TESTER / runtime-override). Read-only показ.
-    //   Помогает тестеру убедиться, что его имя уйдёт с отчётом (фича TESTER).
+    // --- Tester name (from config FASTLOGS_TESTER / runtime-override). Read-only display.
+    //   Helps the tester confirm their name will be included with the report (feature TESTER).
     var tester_name = fastlogs_ui_tester_safe();
     draw_set_colour(FASTLOGS_COL_LOG);
     fastlogs_ui_text(inner_x, cy, "Тестер:", fsize);
@@ -386,37 +388,37 @@ function fastlogs_ui_draw() {
     fastlogs_ui_text_clipped(inner_x + round(110 * ui_scale), cy, tester_shown, fsize, inner_w - round(110 * ui_scale));
     cy += line_h + pad * 0.5;
 
-    // --- Поле комментария тестера (фича COMMENT). Клик по полю -> режим ввода (keyboard_string).
-    //   Многострочный текст; уходит в opts.comment при отправке. Рамка акцентом, если в фокусе.
+    // --- Tester comment field (feature COMMENT). Click on field -> input mode (keyboard_string).
+    //   Multi-line text; goes into opts.comment on send. Accent border when focused.
     draw_set_colour(FASTLOGS_COL_LOG);
     fastlogs_ui_text(inner_x, cy, "Комментарий (опишите проблему):", fsize);
     cy += line_h;
     var cmt_y1 = cy;
     var cmt_y2 = cy + comment_h;
-    // Фон поля.
+    // Field background.
     draw_set_colour(FASTLOGS_COL_BTN);
     draw_set_alpha(1);
     draw_rectangle(inner_x, cmt_y1, inner_x + inner_w, cmt_y2, false);
-    // Рамка: акцент если редактируем, иначе обычная.
+    // Border: accent if editing, regular otherwise.
     draw_set_colour(ui.comment_editing ? FASTLOGS_COL_ACCENT : FASTLOGS_COL_BTN_HOVER);
     draw_rectangle(inner_x, cmt_y1, inner_x + inner_w, cmt_y2, true);
-    // Текст комментария или подсказка. Многострочно (draw_text переносит по "\n").
+    // Comment text or placeholder. Multi-line (draw_text wraps on "\n").
     var cmt = ui.comment_text;
     if (cmt == "") {
         draw_set_colour(FASTLOGS_COL_LOG);
         fastlogs_ui_text(inner_x + pad * 0.5, cmt_y1 + pad * 0.5, ui.comment_editing ? "Печатайте... (Enter - новая строка)" : "Нажмите, чтобы ввести", fsize);
     } else {
         draw_set_colour(FASTLOGS_COL_TEXT);
-        // Курсор-индикатор в режиме ввода (мигание по таймеру кадров).
+        // Cursor indicator in input mode (blinking on a frame timer).
         var cursor = (ui.comment_editing && ((current_time div 500) mod 2 == 0)) ? "_" : "";
-        // draw_text сам рисует многострочно по "\n"; масштаб - через transformed.
+        // draw_text renders multi-line on "\n" natively; scaling is via transformed.
         draw_text_transformed(inner_x + pad * 0.5, cmt_y1 + pad * 0.5, cmt + cursor, fsize, fsize, 0);
     }
-    // Зона клика всего поля -> фокус ввода.
+    // Click zone for the entire field -> input focus.
     fastlogs_ui_register_hit(ui, inner_x, cmt_y1, inner_x + inner_w, cmt_y2, "comment_focus");
     cy = cmt_y2 + pad;
 
-    // --- Кнопка "Отправить" + тоггл "Скриншот" (крупная зона).
+    // --- "Send" button + "Screenshot" toggle (large zone).
     var half = inner_w / 2;
     var sending = fastlogs_ui_is_sending_safe();
     var send_label = sending ? "Отправка..." : "Отправить";
@@ -426,11 +428,11 @@ function fastlogs_ui_draw() {
     fastlogs_ui_toggle(inner_x + half, cy, inner_x + inner_w, cy + btn_h, "Скриншот", shot_on, "toggle_screenshot", fsize, ui);
     cy += btn_h + pad;
 
-    // --- Область URL + кнопка "Копировать".
+    // --- URL area + "Copy" button.
     var url = fastlogs_ui_last_url_safe();
     var copy_w = max(btn_h * 2, round(140 * ui_scale));
     var url_x2 = inner_x + inner_w - copy_w - pad;
-    // Фон поля URL.
+    // URL field background.
     draw_set_colour(FASTLOGS_COL_BTN);
     draw_set_alpha(1);
     draw_rectangle(inner_x, cy, url_x2, cy + btn_h, false);
@@ -440,9 +442,9 @@ function fastlogs_ui_draw() {
     fastlogs_ui_button(url_x2 + pad, cy, inner_x + inner_w, cy + btn_h, "Копировать", "copy", fsize, ui);
     cy += btn_h + pad;
 
-    // --- Нижняя строка: Recording индикатор + Start/Stop, Clear.
+    // --- Bottom row: Recording indicator + Start/Stop, Clear.
     var rec_on = fastlogs_ui_is_recording_safe();
-    // Индикатор записи (кружок/квадрат) + подпись.
+    // Recording indicator (circle/square) + label.
     var ind_size = round(btn_h * 0.4);
     draw_set_colour(rec_on ? FASTLOGS_COL_ERROR : FASTLOGS_COL_BTN);
     draw_set_alpha(1);
@@ -456,26 +458,26 @@ function fastlogs_ui_draw() {
     fastlogs_ui_button(rec_btn_x2 + pad, cy, inner_x + inner_w, cy + btn_h, "Clear", "clear", fsize, ui);
     cy += btn_h + pad;
 
-    // --- Панель настроек (независимая, поверх). Рисуем, если открыта.
+    // --- Settings panel (independent, on top). Draw if open.
     if (ui.settings_open) {
         fastlogs_ui_draw_settings(gw, gh, ui_scale, btn_h, pad, fsize, ui);
     }
 
-    // --- Тост (включая «держащийся» статус "Отправка..." с toast_frames == -1).
+    // --- Toast (including the "held" status "Sending..." with toast_frames == -1).
     if (ui.toast_frames != 0) fastlogs_ui_draw_toast(ui);
 
-    // Применить накопленный ввод по зонам этого кадра (после того как все hit-rects собраны).
+    // Apply accumulated input against this frame's zones (after all hit-rects are collected).
     if (ui.pressed) {
         var hid = fastlogs_ui_hit_test(ui, ui.px, ui.py);
-        // Клик мимо поля комментария снимает фокус ввода (чтобы печать не уходила «в никуда»).
+        // A click outside the comment field removes input focus (so typing doesn't go nowhere).
         if (ui.comment_editing && hid != "comment_focus") {
             fastlogs_comment_set_editing(false);
         }
         if (hid != "") fastlogs_ui_action(hid, ui);
-        ui.pressed = false; // потребили
+        ui.pressed = false; // consumed
     }
 
-    // Восстановить draw-состояние.
+    // Restore draw state.
     draw_set_colour(old_col);
     draw_set_alpha(old_alpha);
     draw_set_halign(old_hal);
@@ -483,12 +485,12 @@ function fastlogs_ui_draw() {
 }
 
 // =====================================================================================
-// ПАНЕЛЬ НАСТРОЕК (независимая). Показ endpoint/appId (read-only), тогглы и счётчик буфера.
+// SETTINGS PANEL (independent). Displays endpoint/appId (read-only), toggles, and buffer counter.
 // =====================================================================================
 function fastlogs_ui_draw_settings(gw, gh, ui_scale, btn_h, pad, fsize, ui) {
     var panel_w = clamp(round(gw * 0.5), 420, gw - pad * 2);
-    var panel_h = btn_h * 8 + pad * 10;     // +1 ряд под тоггл "Чистка PII" (#3)
-    var x1 = gw - panel_w - pad;            // справа
+    var panel_h = btn_h * 8 + pad * 10;     // +1 row for the "PII Scrubbing" toggle (#3)
+    var x1 = gw - panel_w - pad;            // right side
     var y1 = pad;
     fastlogs_ui_panel_bg(x1, y1, x1 + panel_w, y1 + panel_h);
 
@@ -499,11 +501,11 @@ function fastlogs_ui_draw_settings(gw, gh, ui_scale, btn_h, pad, fsize, ui) {
     draw_set_colour(FASTLOGS_COL_TEXT);
     draw_set_alpha(1);
     fastlogs_ui_text(ix, cy, "Настройки FastLogs", fsize * 1.1);
-    // Закрыть настройки.
+    // Close settings.
     fastlogs_ui_button(x1 + panel_w - pad - btn_h * 2, cy - 4, x1 + panel_w - pad, cy - 4 + btn_h, "Закрыть", "settings_close", fsize, ui);
     cy += btn_h + pad;
 
-    // Endpoint (read-only показ).
+    // Endpoint (read-only display).
     draw_set_colour(FASTLOGS_COL_LOG);
     fastlogs_ui_text(ix, cy, "Endpoint:", fsize);
     draw_set_colour(FASTLOGS_COL_TEXT);
@@ -511,7 +513,7 @@ function fastlogs_ui_draw_settings(gw, gh, ui_scale, btn_h, pad, fsize, ui) {
     fastlogs_ui_text_clipped(ix + round(120 * ui_scale), cy, ep, fsize, iw - round(120 * ui_scale));
     cy += round(28 * ui_scale) + pad * 0.5;
 
-    // AppId (read-only показ).
+    // AppId (read-only display).
     draw_set_colour(FASTLOGS_COL_LOG);
     fastlogs_ui_text(ix, cy, "AppId:", fsize);
     draw_set_colour(FASTLOGS_COL_TEXT);
@@ -519,41 +521,41 @@ function fastlogs_ui_draw_settings(gw, gh, ui_scale, btn_h, pad, fsize, ui) {
     fastlogs_ui_text_clipped(ix + round(120 * ui_scale), cy, aid, fsize, iw - round(120 * ui_scale));
     cy += round(28 * ui_scale) + pad;
 
-    // Тоггл "Скриншот".
+    // "Screenshot" toggle.
     fastlogs_ui_toggle(ix, cy, ix + iw, cy + btn_h, "Скриншот в payload", ui.cfg_screenshot, "set_toggle_screenshot", fsize, ui);
     cy += btn_h + pad;
 
-    // Тоггл "Autosend" (UI-уровень: разрешить авто-отправку - например при исключении).
+    // "Autosend" toggle (UI level: allow auto-send - e.g. on exception).
     fastlogs_ui_toggle(ix, cy, ix + iw, cy + btn_h, "Autosend", ui.cfg_autosend, "set_toggle_autosend", fsize, ui);
     cy += btn_h + pad;
 
-    // Тоггл "Чистка PII" (#3). ДЕФОЛТ приватно (ON). ON -> email/IP/токены/длинные цифры -> [redacted].
+    // "PII Scrubbing" toggle (#3). DEFAULT private (ON). ON -> email/IP/tokens/long numbers -> [redacted].
     fastlogs_ui_toggle(ix, cy, ix + iw, cy + btn_h, "Чистка PII (приватность)", ui.cfg_scrub_pii, "set_toggle_scrub_pii", fsize, ui);
     cy += btn_h + pad;
 
-    // Start/Stop Recording с индикатором.
+    // Start/Stop Recording with indicator.
     var rec_on = fastlogs_ui_is_recording_safe();
     fastlogs_ui_toggle(ix, cy, ix + iw, cy + btn_h, rec_on ? "Recording: ON" : "Recording: OFF", rec_on, "toggle_record", fsize, ui);
     cy += btn_h + pad;
 
-    // Ёмкость буфера (показ + кнопки -/+). Меняет только UI-кэш (ui.cfg_ring_size);
-    //   фактическое применение размера кольца - на стороне core, если он его читает.
+    // Buffer capacity (display + -/+ buttons). Changes only the UI cache (ui.cfg_ring_size);
+    //   actual ring size application is on the core side, if it reads this value.
     draw_set_colour(FASTLOGS_COL_TEXT);
     fastlogs_ui_text(ix, cy + btn_h * 0.5 - 8 * fsize, "Буфер: " + string(ui.cfg_ring_size), fsize);
     var bx2 = ix + iw;
     fastlogs_ui_button(bx2 - btn_h, cy, bx2, cy + btn_h, "+", "ring_inc", fsize, ui);
     fastlogs_ui_button(bx2 - btn_h * 2 - pad, cy, bx2 - btn_h - pad, cy + btn_h, "-", "ring_dec", fsize, ui);
-    // Clear прямо здесь тоже удобно.
+    // Clear is also convenient right here.
     fastlogs_ui_button(ix, cy, ix + round(120 * ui_scale), cy + btn_h, "Clear", "clear", fsize, ui);
 }
 
 // =====================================================================================
-// HIT-TEST и ОБРАБОТКА ДЕЙСТВИЙ
+// HIT-TEST AND ACTION HANDLING
 // =====================================================================================
 
-/// @returns {string} id зоны под точкой (последняя добавленная, т.е. верхняя), либо ""
+/// @returns {string} id of the zone under the point (last added, i.e. topmost), or ""
 function fastlogs_ui_hit_test(ui, px, py) {
-    // Идём с конца: позже нарисованные зоны (панель настроек/тост) перекрывают ранние.
+    // Iterate from the end: later-drawn zones (settings panel/toast) overlap earlier ones.
     var n = array_length(ui.hit);
     for (var i = n - 1; i >= 0; i--) {
         var r = ui.hit[i];
@@ -562,20 +564,20 @@ function fastlogs_ui_hit_test(ui, px, py) {
     return "";
 }
 
-/// Выполнить действие по id зоны. Использует ТОЛЬКО публичное API других модулей.
+/// Execute the action for a zone id. Uses ONLY the public API of other modules.
 function fastlogs_ui_action(id, ui) {
     switch (id) {
         case "settings_toggle": ui.settings_open = !ui.settings_open; break;
         case "settings_close":  ui.settings_open = false; break;
 
         case "comment_focus":
-            // Клик по полю комментария -> включить режим ввода (keyboard_string).
+            // Click on comment field -> enable input mode (keyboard_string).
             fastlogs_comment_set_editing(true);
             break;
 
         case "send":
-            // Передаём введённый комментарий в отправку (opts.comment). Пустой не кладём -
-            //   payload сам опустит, но не загромождаем opts. Снимаем фокус ввода.
+            // Pass the entered comment into the send call (opts.comment). We don't include an empty one -
+            //   the payload would drop it anyway, but we avoid cluttering opts. Remove input focus.
             fastlogs_comment_set_editing(false);
             if (script_exists(asset_get_index("fastlogs_send"))) {
                 var send_opts = {};
@@ -588,20 +590,20 @@ function fastlogs_ui_action(id, ui) {
             break;
 
         case "copy":
-            // Копирование URL делегируем clipboard-модулю (он же покажет тост).
+            // URL copying is delegated to the clipboard module (it also shows the toast).
             if (script_exists(asset_get_index("fastlogs_copy_url"))) fastlogs_copy_url();
             break;
 
         case "toast_copy_url":
-            // Клик по тосту "Готово" со ссылкой -> скопировать её (фича STATUS, B).
+            // Click on the "Done" toast with a link -> copy it (feature STATUS, B).
             if (script_exists(asset_get_index("fastlogs_copy_url"))) fastlogs_copy_url();
             break;
 
         case "toast_retry":
-            // Клик по тосту "Ошибка" -> повторить отправку с тем же телом (фича STATUS, B).
-            //   Этот тост с кнопкой "Повторить" показывается только при ТЕРМИНАЛЬНОЙ ошибке
-            //   (pending отложенного повтора нет) - значит fastlogs_send тут не заблокируется
-            //   и соберёт свежий payload. Если в этот момент идёт отправка/pending - отобьётся.
+            // Click on the "Error" toast -> retry the send with the same body (feature STATUS, B).
+            //   This toast with a "Retry" button is shown only on a TERMINAL error
+            //   (no pending deferred retry) - so fastlogs_send won't be blocked here
+            //   and will collect a fresh payload. If a send/pending is already in progress - it will be rejected.
             if (script_exists(asset_get_index("fastlogs_send"))) {
                 fastlogs_send({ title: "Retry send" });
             }
@@ -620,7 +622,7 @@ function fastlogs_ui_action(id, ui) {
             break;
 
         case "set_toggle_scrub_pii":
-            // Чистка PII (#3): тоггл -> применяем к рантайм-конфигу + персист ini.
+            // PII scrubbing (#3): toggle -> apply to runtime config + persist to ini.
             ui.cfg_scrub_pii = !ui.cfg_scrub_pii;
             fastlogs_ui_apply_scrub_pii(ui.cfg_scrub_pii);
             fastlogs_ui_settings_save();
@@ -651,30 +653,30 @@ function fastlogs_ui_action(id, ui) {
 }
 
 // =====================================================================================
-// ПРИМИТИВЫ ОТРИСОВКИ (хелперы). Все рисуют draw_rectangle/draw_text, регистрируют зоны.
+// DRAWING PRIMITIVES (helpers). All draw via draw_rectangle/draw_text and register zones.
 // =====================================================================================
 
-/// Фон панели с прозрачностью.
+/// Panel background with transparency.
 function fastlogs_ui_panel_bg(x1, y1, x2, y2) {
     draw_set_colour(FASTLOGS_COL_PANEL);
     draw_set_alpha(FASTLOGS_BG_ALPHA);
     draw_rectangle(x1, y1, x2, y2, false);
-    // Рамка.
+    // Border.
     draw_set_alpha(1);
     draw_set_colour(FASTLOGS_COL_BTN_HOVER);
     draw_rectangle(x1, y1, x2, y2, true);
 }
 
-/// Текст с масштабом (через draw_text_transformed для размера без зависимости от шрифта-ассета).
+/// Text with scale (via draw_text_transformed for size independent of the font asset).
 function fastlogs_ui_text(x, y, str, scale) {
-    // draw_text_transformed(x,y,string,xscale,yscale,angle) - стандартная функция.
+    // draw_text_transformed(x,y,string,xscale,yscale,angle) - standard function.
     draw_text_transformed(x, y, str, scale, scale, 0);
 }
 
-/// Текст с обрезкой по ширине (грубо по символам - чтобы длинный URL не вылезал).
+/// Text clipped to a maximum width (roughly by character count - to prevent a long URL from overflowing).
 function fastlogs_ui_text_clipped(x, y, str, scale, max_w) {
     var s = str;
-    // Оценка ширины символа ~ string_width у текущего шрифта; защитимся от деления на 0.
+    // Character width estimate ~ string_width of the current font; guard against division by zero.
     var sw = string_width(s) * scale;
     if (sw > max_w && string_length(s) > 0 && max_w > 0) {
         var keep = max(1, floor(string_length(s) * (max_w / sw)) - 1);
@@ -683,7 +685,7 @@ function fastlogs_ui_text_clipped(x, y, str, scale, max_w) {
     fastlogs_ui_text(x, y, s, scale);
 }
 
-/// Кнопка с подсветкой hover и регистрацией зоны клика.
+/// Button with hover highlight and click zone registration.
 function fastlogs_ui_button(x1, y1, x2, y2, label, id, scale, ui) {
     var hot = (fastlogs_ui_hit_test_point(ui, x1, y1, x2, y2));
     draw_set_colour(hot ? FASTLOGS_COL_BTN_HOVER : FASTLOGS_COL_BTN);
@@ -692,7 +694,7 @@ function fastlogs_ui_button(x1, y1, x2, y2, label, id, scale, ui) {
     draw_set_colour(FASTLOGS_COL_ACCENT);
     draw_rectangle(x1, y1, x2, y2, true);
     draw_set_colour(FASTLOGS_COL_TEXT);
-    // Центрируем текст.
+    // Center text.
     draw_set_halign(fa_center);
     draw_set_valign(fa_middle);
     fastlogs_ui_text((x1 + x2) * 0.5, (y1 + y2) * 0.5, label, scale);
@@ -701,7 +703,7 @@ function fastlogs_ui_button(x1, y1, x2, y2, label, id, scale, ui) {
     fastlogs_ui_register_hit(ui, x1, y1, x2, y2, id);
 }
 
-/// Тоггл (вкл/выкл) с цветовой индикацией состояния.
+/// Toggle (on/off) with color state indication.
 function fastlogs_ui_toggle(x1, y1, x2, y2, label, is_on, id, scale, ui) {
     draw_set_colour(is_on ? FASTLOGS_COL_ACCENT : FASTLOGS_COL_BTN);
     draw_set_alpha(is_on ? 0.85 : 1);
@@ -717,7 +719,7 @@ function fastlogs_ui_toggle(x1, y1, x2, y2, label, is_on, id, scale, ui) {
     fastlogs_ui_register_hit(ui, x1, y1, x2, y2, id);
 }
 
-/// Счётчик уровня (цветной блок с буквой и числом).
+/// Level counter (colored block with a letter and number).
 function fastlogs_ui_counter(x1, y1, w, h, letter, value, col, scale) {
     draw_set_colour(FASTLOGS_COL_BTN);
     draw_set_alpha(1);
@@ -730,25 +732,25 @@ function fastlogs_ui_counter(x1, y1, w, h, letter, value, col, scale) {
     draw_set_valign(fa_top);
 }
 
-/// Тост-уведомление по центру внизу (фича STATUS, B). Цвет рамки по типу; для "ok" показывает
-///   ссылку и кликабельную зону копирования, для "error" - зону "Повторить".
-///   Регистрирует зоны клика в ui.hit (их потребляет fastlogs_ui_draw в обеих ветках).
+/// Toast notification centered at the bottom (feature STATUS, B). Border color by type; for "ok" shows
+///   a link and a clickable copy zone, for "error" - a "Retry" zone.
+///   Registers click zones in ui.hit (consumed by fastlogs_ui_draw in both branches).
 function fastlogs_ui_draw_toast(ui) {
     if (ui.toast_text == "") return;
     var gw = display_get_gui_width();
     var gh = display_get_gui_height();
 
     var kind = variable_struct_exists(ui, "toast_kind") ? ui.toast_kind : "info";
-    // Цвет рамки/акцента по типу статуса.
+    // Border/accent color by status type.
     var accent = FASTLOGS_COL_ACCENT;
     switch (kind) {
-        case "sending": accent = FASTLOGS_COL_WARN;   break;   // "Отправка..."
-        case "ok":      accent = FASTLOGS_COL_ACCENT; break;   // успех (зелёный)
-        case "error":   accent = FASTLOGS_COL_ERROR;  break;   // ошибка (красный)
-        default:        accent = FASTLOGS_COL_BTN_HOVER; break; // info (нейтральный)
+        case "sending": accent = FASTLOGS_COL_WARN;   break;   // "Sending..."
+        case "ok":      accent = FASTLOGS_COL_ACCENT; break;   // success (green)
+        case "error":   accent = FASTLOGS_COL_ERROR;  break;   // error (red)
+        default:        accent = FASTLOGS_COL_BTN_HOVER; break; // info (neutral)
     }
 
-    // Доп.строка под основным текстом: ссылка (ok) или подсказка повтора (error).
+    // Secondary line below the main text: link (ok) or retry hint (error).
     var url   = variable_struct_exists(ui, "toast_url")   ? ui.toast_url   : "";
     var retry = variable_struct_exists(ui, "toast_retry") ? ui.toast_retry : false;
     var has_url   = (kind == "ok")    && is_string(url) && string_length(url) > 0;
@@ -772,18 +774,18 @@ function fastlogs_ui_draw_toast(ui) {
     draw_set_colour(accent);
     draw_rectangle(tx, ty, tx + tw, ty + th, true);
 
-    // Основной текст статуса.
+    // Main status text.
     draw_set_colour(FASTLOGS_COL_TEXT);
     draw_set_halign(fa_center);
     draw_set_valign(fa_middle);
     var main_cy = (sub_text != "") ? (ty + 18) : ((ty + ty + th) * 0.5);
     draw_text((tx + tx + tw) * 0.5, main_cy, ui.toast_text);
 
-    // Доп.строка + кликабельная зона (копирование ссылки / повтор).
+    // Secondary line + clickable zone (copy link / retry).
     if (sub_text != "") {
         draw_set_colour(has_retry ? FASTLOGS_COL_ERROR : FASTLOGS_COL_ACCENT);
         draw_text((tx + tx + tw) * 0.5, ty + th - 20, sub_text);
-        // Вся плашка тоста кликабельна для соответствующего действия.
+        // The entire toast panel is clickable for the corresponding action.
         if (has_url)   fastlogs_ui_register_hit(ui, tx, ty, tx + tw, ty + th, "toast_copy_url");
         if (has_retry) fastlogs_ui_register_hit(ui, tx, ty, tx + tw, ty + th, "toast_retry");
     }
@@ -792,24 +794,24 @@ function fastlogs_ui_draw_toast(ui) {
     draw_set_valign(fa_top);
 }
 
-/// Регистрирует зону клика (для последующего/текущего hit-test).
+/// Registers a click zone (for subsequent/current hit-test).
 function fastlogs_ui_register_hit(ui, x1, y1, x2, y2, id) {
     array_push(ui.hit, { x1: x1, y1: y1, x2: x2, y2: y2, id: id });
 }
 
-/// Подсветка hover: указатель ввода (ui.px/py) внутри прямоугольника?
+/// Hover highlight: is the input pointer (ui.px/py) inside the rectangle?
 function fastlogs_ui_hit_test_point(ui, x1, y1, x2, y2) {
     return (ui.px >= x1 && ui.px <= x2 && ui.py >= y1 && ui.py <= y2);
 }
 
 // =====================================================================================
-// БЕЗОПАСНЫЕ ГЕТТЕРЫ (не падать, если соответствующий модуль ещё не наполнен билдером).
-//   Используем script_exists(asset_get_index(...)) перед вызовом чужих публичных функций.
+// SAFE GETTERS (do not crash if the corresponding module has not been populated by the builder yet).
+//   We use script_exists(asset_get_index(...)) before calling other modules' public functions.
 // =====================================================================================
 function fastlogs_ui_get_counts_safe() {
     if (script_exists(asset_get_index("fastlogs_get_counts"))) {
         var c = fastlogs_get_counts();
-        // Защита от неполного struct.
+        // Guard against incomplete struct.
         return {
             error: variable_struct_exists(c, "error") ? c.error : 0,
             warn:  variable_struct_exists(c, "warn")  ? c.warn  : 0,
@@ -834,10 +836,10 @@ function fastlogs_ui_is_recording_safe() {
     return false;
 }
 
-/// @returns {string} имя тестера с учётом runtime-override (fastlogs_init({tester})), иначе макрос
+/// @returns {string} tester name taking into account runtime-override (fastlogs_init({tester})), otherwise the macro
 function fastlogs_ui_tester_safe() {
-    // __fastlogs_cfg (core) учитывает override из fastlogs_init; если core ещё не подключён -
-    //   падаем на сам макрос FASTLOGS_TESTER.
+    // __fastlogs_cfg (core) takes into account the override from fastlogs_init; if core is not yet loaded -
+    //   fall back to the FASTLOGS_TESTER macro itself.
     var t = FASTLOGS_TESTER;
     if (script_exists(asset_get_index("__fastlogs_cfg"))) {
         t = __fastlogs_cfg("tester", FASTLOGS_TESTER);

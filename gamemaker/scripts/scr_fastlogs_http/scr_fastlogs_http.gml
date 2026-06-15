@@ -1,43 +1,43 @@
 /// @description scr_fastlogs_http
-// FastLogs GameMaker client - HTTP (отправка payload на ингест-сервер).
-// Назначение: fastlogs_send([opts]) собирает тело (payload-скрипт) и шлёт POST через
-//   http_request с заголовками Content-Type + опц. Authorization Bearer; хранит request id
-//   и состояние отправки; разбор ответа - в Async HTTP событии (Other_62.gml).
-// Гейтинг: при !FASTLOGS_ENABLED все точки no-op (http_request НЕ вызывается).
+// FastLogs GameMaker client - HTTP (sends payload to the ingest server).
+// Purpose: fastlogs_send([opts]) assembles the body (payload script) and sends a POST via
+//   http_request with Content-Type + optional Authorization Bearer headers; stores the request id
+//   and send state; response parsing is in the Async HTTP event (Other_62.gml).
+// Gating: when !FASTLOGS_ENABLED all entry points are no-ops (http_request is NOT called).
 //
-// СОСТОЯНИЕ хранится в global.__fastlogs.http (консистентно с core/recorder/screenshot,
-//   которые держат подсостояния в едином global.__fastlogs). Поля:
+// STATE is stored in global.__fastlogs.http (consistent with core/recorder/screenshot,
+//   which keep their sub-states in the shared global.__fastlogs). Fields:
 //     state         : "idle" | "sending" | "ok" | "error"
-//     request_id    : real   - id текущего http_request (-1 если нет)
+//     request_id    : real   - current http_request id (-1 if none)
 //     is_sending    : bool
-//     last_url      : string - url последнего успешного лога ("" если нет)
-//     last_status   : real   - последний http_status (0 если нет)
-//     retry_count   : real   - сколько НЕМЕДЛЕННЫХ ретраев уже сделано для текущей отправки
-//     pending_body  : string - тело текущего запроса (для ретрая)
-//   RETRY-UNTIL-SUCCESS (отложенный повтор на alarm-таймере; фича RETRY):
-//     dretry_active   : bool   - есть ли сейчас ОДНА (единственная) pending-отправка на повтор
-//     dretry_body     : string - тело отчёта, который ждёт отложенного повтора
-//     dretry_count    : real   - сколько отложенных повторов уже выполнено (для предела/счётчика)
-//     dretry_seconds  : real   - сколько секунд осталось до следующей попытки (тик alarm раз/сек)
-//   Один pending за раз: пока pending активен (или идёт отправка), новая ВНЕШНЯЯ
-//     fastlogs_send БЛОКИРУЕТСЯ (no-op + статус), не отменяя pending (см. fastlogs_send).
-//   Сам обратный отсчёт/перезапуск ведёт Alarm[0] контроллера (Other Alarm_0.gml), а не Step.
+//     last_url      : string - url of the last successful log ("" if none)
+//     last_status   : real   - last http_status (0 if none)
+//     retry_count   : real   - number of IMMEDIATE retries already made for the current send
+//     pending_body  : string - body of the current request (for retry)
+//   RETRY-UNTIL-SUCCESS (deferred retry on alarm timer; RETRY feature):
+//     dretry_active   : bool   - whether there is currently ONE (single) pending retry
+//     dretry_body     : string - body of the report waiting for a deferred retry
+//     dretry_count    : real   - number of deferred retries already performed (for limit/counter)
+//     dretry_seconds  : real   - seconds remaining until the next attempt (alarm ticks once/sec)
+//   One pending at a time: while a pending is active (or a send is in progress), a new EXTERNAL
+//     fastlogs_send is BLOCKED (no-op + status), without cancelling the pending (see fastlogs_send).
+//   The countdown/restart itself is driven by the controller's Alarm[0] (Other Alarm_0.gml), not Step.
 //
-// ЗАВИСИМОСТИ (реальные имена - сверено по коду соседних скриптов):
-//   __fastlogs_state()                  (core) - общий global-стейт
+// DEPENDENCIES (real names - verified against neighbouring scripts):
+//   __fastlogs_state()                  (core) - shared global state
 //   fastlogs_build_payload_json(opts)   (payload)
-//   fastlogs_screenshot_request(cb)     (screenshot) - асинхронный захват кадра
-//   FASTLOGS_* макросы                  (config)
+//   fastlogs_screenshot_request(cb)     (screenshot) - async frame capture
+//   FASTLOGS_* macros                   (config)
 //
-// Сверено (GM-NOTES 2.1 + WebSearch июнь 2026): http_request(url, method, header_map /*ds_map
-//   строк*/, body /*string*/) -> request id; заголовки key/value без двоеточия; карту можно
-//   уничтожить сразу (GM копирует значения).
+// Verified (GM-NOTES 2.1 + WebSearch June 2026): http_request(url, method, header_map /*ds_map
+//   of strings*/, body /*string*/) -> request id; headers key/value without colon; the map can be
+//   destroyed immediately (GM copies the values).
 
-// Число ретраев по умолчанию (локальный макрос, чтобы не трогать config).
+// Default retry count (local macro to avoid touching config).
 #macro FASTLOGS_HTTP_MAX_RETRIES 2
 
 // =====================================================================================
-// Внутреннее: лениво создать и вернуть подсостояние http внутри global.__fastlogs.
+// Internal: lazily create and return the http sub-state inside global.__fastlogs.
 // =====================================================================================
 function __fastlogs_http_state() {
     var st = __fastlogs_state();   // core
@@ -50,23 +50,24 @@ function __fastlogs_http_state() {
             last_status  : 0,
             retry_count  : 0,
             pending_body : "",
-            // RETRY-UNTIL-SUCCESS (отложенный повтор; фича RETRY).
+            // RETRY-UNTIL-SUCCESS (deferred retry; RETRY feature).
             dretry_active  : false,
             dretry_body    : "",
             dretry_count   : 0,
             dretry_seconds : 0,
-            // ПЕРСИСТ КРАШ-ОТЧЁТА (фича #1): путь pending-файла, привязанного к ТЕКУЩЕМУ
-            //   in-flight запросу. На успехе Async-обработчик удалит этот файл из очереди.
-            //   "" -> обычная отправка (не из очереди), удалять нечего.
+            // CRASH-REPORT PERSIST (feature #1): path of the pending file tied to the CURRENT
+            //   in-flight request. On success the Async handler will delete this file from the queue.
+            //   "" -> regular send (not from queue), nothing to delete.
             pending_file   : "",
-            // ДРЕНАЖ OUTBOX (фича #1, "при первой возможности").
-            //   FIX-1: PER_START-лимит (FASTLOGS_PENDING_RESEND_PER_START) применяется ТОЛЬКО к
-            //   СТАРТ-бэкстопу (цепочке, инициированной fastlogs_pending_resend_all при init), чтобы
-            //   не молотить весь outbox за один старт. ЖИВОЙ idle-дренаж (после обычной отправки/
-            //   немедленного краша/по завершении старт-цепочки) этим счётчиком НЕ гейтится - тянет
-            //   следующий pending, пока outbox непуст (объём ограничен FASTLOGS_PENDING_MAX/enforce_cap).
-            init_chain_active : false,  // активна ли СТАРТ-цепочка дренажа (запущена resend_all)
-            init_drain_count  : 0,      // сколько файлов дослано в рамках СТАРТ-цепочки (лимит PER_START)
+            // OUTBOX DRAIN (feature #1, "at first opportunity").
+            //   FIX-1: PER_START limit (FASTLOGS_PENDING_RESEND_PER_START) applies ONLY to the
+            //   STARTUP backstop (the chain initiated by fastlogs_pending_resend_all at init), to
+            //   avoid hammering the entire outbox in a single start. The LIVE idle drain (after a
+            //   regular send / immediate crash / after the startup chain finishes) is NOT gated by
+            //   this counter - it pulls the next pending until the outbox is empty (volume is capped
+            //   by FASTLOGS_PENDING_MAX/enforce_cap).
+            init_chain_active : false,  // whether the STARTUP drain chain is active (resend_all launched)
+            init_drain_count  : 0,      // files resent within the STARTUP chain (PER_START limit)
         };
     }
     return st.http;
@@ -74,39 +75,39 @@ function __fastlogs_http_state() {
 
 // =====================================================================================
 // fastlogs_send([opts]) -> bool
-// Собирает payload и ставит POST-запрос. true если запрос (или захват скриншота под него)
-//   поставлен; false если no-op (выключено / нет endpoint / уже идёт отправка).
-// opts (опц., struct): title, comment, retentionDays, screenshot, extraDevice (см. payload).
-//   comment (string<=4000) - свободное описание проблемы тестером; уходит в поле comment.
-//     opts целиком пробрасывается в payload (в т.ч. через сохранённый st.__http_pending_opts
-//     на пути со скриншотом), так что comment доносится до тела автоматически.
+// Assembles the payload and queues a POST request. true if the request (or screenshot capture
+//   for it) was queued; false if no-op (disabled / no endpoint / send already in progress).
+// opts (optional, struct): title, comment, retentionDays, screenshot, extraDevice (see payload).
+//   comment (string<=4000) - free-form problem description from a tester; goes into the comment field.
+//     opts is forwarded to the payload in full (including via the saved st.__http_pending_opts
+//     on the screenshot path), so comment reaches the body automatically.
 // =====================================================================================
 function fastlogs_send(opts = undefined) {
     if (!FASTLOGS_ENABLED) { return false; }
 
-    // endpoint обязателен.
+    // endpoint is required.
     if (!is_string(FASTLOGS_ENDPOINT) || string_length(FASTLOGS_ENDPOINT) == 0) {
         show_debug_message("[FastLogs] send skipped: FASTLOGS_ENDPOINT is empty");
-        // Статус-подсказка игроку (фича QUICK-SEND/STATUS): не падаем, объясняем причину.
+        // Status hint to the player (QUICK-SEND/STATUS feature): don't crash, explain the reason.
         fastlogs_send_status("error", "Ошибка: не задан endpoint", false);
         return false;
     }
 
     var hs = __fastlogs_http_state();
 
-    // Запрет параллельной отправки (одна за раз).
+    // Prevent parallel sends (one at a time).
     if (hs.is_sending) {
         show_debug_message("[FastLogs] send skipped: already sending");
         fastlogs_send_status("info", "Отправка уже идёт...", false);
         return false;
     }
 
-    // RETRY-UNTIL-SUCCESS (фича RETRY): пока текущий отчёт не отправился успешно, новую
-    //   ВНЕШНЮЮ отправку БЛОКИРУЕМ - включая окно ожидания между попытками отложенного
-    //   повтора. Если сейчас ждёт pending-повтор (тикает по таймеру), не отменяем его и не
-    //   стартуем новую отправку: показываем статус и выходим. ВНУТРЕННИЙ повтор идёт не
-    //   через fastlogs_send (а через fastlogs_retry_tick -> fastlogs_http_post_internal),
-    //   поэтому этот guard его не затрагивает и серия повторов продолжается.
+    // RETRY-UNTIL-SUCCESS (RETRY feature): while the current report has not been sent successfully,
+    //   BLOCK a new EXTERNAL send - including the waiting window between deferred retry attempts.
+    //   If a pending retry is currently waiting (ticking on the timer), don't cancel it and don't
+    //   start a new send: show status and exit. The INTERNAL retry goes not through fastlogs_send
+    //   (but through fastlogs_retry_tick -> fastlogs_http_post_internal), so this guard does not
+    //   affect it and the retry series continues.
     if (fastlogs_retry_is_pending()) {
         show_debug_message("[FastLogs] send skipped: retry pending (waiting to resend current report)");
         fastlogs_send_status("info", "Отправка уже идёт (ждём повтор)", false);
@@ -115,60 +116,61 @@ function fastlogs_send(opts = undefined) {
 
     if (!is_struct(opts)) { opts = {}; }
 
-    // ПЕРФ (D): перед сбором payload сбросить батч записи на диск, чтобы файл/logText были
-    //   согласованы (logText берётся из rec_text, но файл на диске тоже держим актуальным).
+    // PERF (D): before assembling the payload, flush the recorder batch to disk so the
+    //   file/logText are consistent (logText is taken from rec_text, but we also keep
+    //   the on-disk file up to date).
     if (script_exists(asset_get_index("fastlogs_recorder_flush"))) {
         try { fastlogs_recorder_flush(); } catch (_ef) { /* best-effort */ }
     }
 
-    // STATUS (B): подняли "Отправка..." сразу - виден поверх игры даже без оверлея.
+    // STATUS (B): raise "Sending..." immediately - visible above the game even without the overlay.
     fastlogs_send_status("sending", "Отправка...", false);
 
-    // Нужен ли скриншот в этой отправке?
-    //   приоритет: opts.screenshot (явный override) -> текущий тоггл состояния -> дефолт макроса.
+    // Is a screenshot needed for this send?
+    //   priority: opts.screenshot (explicit override) -> current toggle state -> macro default.
     var st = __fastlogs_state();
     var want_shot = variable_struct_exists(st, "screenshot") ? bool(st.screenshot) : FASTLOGS_SCREENSHOT_DEFAULT;
     if (variable_struct_exists(opts, "screenshot")) { want_shot = bool(opts.screenshot); }
 
-    // Помечаем занятость СРАЗУ, чтобы параллельный send отбился, пока идёт захват/запрос.
+    // Mark busy IMMEDIATELY so a concurrent send is rejected while capture/request is in flight.
     hs.is_sending = true;
     hs.state      = "sending";
     hs.retry_count = 0;
-    hs.pending_file = "";   // обычная отправка - не из pending-очереди (фича #1)
+    hs.pending_file = "";   // regular send - not from the pending queue (feature #1)
 
     if (want_shot) {
-        // Асинхронный захват кадра (произойдёт в ближайшем Draw GUI End), затем отправка
-        //   из колбэка. Колбэк получает готовый base64 (или "" при неудаче) - в любом случае
-        //   собираем payload (payload сам подхватит fastlogs_screenshot_base64()).
+        // Async frame capture (will happen in the nearest Draw GUI End), then send
+        //   from the callback. The callback receives the ready base64 (or "" on failure) -
+        //   in either case we assemble the payload (the payload will pick up fastlogs_screenshot_base64() itself).
         fastlogs_screenshot_request(function(_b64) {
-            // На момент колбэка скриншот уже лежит в screenshot-состоянии - payload его прочтёт.
+            // By the time the callback fires, the screenshot is already in the screenshot state - the payload will read it.
             fastlogs_http_dispatch(undefined);
         });
-        // opts нужно донести до колбэка - сохраним их в состоянии (колбэк-функция выше
-        //   замыкается на глоб. состояние, а не на локальные opts).
+        // opts must reach the callback - save them in state (the callback function above
+        //   closes over global state, not local opts).
         st.__http_pending_opts = opts;
         return true;
     }
 
-    // Без скриншота - собираем и шлём немедленно.
+    // No screenshot - assemble and send immediately.
     return fastlogs_http_dispatch(opts);
 }
 
 // =====================================================================================
-// fastlogs_quick_send([opts]) -> bool  (фича QUICK-SEND, A)
-// Быстрая отправка ТЕКУЩЕЙ записи БЕЗ открытия оверлея (fire-and-forget): вызывается из
-//   хоткея/жеста быстрой отправки или напрямую из кода интегратора. Тонкая обёртка над
-//   fastlogs_send: добавляет дружелюбный статус-тост и НЕ требует UI.
-// Поведение по краю (контракт A): если нет ни одной записи лога - не отправляем пустоту,
-//   показываем статус-подсказку и не падаем. Запись (recording) для отправки НЕ обязательна:
-//   logText берётся из кольца в памяти даже когда персист-запись выключена.
-// Возврат: true если отправка/захват поставлены; false если no-op (пусто/нет endpoint/занято).
+// fastlogs_quick_send([opts]) -> bool  (QUICK-SEND feature, A)
+// Quick send of the CURRENT recording WITHOUT opening the overlay (fire-and-forget): called from
+//   a hotkey/gesture or directly from integrator code. Thin wrapper over fastlogs_send: adds a
+//   friendly status toast and does NOT require UI.
+// Edge behavior (contract A): if there are no log entries at all - don't send an empty payload,
+//   show a status hint and don't crash. A recording is NOT required for sending:
+//   logText is taken from the in-memory ring even when persistent recording is disabled.
+// Returns: true if the send/capture was queued; false if no-op (empty/no endpoint/busy).
 // =====================================================================================
 function fastlogs_quick_send(opts = undefined) {
     if (!FASTLOGS_ENABLED) { return false; }
     if (!is_struct(opts)) { opts = {}; }
 
-    // Нет логов вообще -> нечего слать. Подсказка вместо пустого отчёта (не падаем).
+    // No logs at all -> nothing to send. Show hint instead of an empty report (don't crash).
     var have_logs = false;
     if (script_exists(asset_get_index("fastlogs_get_counts"))) {
         var c = fastlogs_get_counts();
@@ -184,19 +186,20 @@ function fastlogs_quick_send(opts = undefined) {
         return false;
     }
 
-    // Тег быстрой отправки в title (если интегратор не задал свой) - помогает различать в каталоге.
+    // Quick-send tag in title (if the integrator didn't set their own) - helps distinguish in the dashboard.
     if (!variable_struct_exists(opts, "title")) { opts.title = "Quick send"; }
     return fastlogs_send(opts);
 }
 
 // =====================================================================================
-// fastlogs_pending_send(body_json, file_path) -> bool  (фича #1: досыл pending-краша)
-// Отправить УЖЕ ГОТОВОЕ JSON-тело отчёта из дисковой очереди (recorder.pending). На успехе
-//   Async-обработчик (Other_62) удалит file_path из очереди (по hs.pending_file). НЕ строит
-//   payload заново (тело уже несёт timestampUtc/logText/counts/comment/tester/context/breadcrumbs
-//   момента краха). НЕ снимает скриншот. Уважает single-flight: если уже идёт отправка или
-//   ждёт отложенный повтор - возвращает false (файл остаётся в очереди, подхватится позже).
-// Возврат: true если запрос поставлен; false если no-op (выключено / нет endpoint / занято / пусто).
+// fastlogs_pending_send(body_json, file_path) -> bool  (feature #1: pending crash resend)
+// Send an ALREADY BUILT JSON report body from the disk queue (recorder.pending). On success
+//   the Async handler (Other_62) will delete file_path from the queue (via hs.pending_file).
+//   Does NOT rebuild the payload (the body already carries timestampUtc/logText/counts/comment/
+//   tester/context/breadcrumbs from the moment of crash). Does NOT take a screenshot.
+//   Respects single-flight: if a send is already in progress or a deferred retry is waiting -
+//   returns false (the file stays in the queue, will be picked up later).
+// Returns: true if the request was queued; false if no-op (disabled / no endpoint / busy / empty).
 // =====================================================================================
 function fastlogs_pending_send(body_json, file_path) {
     if (!FASTLOGS_ENABLED) { return false; }
@@ -204,26 +207,26 @@ function fastlogs_pending_send(body_json, file_path) {
     if (!is_string(body_json) || string_length(body_json) == 0) { return false; }
 
     var hs = __fastlogs_http_state();
-    // Single-flight: не вмешиваемся в идущую отправку/ожидание повтора (файл ждёт следующего раза).
+    // Single-flight: don't interfere with an ongoing send/retry wait (file waits for next time).
     if (hs.is_sending || fastlogs_retry_is_pending()) { return false; }
 
     hs.is_sending   = true;
     hs.state        = "sending";
     hs.retry_count  = 0;
     hs.pending_body = body_json;
-    // Привязать файл к этому запросу: на успехе Async-обработчик удалит именно его.
+    // Bind the file to this request: on success the Async handler will delete exactly this file.
     hs.pending_file = is_string(file_path) ? file_path : "";
 
-    // Лёгкий статус (не обязателен на старте, но информативен, если оверлей/тост подключён).
+    // Light status (not required at start, but informative if an overlay/toast is connected).
     fastlogs_send_status("sending", "Досыл отчёта о краше...", false);
 
     return fastlogs_http_post_internal(body_json);
 }
 
 // =====================================================================================
-// Внутреннее: собрать тело (с уже готовым скриншотом, если был) и поставить POST.
-//   opts == undefined -> взять сохранённые st.__http_pending_opts (путь после захвата).
-//   true если http_request вызван.
+// Internal: assemble the body (with already-ready screenshot, if any) and queue the POST.
+//   opts == undefined -> use saved st.__http_pending_opts (path taken after capture).
+//   true if http_request was called.
 // =====================================================================================
 function fastlogs_http_dispatch(opts) {
     if (!FASTLOGS_ENABLED) { return false; }
@@ -240,7 +243,7 @@ function fastlogs_http_dispatch(opts) {
         show_debug_message("[FastLogs] send aborted: empty payload");
         hs.is_sending = false;
         hs.state      = "error";
-        // STATUS (B): снять «висящий» тост "Отправка..." -> ошибка (без повтора: тело пустое).
+        // STATUS (B): dismiss the hanging "Sending..." toast -> error (no retry: body is empty).
         fastlogs_send_status("error", "Ошибка: пустой отчёт", false);
         return false;
     }
@@ -250,35 +253,35 @@ function fastlogs_http_dispatch(opts) {
 }
 
 // =====================================================================================
-// Внутреннее: ставит один POST-запрос с готовым телом. true если http_request вызван.
-// Используется и для первичной отправки, и для ретраев (тело уже собрано).
+// Internal: queues a single POST request with a ready body. true if http_request was called.
+// Used for both the initial send and retries (body is already assembled).
 // =====================================================================================
 function fastlogs_http_post_internal(body) {
     var hs = __fastlogs_http_state();
 
-    // Заголовки: ds_map строк (НЕ struct). Ключ/значение без двоеточия.
+    // Headers: ds_map of strings (NOT a struct). Key/value without colon.
     var headers = ds_map_create();
     ds_map_add(headers, "Content-Type", "application/json");
     if (is_string(FASTLOGS_TOKEN) && string_length(FASTLOGS_TOKEN) > 0) {
         ds_map_add(headers, "Authorization", "Bearer " + FASTLOGS_TOKEN);
     }
 
-    // Таймаут соединения (best-effort; влияет на последующие запросы).
-    // // TODO verify: применяется ли http_set_connect_timeout к уже идущим или только новым запросам.
+    // Connection timeout (best-effort; affects subsequent requests).
+    // // TODO verify: does http_set_connect_timeout apply to already-in-flight requests or only new ones.
     if (is_real(FASTLOGS_HTTP_TIMEOUT_MS) && FASTLOGS_HTTP_TIMEOUT_MS > 0) {
         http_set_connect_timeout(FASTLOGS_HTTP_TIMEOUT_MS);
     }
 
     var req = http_request(FASTLOGS_ENDPOINT, "POST", headers, body);
 
-    // Карту можно уничтожить сразу - GM копирует значения заголовков.
+    // The map can be destroyed immediately - GM copies the header values.
     ds_map_destroy(headers);
 
     if (!is_real(req)) {
         show_debug_message("[FastLogs] http_request returned non-real id");
         hs.is_sending = false;
         hs.state      = "error";
-        // STATUS (B): снять «висящий» тост "Отправка..." -> ошибка с возможностью повтора.
+        // STATUS (B): dismiss the hanging "Sending..." toast -> error with retry option.
         fastlogs_send_status("error", "Ошибка: запрос не создан", true);
         return false;
     }
@@ -294,8 +297,8 @@ function fastlogs_http_post_internal(body) {
 
 // =====================================================================================
 // fastlogs_http_retry() -> bool
-// Повторяет последнюю отправку, если ещё остались попытки. Вызывается из Async HTTP
-//   обработчика (Other_62.gml) при сетевой ошибке/5xx. true если ретрай поставлен.
+// Retries the last send if attempts remain. Called from the Async HTTP handler
+//   (Other_62.gml) on a network error/5xx. true if the retry was queued.
 // =====================================================================================
 function fastlogs_http_retry() {
     if (!FASTLOGS_ENABLED) { return false; }
@@ -310,68 +313,69 @@ function fastlogs_http_retry() {
     }
     hs.retry_count += 1;
     show_debug_message("[FastLogs] retry " + string(hs.retry_count) + "/" + string(FASTLOGS_HTTP_MAX_RETRIES));
-    // Повторно используем уже собранное тело (тот же snapshot - корректно для ретрая).
+    // Reuse the already-assembled body (same snapshot - correct for a retry).
     return fastlogs_http_post_internal(hs.pending_body);
 }
 
 // =====================================================================================
-// RETRY-UNTIL-SUCCESS (отложенный повтор на alarm-таймере; фича RETRY).
+// RETRY-UNTIL-SUCCESS (deferred retry on alarm timer; RETRY feature).
 // -------------------------------------------------------------------------------------
-// Идея: когда отправка финально провалилась (после немедленных ретраев аплоадера),
-//   ставим ОДИН pending-отчёт на повтор каждые FASTLOGS_RETRY_INTERVAL_SEC секунд и
-//   повторяем, пока не пройдёт успешно (либо до предела FASTLOGS_RETRY_MAX).
-// Таймер: Alarm[0] контроллера (obj_fastlogs_controller). Тикаем раз в СЕКУНДУ - это
-//   позволяет обновлять статус "Повтор через Ns..." без работы в каждом кадре и без
-//   аллокаций. Когда счётчик секунд дошёл до 0 - запускаем сам повтор.
-// Один pending за раз: планирование заменяет тело и сбрасывает счётчик секунд; пока pending
-//   активен, новая ручная fastlogs_send БЛОКИРУЕТСЯ и pending не трогает (см. fastlogs_send).
+// Idea: when a send finally fails (after the uploader's immediate retries), we put ONE
+//   pending report up for retry every FASTLOGS_RETRY_INTERVAL_SEC seconds and keep retrying
+//   until it succeeds (or until the FASTLOGS_RETRY_MAX limit is reached).
+// Timer: Alarm[0] of the controller (obj_fastlogs_controller). We tick once per SECOND -
+//   this lets us update the "Retry in Ns..." status without running every frame and without
+//   allocations. When the second counter reaches 0, the retry itself is fired.
+// One pending at a time: scheduling replaces the body and resets the second counter; while
+//   a pending is active, a new manual fastlogs_send is BLOCKED and does not touch the pending
+//   (see fastlogs_send).
 // =====================================================================================
 
-// Внутреннее: взвести Alarm[0] контроллера на ~1 секунду (тик обратного отсчёта).
-//   Переводим секунды в кадры по реальному game speed (как тост-таймер). // TODO verify
-//   alarm[]: счётчик в шагах объекта, GM сам декрементирует каждый Step и вызывает
-//   событие Alarm[0] по достижении 0 (механизм движка, НЕ опрос в нашем коде).
+// Internal: arm the controller's Alarm[0] for ~1 second (countdown tick).
+//   Converts seconds to frames using the real game speed (same as the toast timer). // TODO verify
+//   alarm[]: a step counter on the object; GM decrements it every Step and fires
+//   the Alarm[0] event when it reaches 0 (engine mechanism, NOT polling in our code).
 function __fastlogs_retry_arm_alarm() {
     if (!instance_exists(obj_fastlogs_controller)) { return false; }
-    var frames = 60;   // фолбэк ~1 c при 60 fps
+    var frames = 60;   // fallback ~1 s at 60 fps
     if (script_exists(asset_get_index("fastlogs_ui_toast_frames_for"))) {
-        frames = fastlogs_ui_toast_frames_for(1);   // 1 секунда -> кадры по текущему fps
+        frames = fastlogs_ui_toast_frames_for(1);   // 1 second -> frames at current fps
     } else {
-        var fps = game_get_speed(gamespeed_fps);
-        if (is_real(fps) && fps > 0) frames = round(fps);
+        var _fps = game_get_speed(gamespeed_fps);
+        if (is_real(_fps) && _fps > 0) frames = round(_fps);
     }
-    // Один взвод alarm на единственном persistent-контроллере.
+    // Single alarm arm on the one persistent controller.
     with (obj_fastlogs_controller) { alarm[0] = frames; }
     return true;
 }
 
 // =====================================================================================
 // fastlogs_retry_schedule(body) -> bool
-// Поставить (или ЗАМЕНИТЬ) единственный pending-отчёт на отложенный повтор. true если
-//   запланировано. no-op если отложенный повтор выключен (интервал 0) или тело пустое.
-// Вызывается из Async HTTP обработчика, когда немедленные ретраи исчерпаны/неуместны.
+// Set (or REPLACE) the single pending report for a deferred retry. true if scheduled.
+//   no-op if deferred retry is disabled (interval 0) or the body is empty.
+// Called from the Async HTTP handler when immediate retries are exhausted/inappropriate.
 // =====================================================================================
 function fastlogs_retry_schedule(body) {
     if (!FASTLOGS_ENABLED) { return false; }
-    // Интервал 0 -> отложенный повтор выключен (поведение как раньше: ручной "Повторить").
+    // Interval 0 -> deferred retry disabled (behaviour as before: manual "Retry").
     if (!is_real(FASTLOGS_RETRY_INTERVAL_SEC) || FASTLOGS_RETRY_INTERVAL_SEC <= 0) { return false; }
     if (!is_string(body) || string_length(body) == 0) { return false; }
 
     var hs = __fastlogs_http_state();
-    // Один pending за раз: новое планирование заменяет тело и перезапускает отсчёт.
+    // One pending at a time: new scheduling replaces the body and restarts the countdown.
     hs.dretry_active  = true;
     hs.dretry_body    = body;
     hs.dretry_seconds = FASTLOGS_RETRY_INTERVAL_SEC;
-    // dretry_count НЕ сбрасываем здесь: это продолжение серии повторов того же отчёта
-    //   (счётчик растёт по факту каждой выполненной отложенной попытки в fastlogs_retry_tick).
+    // dretry_count is NOT reset here: this is a continuation of the retry series for the same
+    //   report (the counter grows each time a deferred attempt is executed in fastlogs_retry_tick).
 
     show_debug_message("[FastLogs] retry-until-success scheduled in " + string(FASTLOGS_RETRY_INTERVAL_SEC) + "s (attempt " + string(hs.dretry_count + 1) + ")");
-    // Поднять статус сразу, чтобы тестер видел отсчёт, не дожидаясь первого тика.
+    // Raise status immediately so the tester sees the countdown without waiting for the first tick.
     fastlogs_send_status("sending", "Повтор через " + string(FASTLOGS_RETRY_INTERVAL_SEC) + "s...", false);
 
     if (!__fastlogs_retry_arm_alarm()) {
-        // Контроллера нет (не должно случаться при FASTLOGS_ENABLED) - не теряем pending,
-        //   но без таймера он не тикнет; помечаем для диагностики.
+        // Controller does not exist (should not happen when FASTLOGS_ENABLED) - the pending is not
+        //   lost, but without the timer it won't tick; mark for diagnostics.
         show_debug_message("[FastLogs] retry scheduled but controller instance missing - alarm not armed");
     }
     return true;
@@ -379,55 +383,55 @@ function fastlogs_retry_schedule(body) {
 
 // =====================================================================================
 // fastlogs_retry_tick() -> void
-// Один тик обратного отсчёта отложенного повтора. Вызывается раз в СЕКУНДУ из Alarm[0]
-//   контроллера (НЕ каждый кадр). Уменьшает счётчик секунд; обновляет статус
-//   "Повтор через Ns..."; по достижении нуля запускает сам повтор (тем же телом).
-//   Перевзводит alarm на следующую секунду, пока pending активен.
+// One countdown tick for the deferred retry. Called once per SECOND from the controller's
+//   Alarm[0] (NOT every frame). Decrements the second counter; updates the
+//   "Retry in Ns..." status; fires the retry itself (with the same body) when the counter
+//   reaches zero. Re-arms the alarm for the next second while a pending is active.
 // =====================================================================================
 function fastlogs_retry_tick() {
     if (!FASTLOGS_ENABLED) { return; }
     var hs = __fastlogs_http_state();
-    if (!hs.dretry_active) { return; }   // нет pending - тик ничего не делает
+    if (!hs.dretry_active) { return; }   // no pending - tick does nothing
 
-    // Если в этот момент уже идёт отправка (например, пользователь вручную нажал Отправить),
-    //   не вмешиваемся: текущий pending был отменён при ручном send. Подстраховка.
+    // If a send is already in progress at this moment (e.g. the user pressed Send manually),
+    //   don't interfere: the current pending was cancelled by the manual send. Safety net.
     if (hs.is_sending) { return; }
 
     hs.dretry_seconds -= 1;
 
     if (hs.dretry_seconds > 0) {
-        // Ещё ждём: обновляем статус и перевзводим alarm на следующую секунду.
+        // Still waiting: update status and re-arm the alarm for the next second.
         fastlogs_send_status("sending", "Повтор через " + string(hs.dretry_seconds) + "s...", false);
         __fastlogs_retry_arm_alarm();
         return;
     }
 
-    // Время вышло - выполняем отложенный повтор тем же телом.
+    // Time is up - execute the deferred retry with the same body.
     hs.dretry_count += 1;
     show_debug_message("[FastLogs] retry-until-success attempt " + string(hs.dretry_count));
 
     var body = hs.dretry_body;
     if (!is_string(body) || string_length(body) == 0) {
-        // Тело пропало - нечего повторять, гасим pending.
+        // Body is gone - nothing to retry, cancel the pending.
         fastlogs_retry_cancel();
         return;
     }
 
-    // Сбрасываем счётчик немедленных ретраев под новую попытку и шлём.
-    //   pending остаётся активным: если эта попытка снова провалится, Async-обработчик
-    //   перепланирует её снова (fastlogs_retry_schedule), продолжая серию.
+    // Reset the immediate retry counter for the new attempt and send.
+    //   pending remains active: if this attempt fails again, the Async handler will
+    //   reschedule it (fastlogs_retry_schedule), continuing the series.
     hs.retry_count   = 0;
     hs.pending_body  = body;
     hs.state         = "sending";
     fastlogs_send_status("sending", "Повтор отправки...", false);
     fastlogs_http_post_internal(body);
-    // НЕ перевзводим alarm здесь: исход (успех/новый pending) решает Async HTTP обработчик.
+    // Do NOT re-arm the alarm here: the outcome (success/new pending) is decided by the Async HTTP handler.
 }
 
 // =====================================================================================
 // fastlogs_retry_cancel() -> void
-// Отменить текущий pending отложенный повтор (если есть) и сбросить его счётчики.
-//   Вызывается при финальном успехе, при терминальной ошибке и при пропаже тела повтора.
+// Cancel the current pending deferred retry (if any) and reset its counters.
+//   Called on final success, on a terminal error, and when the retry body disappears.
 // =====================================================================================
 function fastlogs_retry_cancel() {
     if (!FASTLOGS_ENABLED) { return; }
@@ -436,15 +440,15 @@ function fastlogs_retry_cancel() {
     hs.dretry_body    = "";
     hs.dretry_seconds = 0;
     hs.dretry_count   = 0;
-    // Снять взведённый alarm контроллера, чтобы старый отсчёт не выстрелил.
+    // Disarm the controller's alarm so the old countdown does not fire.
     if (instance_exists(obj_fastlogs_controller)) {
-        with (obj_fastlogs_controller) { alarm[0] = -1; }   // -1 = alarm выключен
+        with (obj_fastlogs_controller) { alarm[0] = -1; }   // -1 = alarm disabled
     }
 }
 
 // =====================================================================================
 // fastlogs_retry_is_pending() -> bool
-// true если сейчас есть отчёт, ожидающий отложенного повтора. false при !FASTLOGS_ENABLED.
+// true if there is currently a report waiting for a deferred retry. false when !FASTLOGS_ENABLED.
 // =====================================================================================
 function fastlogs_retry_is_pending() {
     if (!FASTLOGS_ENABLED) { return false; }
@@ -453,7 +457,7 @@ function fastlogs_retry_is_pending() {
 
 // =====================================================================================
 // fastlogs_is_sending() -> bool
-// true пока есть незавершённый запрос. false при !FASTLOGS_ENABLED.
+// true while there is an unfinished request. false when !FASTLOGS_ENABLED.
 // =====================================================================================
 function fastlogs_is_sending() {
     if (!FASTLOGS_ENABLED) { return false; }
@@ -462,7 +466,7 @@ function fastlogs_is_sending() {
 
 // =====================================================================================
 // fastlogs_last_url() -> string
-// URL последнего успешно созданного лога (из ответа сервера). "" если ещё нет.
+// URL of the last successfully created log (from the server response). "" if none yet.
 // =====================================================================================
 function fastlogs_last_url() {
     if (!FASTLOGS_ENABLED) { return ""; }
@@ -471,15 +475,15 @@ function fastlogs_last_url() {
 }
 
 // =====================================================================================
-// Внутреннее (для Async HTTP события): доступ к http-состоянию.
+// Internal (for the Async HTTP event): access to the http state.
 // =====================================================================================
 function fastlogs_http_get_state() {
     return __fastlogs_http_state();
 }
 
 // =====================================================================================
-// Внутреннее: безопасно поднять статус-тост (фича STATUS, B), не делая http зависимым от
-//   overlay-модуля жёстко. Если overlay не подключён - просто no-op. kind: info/sending/ok/error.
+// Internal: safely raise a status toast (STATUS feature, B) without making http hard-depend
+//   on the overlay module. If the overlay is not connected - simply no-op. kind: info/sending/ok/error.
 // =====================================================================================
 function fastlogs_send_status(kind, text, retry, url = "") {
     if (!FASTLOGS_ENABLED) { return; }

@@ -1,50 +1,50 @@
 /// @description scr_fastlogs_recorder
-// FastLogs GameMaker client - ПЕРСИСТЕНТНАЯ ЗАПИСЬ.
-// Реализует: fastlogs_record_start/stop/set/is_recording/clear; запись лога на диск
-//   (game_save_id, rolling-файл с лимитом FASTLOGS_PERSIST_MAX_BYTES, маркер сессии);
-//   СОХРАНЕНИЕ МЕЖДУ СЕССИЯМИ (на старте подгружает прошлые сессии); отдачу накопленного
-//   logText для отправки. По умолчанию запись ВЫКЛ (включается start/set(true) или конфигом).
+// FastLogs GameMaker client - PERSISTENT RECORDING.
+// Implements: fastlogs_record_start/stop/set/is_recording/clear; log writing to disk
+//   (game_save_id, rolling file with FASTLOGS_PERSIST_MAX_BYTES limit, session marker);
+//   PERSISTENCE BETWEEN SESSIONS (previous sessions are loaded on startup); delivery of
+//   accumulated logText for sending. Recording is OFF by default (enabled via start/set(true) or config).
 //
-// Модель персиста (один rolling-файл, синхронная дозапись через буфер):
-//   - Путь: FASTLOGS_PERSIST_DIR + "/" + FASTLOGS_PERSIST_FILE (относительно game_save_id).
-//   - На старте файл целиком читается в строковый аккумулятор rec_text (прошлые сессии).
-//   - При активной записи каждый flog синхронно дозаписывается И в rec_text, И в файл.
-//   - Маркер сессии (guid + UTC + краткое устройство) пишется один раз при первом включении
-//     записи в сессии, чтобы в файле было видно границу запусков.
-//   - Ротация: если файл превышает лимит - обрезаем СТАРОЕ начало (оставляем хвост ~половину
-//     лимита), целостность строк по \n.
-//   - Флаг записи персистится в ini (FASTLOGS_PERSIST_DIR/settings.ini), восстанавливается на
-//     старте: если в прошлой сессии запись была включена - продолжаем писать.
+// Persistence model (single rolling file, synchronous append via buffer):
+//   - Path: FASTLOGS_PERSIST_DIR + "/" + FASTLOGS_PERSIST_FILE (relative to game_save_id).
+//   - On startup the file is fully read into the string accumulator rec_text (previous sessions).
+//   - While recording is active each flog is synchronously appended to BOTH rec_text AND the file.
+//   - Session marker (guid + UTC + brief device info) is written once on the first activation of
+//     recording in a session, so session boundaries are visible in the file.
+//   - Rotation: if the file exceeds the limit - trim the OLD beginning (keep a tail of ~half the
+//     limit), preserving line integrity on \n boundaries.
+//   - The recording flag is persisted in ini (FASTLOGS_PERSIST_DIR/settings.ini) and restored on
+//     startup: if recording was enabled in the previous session, continue writing.
 //
-// Всё под FASTLOGS_ENABLED: при !FASTLOGS_ENABLED все точки делают ранний выход.
-// Локальные хелперы времени/файла помечены "// REPLACEABLE: util" - при готовом
-//   scr_fastlogs_util их можно заменить на общие fastlogs_util_*.
-// Сверять GML-API по GM-NOTES.md / актуальной документации; неуверенное помечать // TODO verify.
+// Everything is gated on FASTLOGS_ENABLED: when !FASTLOGS_ENABLED all entry points early-exit.
+// Local time/file helpers are marked "// REPLACEABLE: util" - once scr_fastlogs_util is ready
+//   they can be replaced with the shared fastlogs_util_* functions.
+// Verify GML API against GM-NOTES.md / current documentation; mark uncertain items // TODO verify.
 
 // =====================================================================================
-// Внутреннее: лениво создать и вернуть подсостояние recorder внутри global.__fastlogs.
+// Internal: lazily create and return the recorder sub-state inside global.__fastlogs.
 // =====================================================================================
 function __fastlogs_rec_state() {
-    var st = __fastlogs_state();   // из scr_fastlogs_core
+    var st = __fastlogs_state();   // from scr_fastlogs_core
     if (!variable_struct_exists(st, "rec") || !is_struct(st.rec)) {
         st.rec = {
-            loaded        : false,   // прошла ли подгрузка персиста на старте
-            rec_text      : "",      // накопленный текст лога (прошлые + текущая сессия)
-            // ПЕРФ (D): инкрементальный байтовый размер rec_text. Поддерживается при каждой
-            //   дозаписи (+= string_byte_length(piece)), чтобы НЕ сканировать весь rec_text
-            //   (до ~1 MB) на каждой строке. Полный O(n) скан (__fastlogs_rotate_text) зовётся
-            //   только когда счётчик превысил лимит. После ротации счётчик пересинхронизируется.
-            rec_bytes     : 0,       // байтовый размер rec_text (амортизированный O(1) учёт)
-            session_mark  : false,   // записан ли маркер текущей сессии в файл
-            session_guid  : "",      // guid текущей сессии (для маркера)
+            loaded        : false,   // whether persisted data was loaded on startup
+            rec_text      : "",      // accumulated log text (previous + current session)
+            // PERF (D): incremental byte size of rec_text. Updated on every append
+            //   (+= string_byte_length(piece)) to avoid scanning the entire rec_text
+            //   (~1 MB) on every line. The full O(n) scan (__fastlogs_rotate_text) is called
+            //   only when the counter exceeds the limit. After rotation the counter is re-synced.
+            rec_bytes     : 0,       // byte size of rec_text (amortized O(1) tracking)
+            session_mark  : false,   // whether the current session marker has been written
+            session_guid  : "",      // guid of the current session (for the marker)
             file_path     : FASTLOGS_PERSIST_DIR + "/" + FASTLOGS_PERSIST_FILE,
             ini_path      : FASTLOGS_PERSIST_DIR + "/settings.ini",
-            disk_ok       : true,    // false если файловые операции упали (тогда работаем in-memory)
-            // ПЕРФ (D): БАТЧ записи на диск. Строки копятся тут и сбрасываются пачкой по
-            //   таймеру/лимиту/перед отправкой/при краше - НЕ full-file IO на каждую строку.
-            pending       : "",      // несброшенные на диск строки (уже учтены в rec_text)
-            pending_bytes : 0,       // байтовый размер батча (для лимита FASTLOGS_PERSIST_FLUSH_MAX_BYTES)
-            last_flush_us : -1,      // get_timer() последнего сброса (мкс); -1 = ещё не сбрасывали
+            disk_ok       : true,    // false if file operations failed (fall back to in-memory)
+            // PERF (D): BATCH disk writes. Lines accumulate here and are flushed in bulk on
+            //   timer/limit/before send/on crash - NOT full-file IO on every line.
+            pending       : "",      // lines not yet flushed to disk (already counted in rec_text)
+            pending_bytes : 0,       // byte size of the batch (for the FASTLOGS_PERSIST_FLUSH_MAX_BYTES limit)
+            last_flush_us : -1,      // get_timer() of the last flush (us); -1 = never flushed
         };
     }
     return st.rec;
@@ -52,15 +52,15 @@ function __fastlogs_rec_state() {
 
 // =====================================================================================
 // REPLACEABLE: util. UTC ISO-8601 timestamp "YYYY-MM-DDThh:mm:ssZ".
-// date_current_datetime() возвращает момент в БАЗОВОЙ таймзоне; ставим UTC на время чтения
-//   компонентов, затем возвращаем прежнюю таймзону. (date_set_timezone/timezone_utc -
-//   ПОДТВЕРЖДЕНО; компоненты date_get_* принимают datetime-значение.)
+// date_current_datetime() returns the moment in the BASE timezone; we set UTC for reading
+//   the components, then restore the previous timezone. (date_set_timezone/timezone_utc -
+//   CONFIRMED; date_get_* components accept a datetime value.)
 // =====================================================================================
 function __fastlogs_utc_iso() {
     var prev = date_get_timezone();
     date_set_timezone(timezone_utc);
     var dt = date_current_datetime();
-    var y  = date_get_year(dt);
+    var _y = date_get_year(dt);
     var mo = date_get_month(dt);
     var d  = date_get_day(dt);
     var h  = date_get_hour(dt);
@@ -69,10 +69,10 @@ function __fastlogs_utc_iso() {
     date_set_timezone(prev);
 
     var p2 = function(n) { return (n < 10 ? "0" : "") + string(n); };
-    return string(y) + "-" + p2(mo) + "-" + p2(d) + "T" + p2(h) + ":" + p2(mi) + ":" + p2(s) + "Z";
+    return string(_y) + "-" + p2(mo) + "-" + p2(d) + "T" + p2(h) + ":" + p2(mi) + ":" + p2(s) + "Z";
 }
 
-// REPLACEABLE: util. Метка времени для одной строки лога "[hh:mm:ss]" (UTC).
+// REPLACEABLE: util. Timestamp for a single log line "[hh:mm:ss]" (UTC).
 function __fastlogs_utc_clock() {
     var prev = date_get_timezone();
     date_set_timezone(timezone_utc);
@@ -85,7 +85,7 @@ function __fastlogs_utc_clock() {
     return p2(h) + ":" + p2(mi) + ":" + p2(s);
 }
 
-// REPLACEABLE: util. Текстовая метка уровня для строки лога.
+// REPLACEABLE: util. Text level tag for a log line.
 function __fastlogs_level_tag(level) {
     switch (level) {
         case FASTLOGS_LEVEL_ERROR: return "ERROR";
@@ -94,120 +94,120 @@ function __fastlogs_level_tag(level) {
     }
 }
 
-// REPLACEABLE: util. Отформатировать запись кольца { time, level, text } в строку лога.
-//   Формат: "[hh:mm:ss] LEVEL: text". Многострочный text оставляем как есть.
+// REPLACEABLE: util. Format a ring entry { time, level, text } into a log line string.
+//   Format: "[hh:mm:ss] LEVEL: text". Multi-line text is left as-is.
 function __fastlogs_format_record(rec) {
     return "[" + __fastlogs_utc_clock() + "] " + __fastlogs_level_tag(rec.level) + ": " + string(rec.text);
 }
 
-// REPLACEABLE: util. Убедиться, что каталог персиста существует (относительно game_save_id).
+// REPLACEABLE: util. Ensure the persist directory exists (relative to game_save_id).
 function __fastlogs_ensure_dir() {
     if (!directory_exists(FASTLOGS_PERSIST_DIR)) {
-        directory_create(FASTLOGS_PERSIST_DIR);   // путь относителен game_save_id
+        directory_create(FASTLOGS_PERSIST_DIR);   // path is relative to game_save_id
     }
 }
 
-// REPLACEABLE: util. Прочитать весь текстовый файл (UTF-8) через буфер. "" если нет/ошибка.
-//   Файл пишется как сырой UTF-8 без нулевого терминатора (buffer_text), поэтому для чтения
-//   "до конца строкой" дописываем один \0 в конец grow-буфера и читаем buffer_string с 0.
-//   (buffer_string читает UTF-8 до нулевого байта - ПОДТВЕРЖДЕНО; buffer_text для ЧТЕНИЯ
-//    фиксированной длины из manual не даёт, поэтому идём через buffer_string.)
+// REPLACEABLE: util. Read an entire text file (UTF-8) via buffer. Returns "" if missing/error.
+//   The file is written as raw UTF-8 without a null terminator (buffer_text), so to read it
+//   "to the end as a string" we append one \0 to the end of the grow-buffer and read buffer_string from 0.
+//   (buffer_string reads UTF-8 up to a null byte - CONFIRMED; buffer_text for fixed-length READ
+//    is not documented, so we go through buffer_string.)
 function __fastlogs_read_text_file(rel_path) {
     if (!file_exists(rel_path)) return "";
-    var buf = buffer_load(rel_path);   // grow-буфер, align 1; путь относителен game_save_id
+    var buf = buffer_load(rel_path);   // grow-buffer, align 1; path is relative to game_save_id
     if (buf < 0) return "";
     var sz = buffer_get_size(buf);
     if (sz <= 0) { buffer_delete(buf); return ""; }
     buffer_seek(buf, buffer_seek_end, 0);
-    buffer_write(buf, buffer_u8, 0);   // нулевой терминатор для корректного buffer_string
-    var out = buffer_peek(buf, 0, buffer_string);   // прочитать всю строку с начала, не сдвигая
+    buffer_write(buf, buffer_u8, 0);   // null terminator for correct buffer_string read
+    var out = buffer_peek(buf, 0, buffer_string);   // read the full string from the start without advancing
     buffer_delete(buf);
     return out;
 }
 
-// REPLACEABLE: util. Перезаписать текстовый файл строкой целиком (UTF-8, без терминатора).
-//   buffer_save_ext(buffer, filename, offset, size) - сохраняет участок [offset, offset+size).
-//   // TODO verify точный порядок аргументов buffer_save_ext в 2024.x (manual отдаёт 403).
+// REPLACEABLE: util. Overwrite a text file entirely with a string (UTF-8, no terminator).
+//   buffer_save_ext(buffer, filename, offset, size) - saves the range [offset, offset+size).
+//   // TODO verify exact argument order of buffer_save_ext in 2024.x (manual returns 403).
 function __fastlogs_write_text_file(rel_path, text) {
     var bytes = string_byte_length(text);
     var buf   = buffer_create(max(1, bytes), buffer_grow, 1);
-    if (bytes > 0) buffer_write(buf, buffer_text, text);   // buffer_text: байты строки БЕЗ \0
-    buffer_save_ext(buf, rel_path, 0, buffer_tell(buf));   // сохранить только записанные байты
+    if (bytes > 0) buffer_write(buf, buffer_text, text);   // buffer_text: string bytes WITHOUT \0
+    buffer_save_ext(buf, rel_path, 0, buffer_tell(buf));   // save only the written bytes
     buffer_delete(buf);
 }
 
 // =====================================================================================
-// Внутреннее: применить ротацию к тексту (обрезать старое начало по лимиту, целостно по \n).
-//   Возвращает структуру { text, bytes }: (возможно укороченный) текст и его точный байтовый
-//   размер. Размер считается ЗДЕСЬ (за один проход внутри редкой ротации), чтобы вызывающий
-//   мог пересинхронизировать инкрементальный счётчик rec_bytes без отдельного O(n) скана.
-//   После обрезки в начале ставится пометка усечения. known_bytes (если >=0) - уже известный
-//   байтовый размер text, чтобы не сканировать его повторно на входе.
+// Internal: apply rotation to text (trim old beginning within limit, preserving line integrity on \n).
+//   Returns a struct { text, bytes }: the (possibly trimmed) text and its exact byte size.
+//   The size is computed HERE (in one pass inside the rare rotation), so the caller can
+//   re-sync the incremental rec_bytes counter without a separate O(n) scan.
+//   A truncation marker is prepended after trimming. known_bytes (if >=0) is the already-known
+//   byte size of text, to avoid re-scanning it on input.
 // =====================================================================================
 function __fastlogs_rotate_ex(text, known_bytes = -1) {
     var limit = max(1024, FASTLOGS_PERSIST_MAX_BYTES);
     var bytes = (known_bytes >= 0) ? known_bytes : string_byte_length(text);
     if (bytes <= limit) return { text : text, bytes : bytes };
 
-    // Оставляем хвост ~половину лимита, чтобы не ротировать на каждой строке.
+    // Keep a tail of ~half the limit so we don't rotate on every line.
     var keep_bytes = limit div 2;
-    // Идём с конца, отрезая по строкам, пока укладываемся в keep_bytes.
+    // Walk from the beginning, dropping lines until we fit within keep_bytes.
     var tail = text;
-    // Простой приём: пока байтовая длина велика - режем по первому \n блоками.
+    // Simple approach: while byte length is too large, drop the first line at \n.
     while (string_byte_length(tail) > keep_bytes) {
         var nl = string_pos("\n", tail);
         if (nl <= 0) {
-            // Нет переводов строк - режем жёстко по символам.
+            // No newlines - hard-cut by characters.
             var over = string_byte_length(tail) - keep_bytes;
-            // отрезаем примерно over символов с начала (оценка: 1 байт ~ 1 символ для ASCII)
+            // trim approximately 'over' characters from the start (estimate: 1 byte ~ 1 char for ASCII)
             tail = string_delete(tail, 1, max(1, over));
             break;
         }
-        tail = string_delete(tail, 1, nl);   // удалить до и включая первый \n
+        tail = string_delete(tail, 1, nl);   // remove up to and including the first \n
     }
     var prefix    = "... [fastlogs: старые строки усечены при ротации] ...\n";
     var out_text  = prefix + tail;
     return { text : out_text, bytes : string_byte_length(out_text) };
 }
 
-// Обёртка прежней сигнатуры (используется на пути подгрузки персиста, где счётчик не важен).
+// Wrapper with the old signature (used on the persist-load path where the counter is not needed).
 function __fastlogs_rotate_text(text) {
     return __fastlogs_rotate_ex(text, -1).text;
 }
 
 // =====================================================================================
-// Внутреннее: дозаписать одну готовую строку лога в rec_text и в БАТЧ (pending).
-//   ПЕРФ (D): НЕ трогает диск на каждую строку. Строка копится в rs.pending; фактический
-//   сброс пачкой делает __fastlogs_flush_pending (по таймеру из tick, по лимиту, перед
-//   отправкой/при краше). Ротация rec_text всё ещё применяется в памяти; при ротации помечаем
-//   батч как "нужна полная перезапись" (rewrite), т.к. дозапись хвоста после обрезки невалидна.
-//   immediate=true (краш-путь) -> синхронно сбросить сразу же, не дожидаясь таймера.
+// Internal: append one ready-formatted log line to rec_text and to the BATCH (pending).
+//   PERF (D): does NOT touch disk on every line. The line accumulates in rs.pending; the actual
+//   bulk flush is done by __fastlogs_flush_pending (on timer from tick, on limit, before
+//   send/on crash). In-memory rotation of rec_text is still applied; after rotation we mark
+//   the batch as "needs full rewrite" (rewrite), because appending a tail after a trim is invalid.
+//   immediate=true (crash path) -> flush synchronously right away without waiting for the timer.
 // =====================================================================================
 function __fastlogs_append_line(line, immediate = false) {
     var rs = __fastlogs_rec_state();
     var piece = line + "\n";
 
-    // ПЕРФ (D): дозапись и инкрементальный учёт байтов - O(piece), БЕЗ скана всего rec_text.
+    // PERF (D): append and incremental byte accounting - O(piece), WITHOUT scanning all of rec_text.
     rs.rec_text  += piece;
     var piece_bytes = string_byte_length(piece);
     rs.rec_bytes += piece_bytes;
 
-    // Полную O(n)-ротацию зовём ТОЛЬКО когда инкрементальный счётчик превысил лимит
-    //   (редкое событие). Обычная строка -> дешёвая ветка ниже без скана rec_text.
+    // Full O(n) rotation is called ONLY when the incremental counter exceeds the limit
+    //   (rare event). Normal line -> cheap branch below without scanning rec_text.
     var rotated = false;
     var limit = max(1024, FASTLOGS_PERSIST_MAX_BYTES);
     if (rs.rec_bytes > limit) {
-        var rot = __fastlogs_rotate_ex(rs.rec_text, rs.rec_bytes);   // считает точный размер внутри
+        var rot = __fastlogs_rotate_ex(rs.rec_text, rs.rec_bytes);   // computes exact size internally
         rotated      = (rot.bytes != rs.rec_bytes);
         rs.rec_text  = rot.text;
-        rs.rec_bytes = rot.bytes;   // пересинхрон счётчика по факту ротации (без отдельного скана)
+        rs.rec_bytes = rot.bytes;   // re-sync counter after rotation (no separate scan)
     }
 
     if (!FASTLOGS_PERSIST_ENABLED || !rs.disk_ok) return;
 
     if (rotated) {
-        // Ротация: хвостовая дозапись невалидна (старое начало обрезано). Сбросим батч полной
-        //   перезаписью файла целиком актуальным rec_text. Делаем сразу (ротация редкая).
+        // Rotation: tail-append is invalid (old beginning was trimmed). Flush the batch as a full
+        //   file rewrite with the current rec_text. Done immediately (rotation is rare).
         rs.pending       = "";
         rs.pending_bytes = 0;
         rs.last_flush_us = get_timer();
@@ -220,20 +220,20 @@ function __fastlogs_append_line(line, immediate = false) {
         return;
     }
 
-    // Обычный путь: копим строку в батч (НИКАКОГО file IO здесь).
+    // Normal path: accumulate the line in the batch (NO file IO here).
     rs.pending       += piece;
     rs.pending_bytes += string_byte_length(piece);
 
-    // Сброс батча: немедленно (краш) либо при превышении лимита размера батча.
+    // Flush the batch: immediately (crash) or when the batch size limit is exceeded.
     if (immediate || rs.pending_bytes >= max(1, FASTLOGS_PERSIST_FLUSH_MAX_BYTES)) {
         __fastlogs_flush_pending();
     }
 }
 
 // =====================================================================================
-// Внутреннее: сбросить батч (rs.pending) на диск ОДНОЙ дозаписью в хвост файла.
-//   Это и есть единственная точка per-flush file IO (вместо per-log). Безопасно при пустом
-//   батче (no-op). При ошибке диска -> in-memory режим (disk_ok=false), данные остаются в rec_text.
+// Internal: flush the batch (rs.pending) to disk with a SINGLE append to the end of the file.
+//   This is the only per-flush file IO point (instead of per-log). Safe when the batch is empty
+//   (no-op). On disk error -> in-memory mode (disk_ok=false); data is still preserved in rec_text.
 // =====================================================================================
 function __fastlogs_flush_pending() {
     var rs = __fastlogs_rec_state();
@@ -246,42 +246,42 @@ function __fastlogs_flush_pending() {
     rs.pending_bytes = 0;
     try {
         __fastlogs_ensure_dir();
-        __fastlogs_append_to_file(rs.file_path, batch);   // одна дозапись пачкой в хвост
+        __fastlogs_append_to_file(rs.file_path, batch);   // single bulk append to the end of the file
     } catch (_e) {
-        rs.disk_ok = false;   // дальше только память; отправка всё равно сработает (rec_text цел)
+        rs.disk_ok = false;   // in-memory mode from here; send will still work (rec_text is intact)
     }
 }
 
 // =====================================================================================
-// fastlogs_recorder_tick() - вызывать каждый Step из контроллера. ПЕРФ (D): дешёвая проверка
-//   таймера; сбрасывает батч на диск не чаще раза в FASTLOGS_PERSIST_FLUSH_SECONDS. Без аллокаций
-//   в кадре когда батч пуст (ранний выход). no-op при !FASTLOGS_ENABLED / выключенном персисте.
+// fastlogs_recorder_tick() - call every Step from the controller. PERF (D): cheap timer check;
+//   flushes the batch to disk at most once per FASTLOGS_PERSIST_FLUSH_SECONDS. No allocations
+//   per frame when the batch is empty (early exit). no-op when !FASTLOGS_ENABLED / persist disabled.
 // =====================================================================================
 function fastlogs_recorder_tick() {
     if (!FASTLOGS_ENABLED) return;
     if (!FASTLOGS_PERSIST_ENABLED) return;
-    // Не создаём состояние, если рекордера ещё нет (тик дешёвый и безопасный).
+    // Do not create state if the recorder has not been used yet (tick is cheap and safe).
     var st = __fastlogs_state();
     if (!variable_struct_exists(st, "rec") || !is_struct(st.rec)) return;
     var rs = st.rec;
-    if (string_length(rs.pending) == 0) return;   // нечего сбрасывать -> ноль работы
+    if (string_length(rs.pending) == 0) return;   // nothing to flush -> zero work
 
     var flush_secs = FASTLOGS_PERSIST_FLUSH_SECONDS;
     if (!is_real(flush_secs) || flush_secs <= 0) {
-        // 0 -> писать сразу (без батча по таймеру).
+        // 0 -> write immediately (no timer-based batching).
         __fastlogs_flush_pending();
         return;
     }
     var now_us = get_timer();
-    if (rs.last_flush_us < 0) { rs.last_flush_us = now_us; }   // первая засечка
+    if (rs.last_flush_us < 0) { rs.last_flush_us = now_us; }   // first timestamp
     if ((now_us - rs.last_flush_us) >= flush_secs * 1000000) {
         __fastlogs_flush_pending();
     }
 }
 
 // =====================================================================================
-// fastlogs_recorder_flush() - публичный принудительный сброс батча на диск (перед отправкой,
-//   чтобы logText/файл были актуальны). Безопасно при пустом батче.
+// fastlogs_recorder_flush() - public forced batch flush to disk (call before sending
+//   so that logText/file are up to date). Safe when the batch is empty.
 // =====================================================================================
 function fastlogs_recorder_flush() {
     if (!FASTLOGS_ENABLED) return;
@@ -290,33 +290,33 @@ function fastlogs_recorder_flush() {
     __fastlogs_flush_pending();
 }
 
-// REPLACEABLE: util. Дозаписать строку в конец файла (читает текущий буфер, пишет в хвост).
-//   GM не даёт append-режима для буферов файла напрямую - грузим, seek в конец, дописываем.
+// REPLACEABLE: util. Append a string to the end of a file (loads the current buffer, seeks to end, appends).
+//   GM does not expose an append mode for file buffers directly - load, seek to end, write.
 function __fastlogs_append_to_file(rel_path, text) {
     var buf;
     if (file_exists(rel_path)) {
         buf = buffer_load(rel_path);            // grow, align 1
         if (buf < 0) buf = buffer_create(1, buffer_grow, 1);
-        buffer_seek(buf, buffer_seek_end, 0);   // в конец существующих данных
+        buffer_seek(buf, buffer_seek_end, 0);   // seek to end of existing data
     } else {
         buf = buffer_create(1, buffer_grow, 1);
     }
     if (string_byte_length(text) > 0) buffer_write(buf, buffer_text, text);
-    buffer_save_ext(buf, rel_path, 0, buffer_tell(buf));   // // TODO verify порядок аргументов buffer_save_ext
+    buffer_save_ext(buf, rel_path, 0, buffer_tell(buf));   // // TODO verify argument order of buffer_save_ext
     buffer_delete(buf);
 }
 
-// REPLACEABLE: util. Простой guid сессии (без зависимостей). Время + случайность.
+// REPLACEABLE: util. Simple session guid (no dependencies). Time + randomness.
 function __fastlogs_make_guid() {
     var a = string(date_current_datetime());
     var b = string(irandom(999999999));
     var c = string(get_timer());
-    return md5_string_utf8(a + "-" + b + "-" + c);   // md5_string_utf8 - встроенная
+    return md5_string_utf8(a + "-" + b + "-" + c);   // md5_string_utf8 - built-in
 }
 
 // =====================================================================================
-// Внутреннее: записать маркер начала сессии в файл (один раз за сессию, при первом включении
-//   записи). Содержит guid + UTC + краткое устройство, чтобы в файле были видны границы.
+// Internal: write the session start marker to the file (once per session, on the first activation
+//   of recording). Contains guid + UTC + brief device info so session boundaries are visible.
 // =====================================================================================
 function __fastlogs_write_session_marker() {
     var rs = __fastlogs_rec_state();
@@ -332,8 +332,8 @@ function __fastlogs_write_session_marker() {
 }
 
 // =====================================================================================
-// Внутреннее: подгрузить персист прошлых сессий и восстановить флаг записи.
-//   Вызывается из fastlogs_init (core). Идемпотентно (loaded-флаг).
+// Internal: load persisted data from previous sessions and restore the recording flag.
+//   Called from fastlogs_init (core). Idempotent (loaded flag).
 // =====================================================================================
 function fastlogs_recorder_load_persisted() {
     if (!FASTLOGS_ENABLED) return;
@@ -345,8 +345,8 @@ function fastlogs_recorder_load_persisted() {
     if (!FASTLOGS_PERSIST_ENABLED) return;
 
     try {
-        // Подгрузить накопленный лог прошлых сессий. Через _ex, чтобы сразу засинхронить
-        //   инкрементальный счётчик rec_bytes (один скан здесь, дальше учёт амортизированный).
+        // Load accumulated log from previous sessions. Using _ex to immediately sync
+        //   the incremental rec_bytes counter (one scan here, amortized tracking thereafter).
         var prev_text = __fastlogs_read_text_file(rs.file_path);
         if (prev_text != "") {
             var rot = __fastlogs_rotate_ex(prev_text, -1);
@@ -354,24 +354,24 @@ function fastlogs_recorder_load_persisted() {
             rs.rec_bytes = rot.bytes;
         }
 
-        // Восстановить флаг записи из ini.
+        // Restore the recording flag from ini.
         if (file_exists(rs.ini_path)) {
             ini_open(rs.ini_path);
             var was_recording = ini_read_real("recorder", "recording", 0);
             ini_close();
             if (was_recording >= 1) {
-                // Продолжаем запись прошлой сессии (без повторного персиста ini внутри set).
+                // Continue recording from the previous session (without persisting ini again inside set).
                 __fastlogs_state().recording = true;
                 __fastlogs_write_session_marker();
             }
         }
     } catch (_e) {
-        rs.disk_ok = false;   // диск недоступен - работаем in-memory
+        rs.disk_ok = false;   // disk unavailable - operate in-memory
     }
 }
 
 // =====================================================================================
-// Внутреннее: персист флага записи в ini (вызывается из fastlogs_record_set).
+// Internal: persist the recording flag to ini (called from fastlogs_record_set).
 // =====================================================================================
 function __fastlogs_persist_recording_flag(enabled) {
     if (!FASTLOGS_PERSIST_ENABLED) return;
@@ -388,13 +388,13 @@ function __fastlogs_persist_recording_flag(enabled) {
 }
 
 // =====================================================================================
-// fastlogs_recorder_on_record(rec) - вызывается из flog ПОСЛЕ записи в кольцо.
-//   Пишет строку на диск ТОЛЬКО при активной записи. flog ничего не персистит, когда выкл.
+// fastlogs_recorder_on_record(rec) - called from flog AFTER writing to the ring.
+//   Writes the line to disk ONLY when recording is active. flog persists nothing when disabled.
 // =====================================================================================
 function fastlogs_recorder_on_record(rec) {
     if (!FASTLOGS_ENABLED) return;
     var st = __fastlogs_state();
-    if (!st.recording) return;   // запись выключена -> на диск ничего не идёт
+    if (!st.recording) return;   // recording disabled -> nothing goes to disk
 
     var rs = __fastlogs_rec_state();
     if (!rs.session_mark) __fastlogs_write_session_marker();
@@ -402,75 +402,75 @@ function fastlogs_recorder_on_record(rec) {
 }
 
 // =====================================================================================
-// fastlogs_recorder_flush_crash() - синхронный аварийный флаш ВСЕГО кольца на диск.
-//   Используется из обработчика необработанного исключения: пишем даже если запись была
-//   выключена, чтобы при краше состояние сохранилось (отправится на следующем запуске).
+// fastlogs_recorder_flush_crash() - synchronous emergency flush of the ENTIRE ring to disk.
+//   Used from the unhandled exception handler: writes even if recording was disabled,
+//   so that on a crash the state is saved (to be sent on the next launch).
 // =====================================================================================
 function fastlogs_recorder_flush_crash() {
     if (!FASTLOGS_ENABLED) return;
     var rs = __fastlogs_rec_state();
     if (!rs.session_mark) {
-        // Принудительно отметить сессию (на случай, если запись была выключена).
+        // Force-write the session marker (in case recording was disabled).
         rs.session_mark = false;
         __fastlogs_write_session_marker();
     }
-    // Слить весь текущий снимок кольца (хронологически) в персист.
-    var snap = fastlogs_ring_snapshot();   // из core
+    // Dump the entire current ring snapshot (chronologically) into persist.
+    var snap = fastlogs_ring_snapshot();   // from core
     for (var i = 0; i < array_length(snap); i++) {
         __fastlogs_append_line(__fastlogs_format_record(snap[i]));
     }
-    // Гарантированно сбросить всё накопленное (включая батч из обычной записи) синхронно на диск:
-    //   при краше игра закроется после колбэка, таймерный сброс уже не сработает.
+    // Guarantee that everything accumulated (including the normal-write batch) is flushed to disk:
+    //   on a crash the game closes after the callback, the timer-based flush will not fire.
     __fastlogs_flush_pending();
 }
 
 // =====================================================================================
-// ПУБЛИЧНОЕ API записи (контракт PUBLIC-API).
+// PUBLIC RECORDING API (PUBLIC-API contract).
 // =====================================================================================
 
-// Включить запись (эквивалент set(true)).
+// Enable recording (equivalent to set(true)).
 function fastlogs_record_start() {
     if (!FASTLOGS_ENABLED) return;
     fastlogs_record_set(true);
 }
 
-// Выключить запись (накопленное на диске остаётся).
+// Disable recording (accumulated data on disk is kept).
 function fastlogs_record_stop() {
     if (!FASTLOGS_ENABLED) return;
     fastlogs_record_set(false);
 }
 
-// Включить/выключить запись. Персистит флаг (ini) при FASTLOGS_PERSIST_ENABLED.
+// Enable/disable recording. Persists the flag (ini) when FASTLOGS_PERSIST_ENABLED.
 function fastlogs_record_set(enabled) {
     if (!FASTLOGS_ENABLED) return;
     var st = __fastlogs_state();
     var en = bool(enabled);
     if (st.recording == en) {
-        // Идемпотентно, но всё равно убедимся, что флаг персиста синхронен.
+        // Idempotent, but still ensure the persist flag is in sync.
         __fastlogs_persist_recording_flag(en);
         return;
     }
     st.recording = en;
     if (en) {
         var rs = __fastlogs_rec_state();
-        if (!rs.session_mark) __fastlogs_write_session_marker();   // отметить старт записи
+        if (!rs.session_mark) __fastlogs_write_session_marker();   // mark recording start
     }
     __fastlogs_persist_recording_flag(en);
 }
 
-// Текущее состояние записи. При !FASTLOGS_ENABLED -> false.
+// Current recording state. Returns false when !FASTLOGS_ENABLED.
 function fastlogs_is_recording() {
     if (!FASTLOGS_ENABLED) return false;
     return __fastlogs_state().recording;
 }
 
-// Очистить накопленный персист (память + файл на диске). В отличие от fastlogs_clear()
-//   (которое чистит только кольцо), это стирает rolling-файл записи.
+// Clear accumulated persist data (memory + file on disk). Unlike fastlogs_clear()
+//   (which only clears the ring), this erases the rolling record file.
 function fastlogs_record_clear() {
     if (!FASTLOGS_ENABLED) return;
     var rs = __fastlogs_rec_state();
     rs.rec_text     = "";
-    rs.rec_bytes    = 0;     // синхронно с rec_text сбрасываем инкрементальный счётчик
+    rs.rec_bytes    = 0;     // reset the incremental counter in sync with rec_text
     rs.session_mark = false;
     if (FASTLOGS_PERSIST_ENABLED && rs.disk_ok) {
         try {
@@ -480,49 +480,50 @@ function fastlogs_record_clear() {
 }
 
 // =====================================================================================
-// ПЕРСИСТ КРАШ-ОТЧЁТА + ДОСЫЛ ПРИ СТАРТЕ (фича #1, PENDING-QUEUE).
+// CRASH REPORT PERSIST + RESEND ON STARTUP (feature #1, PENDING-QUEUE).
 // -------------------------------------------------------------------------------------
-// Модель: при авто-отправке по краху сначала СИНХРОННО пишем ГОТОВОЕ JSON-тело payload в
-//   отдельный файл в каталоге pending (внутри game_save_id), затем пытаемся отправить.
-//   На успех файл удаляем (по запомненному пути). На старте сканируем каталог и досылаем
-//   неотправленное - так жёсткий краш, убивший процесс до завершения HTTP, доедет позже.
-//   Кап очереди FASTLOGS_PENDING_MAX (старые сверх лимита отбрасываем).
-//   Файлы - сырой UTF-8 JSON (через те же буферные хелперы, что и лог).
+// Model: on auto-send triggered by a crash, first SYNCHRONOUSLY write the complete JSON
+//   payload body to a separate file in the pending directory (inside game_save_id), then
+//   attempt to send it. On success delete the file (by the remembered path). On startup
+//   scan the directory and resend anything unsent - so a hard crash that killed the process
+//   before the HTTP completed will be delivered on the next run.
+//   Queue cap: FASTLOGS_PENDING_MAX (oldest entries beyond the limit are discarded).
+//   Files are raw UTF-8 JSON (via the same buffer helpers as the log).
 // =====================================================================================
 
-// Каталог pending относительно game_save_id (как остальные пути рекордера).
+// Pending directory relative to game_save_id (same as other recorder paths).
 function __fastlogs_pending_dir() {
     return FASTLOGS_PERSIST_DIR + "/" + FASTLOGS_PENDING_DIR;
 }
 
-// Убедиться, что каталог pending существует (родительский + сам).
+// Ensure the pending directory exists (parent + itself).
 function __fastlogs_pending_ensure_dir() {
     __fastlogs_ensure_dir();                       // FASTLOGS_PERSIST_DIR
     var d = __fastlogs_pending_dir();
     if (!directory_exists(d)) directory_create(d);
 }
 
-// Список файлов pending (ОТНОСИТЕЛЬНЫЕ пути dir+"/"+name), отсортированных по имени.
-//   Имя файла начинается с zero-padded времени -> лексикографический порядок = хронологический.
+// List of pending files (RELATIVE paths dir+"/"+name), sorted by name.
+//   File names start with a zero-padded timestamp -> lexicographic order = chronological order.
 function __fastlogs_pending_list() {
     var out = [];
     var d = __fastlogs_pending_dir();
     if (!directory_exists(d)) return out;
-    // file_find_first(mask, attr): mask с путём; attr=0 -> только обычные файлы. Возвращает ИМЯ.
+    // file_find_first(mask, attr): mask includes path; attr=0 -> regular files only. Returns NAME.
     var fname = file_find_first(d + "/*.json", 0);
     while (fname != "") {
         if (fname != "." && fname != "..") array_push(out, d + "/" + fname);
         fname = file_find_next();
     }
     file_find_close();
-    array_sort(out, true);                          // по возрастанию имени (хронологически)
+    array_sort(out, true);                          // ascending by name (chronologically)
     return out;
 }
 
-// Применить кап очереди: удалить старейшие файлы сверх FASTLOGS_PENDING_MAX.
+// Enforce queue cap: delete the oldest files beyond FASTLOGS_PENDING_MAX.
 function __fastlogs_pending_enforce_cap() {
     var cap = max(1, FASTLOGS_PENDING_MAX);
-    var files = __fastlogs_pending_list();          // отсортированы: старые первыми
+    var files = __fastlogs_pending_list();          // sorted: oldest first
     var over = array_length(files) - cap;
     for (var i = 0; i < over; i++) {
         try { if (file_exists(files[i])) file_delete(files[i]); } catch (_e) { /* best-effort */ }
@@ -530,10 +531,10 @@ function __fastlogs_pending_enforce_cap() {
 }
 
 // =====================================================================================
-// fastlogs_pending_write(body_json) -> string (путь файла) | ""
-//   Синхронно записать готовое JSON-тело отчёта в очередь pending. Возвращает относительный
-//   путь созданного файла (для последующего удаления на успехе) или "" при неудаче/выкл.
-//   Имя: crash_<UTC-компактно>_<guid8>.json (сортируемое по времени).
+// fastlogs_pending_write(body_json) -> string (file path) | ""
+//   Synchronously write a ready JSON report body to the pending queue. Returns the relative
+//   path of the created file (for later deletion on success) or "" on failure/disabled.
+//   Name: crash_<UTC-compact>_<guid8>.json (time-sortable).
 // =====================================================================================
 function fastlogs_pending_write(body_json) {
     if (!FASTLOGS_ENABLED) return "";
@@ -544,7 +545,7 @@ function fastlogs_pending_write(body_json) {
     var path = "";
     try {
         __fastlogs_pending_ensure_dir();
-        // Компактная сортируемая метка времени из UTC ISO (убираем не-алфанумерику).
+        // Compact sortable timestamp from UTC ISO (strip non-alphanumeric characters).
         var ts = __fastlogs_utc_iso();
         ts = string_replace_all(ts, "-", "");
         ts = string_replace_all(ts, ":", "");
@@ -552,8 +553,8 @@ function fastlogs_pending_write(body_json) {
         ts = string_replace_all(ts, "Z", "");
         var guid8 = string_copy(__fastlogs_make_guid(), 1, 8);
         path = __fastlogs_pending_dir() + "/crash_" + ts + "_" + guid8 + ".json";
-        __fastlogs_write_text_file(path, body_json);   // сырой UTF-8 (как лог-файл)
-        // После добавления применим кап (отбросим старейшие сверх лимита).
+        __fastlogs_write_text_file(path, body_json);   // raw UTF-8 (same as the log file)
+        // After adding, enforce the cap (discard oldest beyond the limit).
         __fastlogs_pending_enforce_cap();
     } catch (_e) {
         rs.disk_ok = false;
@@ -564,7 +565,7 @@ function fastlogs_pending_write(body_json) {
 
 // =====================================================================================
 // fastlogs_pending_delete(path) -> void
-//   Удалить один pending-файл по запомненному пути (на успешной отправке этого отчёта).
+//   Delete one pending file by its remembered path (on successful delivery of that report).
 // =====================================================================================
 function fastlogs_pending_delete(path) {
     if (!FASTLOGS_ENABLED) return;
@@ -573,69 +574,69 @@ function fastlogs_pending_delete(path) {
 }
 
 // =====================================================================================
-// fastlogs_pending_drain_next([exclude_path]) -> bool (поставлена ли отправка ОДНОГО файла)
-//   Дренаж outbox ПО ОДНОМУ: найти старейший pending-файл (кроме exclude_path - только что
-//   отправленного, чтобы не переслать его повторно) и поставить ОДНУ его отправку. Уважает
-//   single-flight внутри fastlogs_pending_send (если занято/ждёт повтор - вернёт false, файл
-//   остаётся в очереди). Битые/пустые файлы по пути удаляет, чтобы не застревали.
-//   ЦЕПОЧКА: следующий файл запускает Async success-обработчик (Other_62) после завершения
-//   предыдущего - так за сессию дренируется несколько файлов, а не один (раньше resend_all в
-//   цикле упирался в single-flight, и все итерации кроме первой были no-op).
-//   Возврат: true если запрос поставлен (есть что досылать и слой свободен); иначе false.
+// fastlogs_pending_drain_next([exclude_path]) -> bool (whether a send of ONE file was queued)
+//   ONE-AT-A-TIME outbox drain: find the oldest pending file (except exclude_path - the one
+//   just sent, to avoid resending it) and queue ONE send for it. Respects single-flight inside
+//   fastlogs_pending_send (if busy/waiting for retry - returns false, file stays in queue).
+//   Corrupted/empty files are deleted along the way to prevent them from getting stuck.
+//   CHAIN: the next file is started by the Async success handler (Other_62) after the previous
+//   one finishes - so multiple files are drained per session, not just one (previously resend_all
+//   looped through fastlogs_pending_send but single-flight made all iterations except the first a no-op).
+//   Returns: true if a request was queued (something to resend and the layer is free); false otherwise.
 // =====================================================================================
 function fastlogs_pending_drain_next(exclude_path = "") {
     if (!FASTLOGS_ENABLED) return false;
     if (!script_exists(asset_get_index("fastlogs_pending_send"))) return false;
 
-    var files = __fastlogs_pending_list();          // старые первыми
+    var files = __fastlogs_pending_list();          // oldest first
     var ex = is_string(exclude_path) ? exclude_path : "";
 
     for (var i = 0; i < array_length(files); i++) {
         var fp = files[i];
-        if (fp == ex) continue;                     // не пересылаем только что отправленный
+        if (fp == ex) continue;                     // do not resend the one just sent
         var body = __fastlogs_read_text_file(fp);
         if (!is_string(body) || string_length(body) == 0) {
-            // Битый/пустой файл - удаляем, чтобы не застревал в очереди, и пробуем следующий.
+            // Corrupted/empty file - delete it so it doesn't get stuck in the queue, try the next one.
             fastlogs_pending_delete(fp);
             continue;
         }
-        // Одна отправка (http-слой удалит файл на успехе по этому пути). Single-flight внутри:
-        //   если сейчас занято/ждёт повтор - вернёт false, выходим (подхватится позже).
+        // One send (the http layer deletes the file on success using this path). Single-flight inside:
+        //   if currently busy/waiting for retry - returns false, we exit (will be picked up later).
         return fastlogs_pending_send(body, fp);
     }
-    return false;                                   // очередь пуста (или остались только битые)
+    return false;                                   // queue empty (or only corrupted files remain)
 }
 
 // =====================================================================================
-// fastlogs_pending_resend_all() -> bool (запущена ли первая отправка цепочки)
-//   ДРЕНАЖ НА СТАРТЕ (фича #1, бэкстоп). Вызывается из fastlogs_init на старте. Запускает ОДНУ
-//   первую отправку дренаж-цепочки; СЛЕДУЮЩИЕ файлы досылает Async success-обработчик (Other_62)
-//   по одному, пока в outbox есть файлы (в пределах FASTLOGS_PENDING_RESEND_PER_START за старт,
-//   см. ограничитель в Other_62). Так за сессию дренируется несколько, а не один.
-//   ПРЕЖДЕ: тут был цикл по fastlogs_pending_send, но single-flight (is_sending) делал все
-//   итерации кроме первой no-op - реально слался лишь один файл. Теперь явная цепочка.
-//   Каждый отчёт уже несёт готовое тело (timestampUtc/logText/counts/comment/tester/context/
-//   breadcrumbs), поэтому шлём его как есть. Зависит от fastlogs_pending_send(body, file_path).
+// fastlogs_pending_resend_all() -> bool (whether the first send in the chain was started)
+//   STARTUP DRAIN (feature #1, backstop). Called from fastlogs_init on startup. Starts ONE
+//   first send in the drain chain; SUBSEQUENT files are sent by the Async success handler (Other_62)
+//   one at a time as long as the outbox has files (within FASTLOGS_PENDING_RESEND_PER_START per start,
+//   see the gate in Other_62). This way multiple files are drained per session, not just one.
+//   PREVIOUSLY: there was a loop over fastlogs_pending_send, but single-flight (is_sending) made all
+//   iterations except the first a no-op - only one file was actually sent. Now an explicit chain.
+//   Each report already carries a complete body (timestampUtc/logText/counts/comment/tester/context/
+//   breadcrumbs), so we send it as-is. Depends on fastlogs_pending_send(body, file_path).
 // =====================================================================================
 function fastlogs_pending_resend_all() {
     if (!FASTLOGS_ENABLED) return false;
-    // FIX-1: пометить эту цепочку как СТАРТ-бэкстоп. Лимит FASTLOGS_PENDING_RESEND_PER_START
-    //   применяется в Other_62 ТОЛЬКО пока активна старт-цепочка (init_chain_active);
-    //   живой idle-дренаж (после неё) этим лимитом не гейтится. Сбрасываем счётчик старта.
+    // FIX-1: mark this chain as the STARTUP backstop. The FASTLOGS_PENDING_RESEND_PER_START limit
+    //   is applied in Other_62 ONLY while the startup chain is active (init_chain_active);
+    //   the live idle drain (after it) is not gated by this limit. Reset the startup counter.
     if (script_exists(asset_get_index("fastlogs_http_get_state"))) {
         var hs = fastlogs_http_get_state();
         hs.init_chain_active = true;
         hs.init_drain_count  = 0;
     }
-    // Старт цепочки: первый файл. Следующие подхватит Other_62 (success) через drain_next.
+    // Start the chain: first file. Other_62 (success) will pick up the rest via drain_next.
     var started = fastlogs_pending_drain_next("");
     if (!started) {
-        // Нечего слать (outbox пуст) или слой занят -> старт-цепочки фактически нет.
+        // Nothing to send (outbox empty) or layer busy -> startup chain effectively empty.
         if (script_exists(asset_get_index("fastlogs_http_get_state"))) {
             fastlogs_http_get_state().init_chain_active = false;
         }
     } else {
-        // Первый файл старт-цепочки поставлен -> учитываем его в PER_START-счётчике старта.
+        // First file of the startup chain queued -> count it in the PER_START counter.
         if (script_exists(asset_get_index("fastlogs_http_get_state"))) {
             fastlogs_http_get_state().init_drain_count += 1;
         }
@@ -645,13 +646,14 @@ function fastlogs_pending_resend_all() {
 
 // =====================================================================================
 // fastlogs_recorder_get_logtext() -> string
-//   Отдаёт текст логов для payload logText. Источник по приоритету:
-//     1) накопленный персист rec_text (прошлые + текущая сессия), если он непустой -
-//        это главный источник, т.к. содержит историю между сессиями;
-//     2) иначе - снимок текущего кольца в памяти (когда запись ни разу не включалась).
-//   Усечение по FASTLOGS_MAX_LOG_BYTES делает payload-билдер (контракт), но на всякий случай
-//   тут НЕ режем - отдаём полный накопленный текст, payload усечёт с пометкой.
-//   logEncoding в payload остаётся "plain" (FASTLOGS_LOG_ENCODING) - текст не сжимаем.
+//   Returns the log text for the payload logText field. Priority source:
+//     1) accumulated persist rec_text (previous + current session), if non-empty -
+//        this is the primary source as it contains the cross-session history;
+//     2) otherwise - a snapshot of the current in-memory ring (when recording was never enabled).
+//   Truncation to FASTLOGS_MAX_LOG_BYTES is done by the payload builder (contract), so we
+//   intentionally do NOT truncate here - return the full accumulated text; the payload will
+//   truncate with a marker.
+//   logEncoding in the payload stays "plain" (FASTLOGS_LOG_ENCODING) - text is not compressed.
 // =====================================================================================
 function fastlogs_recorder_get_logtext() {
     if (!FASTLOGS_ENABLED) return "";
@@ -659,8 +661,8 @@ function fastlogs_recorder_get_logtext() {
     if (string_length(rs.rec_text) > 0) {
         return rs.rec_text;
     }
-    // Фолбэк: запись не велась - собрать из кольца в памяти.
-    var snap = fastlogs_ring_snapshot();   // из core
+    // Fallback: recording was never active - build from the in-memory ring.
+    var snap = fastlogs_ring_snapshot();   // from core
     var out = "";
     for (var i = 0; i < array_length(snap); i++) {
         out += __fastlogs_format_record(snap[i]) + "\n";

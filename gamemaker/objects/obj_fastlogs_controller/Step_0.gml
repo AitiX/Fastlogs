@@ -1,12 +1,12 @@
 /// @description FastLogs controller - Step
-// Опрос ввода (hotkey/геймпад/тач/мышь -> toggle оверлея / быстрая отправка, заполнение
-//   указателя для кликов). Клики по зонам оверлея/тоста потребляются в Draw GUI (Draw_64).
-// ПЕРФ (D): здесь же дешёвый тик батч-флаша записи на диск (по таймеру, без аллокаций когда пусто).
+// Input poll (hotkey/gamepad/touch/mouse -> overlay toggle / quick send, pointer fill
+//   for clicks). Clicks on overlay/toast zones are consumed in Draw GUI (Draw_64).
+// PERF (D): cheap batch-flush tick for writing to disk also happens here (timer-based, no allocations when empty).
 if (!FASTLOGS_ENABLED) { exit; }
 
-// Единый опрос ввода. Заполняет global.__fastlogs_ui.px/py/pressed и обрабатывает хоткеи/жесты.
+// Unified input poll. Fills global.__fastlogs_ui.px/py/pressed and handles hotkeys/gestures.
 if (script_exists(asset_get_index("fastlogs_input_poll"))) fastlogs_input_poll();
 
-// ПЕРФ (D): сбросить накопленный батч записи на диск, если подошёл интервал таймера.
-//   Дёшево: ранний выход внутри, когда батч пуст (никакого file IO/аллокаций в кадре).
+// PERF (D): flush the accumulated write batch to disk if the timer interval has elapsed.
+//   Cheap: early exit inside when the batch is empty (no file IO/allocations in frame).
 if (script_exists(asset_get_index("fastlogs_recorder_tick"))) fastlogs_recorder_tick();

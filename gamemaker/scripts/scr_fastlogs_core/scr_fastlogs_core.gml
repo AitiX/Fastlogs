@@ -1,70 +1,70 @@
 /// @description scr_fastlogs_core
-// FastLogs GameMaker client - ЯДРО.
-// Реализует: константы уровней, состояние (global.__fastlogs), fastlogs_init,
-//   flog/fastlogs_log/warn/error, кольцевой буфер, счётчики сессии, fastlogs_clear,
-//   fastlogs_get_counts, fastlogs_set_screenshot (флаг), регистрацию exception handler.
-// Всё под FASTLOGS_ENABLED: при !FASTLOGS_ENABLED публичные точки делают ранний выход (no-op),
-//   геттеры возвращают безопасные дефолты.
-// Состояние хранится в ОДНОМ глобальном struct global.__fastlogs (а не в instance-переменных
-//   контроллера) - так публичные функции вызываются из любого контекста без with/instance_find.
-//   Контроллер obj_fastlogs_controller лишь обслуживает события (Step/Draw/Async).
-// Сверять GML-API по GM-NOTES.md / актуальной документации; неуверенное помечать // TODO verify.
+// FastLogs GameMaker client - CORE.
+// Implements: level constants, state (global.__fastlogs), fastlogs_init,
+//   flog/fastlogs_log/warn/error, ring buffer, session counters, fastlogs_clear,
+//   fastlogs_get_counts, fastlogs_set_screenshot (flag), exception handler registration.
+// Everything gated on FASTLOGS_ENABLED: when !FASTLOGS_ENABLED public entry points do an early return (no-op),
+//   getters return safe defaults.
+// State is stored in ONE global struct global.__fastlogs (not in instance variables
+//   of the controller) - so public functions can be called from any context without with/instance_find.
+//   The controller obj_fastlogs_controller only handles events (Step/Draw/Async).
+// Cross-reference GML API against GM-NOTES.md / current documentation; mark uncertain things as // TODO verify.
 
 // =====================================================================================
-// Константы уровней (контракт PUBLIC-API). Заводим как макросы тут (config их не задаёт).
+// Level constants (PUBLIC-API contract). Defined as macros here (config does not set them).
 // =====================================================================================
 #macro FASTLOGS_LEVEL_LOG   0
 #macro FASTLOGS_LEVEL_WARN  1
 #macro FASTLOGS_LEVEL_ERROR 2
 
 // =====================================================================================
-// Внутреннее: лениво создать и вернуть глобальное состояние.
-// Безопасно к вызову до fastlogs_init (ленивая инициализация), чтобы интегратор не падал
-//   на порядке вызовов. Не делает гейтинг сам - вызывающий уже проверил FASTLOGS_ENABLED.
+// Internal: lazily create and return the global state.
+// Safe to call before fastlogs_init (lazy initialization), so the integrator does not crash
+//   on call order. Does not do its own gating - the caller has already checked FASTLOGS_ENABLED.
 // =====================================================================================
 function __fastlogs_state() {
     if (!variable_global_exists("__fastlogs") || !is_struct(global.__fastlogs)) {
         var ring_size = max(1, FASTLOGS_RING_SIZE);
         global.__fastlogs = {
-            inited       : false,           // прошёл ли fastlogs_init
-            // Кольцевой буфер записей лога. Каждый элемент: { time, level, text } или undefined.
+            inited       : false,           // whether fastlogs_init has run
+            // Ring buffer of log entries. Each element: { time, level, text } or undefined.
             ring         : array_create(ring_size, undefined),
             ring_size    : ring_size,
-            head         : 0,               // индекс следующей записи (куда писать)
-            count        : 0,               // сколько валидных записей (<= ring_size)
-            // Счётчики ЗА СЕССИЮ (не в пределах кольца) - идут в payload counts.
+            head         : 0,               // index of the next entry (write position)
+            count        : 0,               // number of valid entries (<= ring_size)
+            // PER-SESSION counters (not scoped to the ring) - go into payload counts.
             cnt_error    : 0,
             cnt_warn     : 0,
             cnt_log      : 0,
-            // Флаги, общие для модулей.
-            recording    : false,           // фактическое состояние записи (управляет recorder)
-            screenshot   : FASTLOGS_SCREENSHOT_DEFAULT, // включать ли скриншот в след. payload
-            // Рантайм-оверрайды из fastlogs_init(config) (перекрывают макросы config).
+            // Flags shared across modules.
+            recording    : false,           // actual recording state (managed by recorder)
+            screenshot   : FASTLOGS_SCREENSHOT_DEFAULT, // whether to include a screenshot in the next payload
+            // Runtime overrides from fastlogs_init(config) (override config macros).
             cfg          : {},
-            // ЗАХВАТ КРАША (всегда персистим в outbox ДО guard'ов доставки). Дедуп ЗАХВАТА
-            //   ОТДЕЛЬНЫЙ от дедупа доставки: чтобы цикл одинаковых крашей не заспамил файлы,
-            //   но при этом захват не зависел от троттла/капа/занятости отправки.
-            capture_last_sig   : "",   // сигнатура последнего ЗАХВАЧЕННОГО (записанного на диск) стека
-            capture_last_us    : -1,   // get_timer() последнего захвата (мкс), -1 = не было; окно = троттл
-            // ДОСТАВКА (немедленная авто-отправка по крашу, C): дедуп/троттл/лимит сессии.
-            //   Влияет ТОЛЬКО на немедленный аплоад, НЕ на захват.
-            //   FIX-3 (паритет с Unity): дедуп доставки теперь ОКОННЫЙ, а не «навсегда за сессию».
-            //   autosend_last_sent_us - карта sig -> get_timer() последней ДОСТАВКИ этого стека (мкс).
-            //   Тот же стек подавляется, только если его последняя доставка была МЕНЕЕ окна
-            //   minGap*2 назад (FASTLOGS_AUTOSEND_SUPPRESS_WINDOW_SECONDS); позже окна - доставим снова.
-            autosend_last_sent_us : {},   // sig -> us последней авто-ДОСТАВКИ (оконный дедуп доставки)
-            autosend_last_us   : -1,   // get_timer() последней авто-ОТПРАВКИ (мкс), -1 = не было
-            autosend_count     : 0,    // сколько авто-отправок сделано за сессию (лимит)
-            // Поля recorder/http заполняют свои подсостояния лениво в своих модулях.
+            // CRASH CAPTURE (always persist to outbox BEFORE delivery guards). Capture dedup is
+            //   SEPARATE from delivery dedup: so a crash loop does not spam files, but capture
+            //   does not depend on throttle/cap/sender busy state.
+            capture_last_sig   : "",   // signature of the last CAPTURED (written to disk) stack
+            capture_last_us    : -1,   // get_timer() of last capture (us), -1 = none; window = throttle
+            // DELIVERY (immediate auto-send on crash, C): dedup/throttle/session limit.
+            //   Affects ONLY immediate upload, NOT capture.
+            //   FIX-3 (parity with Unity): delivery dedup is now WINDOWED, not "forever per session".
+            //   autosend_last_sent_us - map of sig -> get_timer() of last DELIVERY of that stack (us).
+            //   The same stack is suppressed only if its last delivery was LESS than the window
+            //   minGap*2 ago (FASTLOGS_AUTOSEND_SUPPRESS_WINDOW_SECONDS); after the window - deliver again.
+            autosend_last_sent_us : {},   // sig -> us of last auto-DELIVERY (windowed delivery dedup)
+            autosend_last_us   : -1,   // get_timer() of last auto-SEND (us), -1 = none
+            autosend_count     : 0,    // number of auto-sends done this session (limit)
+            // recorder/http fields populate their sub-states lazily in their own modules.
         };
     }
     return global.__fastlogs;
 }
 
 // =====================================================================================
-// Внутреннее: получить эффективное значение настройки.
-// Сначала смотрит рантайм-оверрайд из fastlogs_init(config), иначе возвращает default_value
-//   (обычно соответствующий FASTLOGS_* макрос подставляет вызывающий).
+// Internal: get the effective value of a setting.
+// Checks the runtime override from fastlogs_init(config) first, otherwise returns default_value
+//   (normally the caller passes the corresponding FASTLOGS_* macro).
 // =====================================================================================
 function __fastlogs_cfg(key, default_value) {
     var st = __fastlogs_state();
@@ -76,17 +76,17 @@ function __fastlogs_cfg(key, default_value) {
 }
 
 // =====================================================================================
-// fastlogs_init([config_struct]) - идемпотентная инициализация.
-// Создаёт persistent obj_fastlogs_controller (если ещё нет), инициализирует состояние,
-//   подгружает персист прошлых сессий, регистрирует exception_unhandled_handler.
-// Возврат: instance id контроллера, либо noone при !FASTLOGS_ENABLED.
+// fastlogs_init([config_struct]) - idempotent initialization.
+// Creates a persistent obj_fastlogs_controller (if not already present), initializes state,
+//   loads persisted data from previous sessions, registers exception_unhandled_handler.
+// Returns: controller instance id, or noone when !FASTLOGS_ENABLED.
 // =====================================================================================
 function fastlogs_init(config_struct = undefined) {
     if (!FASTLOGS_ENABLED) return noone;
 
     var st = __fastlogs_state();
 
-    // Слить переданный конфиг (мягко: только заданные поля).
+    // Merge the provided config (soft: only the fields that are set).
     if (is_struct(config_struct)) {
         var keys = variable_struct_get_names(config_struct);
         for (var i = 0; i < array_length(keys); i++) {
@@ -95,44 +95,44 @@ function fastlogs_init(config_struct = undefined) {
         }
     }
 
-    // Создать контроллер один раз. object_index гарантирует один экземпляр-обработчик.
+    // Create the controller once. object_index guarantees a single handler instance.
     if (!instance_exists(obj_fastlogs_controller)) {
-        // depth не важен (нет Draw в мире); persistent задан в .yy.
+        // depth does not matter (no Draw in world); persistent is set in .yy.
         instance_create_depth(0, 0, 0, obj_fastlogs_controller);
     }
 
     if (!st.inited) {
         st.inited = true;
 
-        // Применить автостарт записи (учитывая рантайм-оверрайд autoStartRecording).
+        // Apply auto-start recording (respecting the autoStartRecording runtime override).
         var auto_rec = __fastlogs_cfg("autoStartRecording", FASTLOGS_AUTO_START_RECORDING);
 
-        // Подгрузить персист прошлых сессий и восстановить флаг записи (если так настроено).
-        // Реализация в scr_fastlogs_recorder; безопасна к вызову (внутри сама гейтится).
+        // Load persisted data from previous sessions and restore the recording flag (if configured).
+        // Implementation in scr_fastlogs_recorder; safe to call (internally self-gated).
         fastlogs_recorder_load_persisted();
 
-        // Применить скриншот-дефолт из конфига, если задан.
+        // Apply screenshot default from config, if set.
         st.screenshot = __fastlogs_cfg("screenshot", FASTLOGS_SCREENSHOT_DEFAULT);
 
         if (auto_rec) {
             fastlogs_record_set(true);
         }
 
-        // ПЕРСИСТ КРАШ-ОТЧЁТА (фича #1): просканировать дисковую очередь pending и ДОСЛАТЬ
-        //   неотправленные краш-отчёты прошлых сессий (так жёсткий краш доедет на этом запуске).
-        //   Не блокирует поток надолго: за старт досылается не более FASTLOGS_PENDING_RESEND_PER_START,
-        //   single-flight -> реально стартует одна отправка, остальные подхватятся позже. best-effort.
+        // CRASH REPORT PERSIST (feature #1): scan the pending disk queue and RE-SEND
+        //   unsent crash reports from previous sessions (so a hard crash gets delivered on this launch).
+        //   Does not block the thread for long: at most FASTLOGS_PENDING_RESEND_PER_START resends are
+        //   started at launch; single-flight -> only one send actually starts, others are picked up later. best-effort.
         try {
             if (script_exists(asset_get_index("fastlogs_pending_resend_all"))) {
                 fastlogs_pending_resend_all();
             }
-        } catch (_ep) { /* проглатываем: досыл не должен мешать старту */ }
+        } catch (_ep) { /* swallow: resend must not interfere with startup */ }
 
-        // Регистрация перехвата необработанных исключений (best-effort: персист на диск,
-        //   попытка отправки; игра всё равно закроется после колбэка - см. GM-NOTES 2.4).
+        // Register unhandled exception capture (best-effort: persist to disk,
+        //   attempt to send; the game will close after the callback anyway - see GM-NOTES 2.4).
         if (FASTLOGS_AUTOSEND_ON_EXCEPTION) {
-            // exception_unhandled_handler принимает method/function; колбэк получает
-            //   exception struct { message, longMessage, script, stacktrace }. ПОДТВЕРЖДЕНО.
+            // exception_unhandled_handler accepts a method/function; the callback receives an
+            //   exception struct { message, longMessage, script, stacktrace }. CONFIRMED.
             exception_unhandled_handler(__fastlogs_on_unhandled_exception);
         }
     }
@@ -141,9 +141,9 @@ function fastlogs_init(config_struct = undefined) {
 }
 
 // =====================================================================================
-// Внутреннее: сигнатура исключения для ДЕДУПА (C). Берём script + первые кадры стектрейса
-//   (не само сообщение - оно может содержать переменные значения), хешируем в стабильный ключ.
-//   md5-hex используем как ключ set'а; префикс 's' -> гарантированно валидное имя поля структа.
+// Internal: exception signature for DEDUP (C). Takes script + first few frames of the stack trace
+//   (not the message itself - it may contain variable values), hashes to a stable key.
+//   md5-hex used as set key; prefix 's' -> guaranteed valid struct field name.
 // =====================================================================================
 function __fastlogs_exception_signature(ex) {
     var sig = "";
@@ -152,10 +152,10 @@ function __fastlogs_exception_signature(ex) {
             if (variable_struct_exists(ex, "script")) sig += string(ex.script);
             if (variable_struct_exists(ex, "stacktrace") && is_array(ex.stacktrace)) {
                 var stk = ex.stacktrace;
-                var lim = min(array_length(stk), 8);   // первых нескольких кадров достаточно
+                var lim = min(array_length(stk), 8);   // a few frames is enough
                 for (var i = 0; i < lim; i++) sig += "|" + string(stk[i]);
             }
-            // Если ни script, ни stacktrace недоступны - падаём на message (грубее, но что есть).
+            // If neither script nor stacktrace is available - fall back to message (coarser, but it's what we have).
             if (sig == "" && variable_struct_exists(ex, "message")) sig += string(ex.message);
         } else {
             sig = string(ex);
@@ -168,17 +168,17 @@ function __fastlogs_exception_signature(ex) {
 }
 
 // =====================================================================================
-// Внутреннее: нужно ли ЗАХВАТИТЬ (персистить в outbox) этот краш? Дедуп ЗАХВАТА отдельный от
-//   дедупа доставки: если ТОТ ЖЕ стек уже захвачен в пределах окна троттла (minGap), новый файл
-//   НЕ пишем (чтобы цикл крашей не заспамил outbox). Иначе - захватываем (и фиксируем состояние).
-//   Окно = FASTLOGS_AUTOSEND_THROTTLE_SECONDS (как у доставки). Возвращает bool (true -> писать файл).
-//   ВАЖНО: это НЕ зависит от капа/занятости/лимита сессии - только от собственного окна дедупа.
+// Internal: should we CAPTURE (persist to outbox) this crash? Capture dedup is separate from
+//   delivery dedup: if THE SAME stack was already captured within the throttle window (minGap), a new
+//   file is NOT written (to prevent a crash loop from spamming the outbox). Otherwise - capture (and record state).
+//   Window = FASTLOGS_AUTOSEND_THROTTLE_SECONDS (same as delivery). Returns bool (true -> write file).
+//   IMPORTANT: this does NOT depend on cap/busy/session limit - only on its own capture dedup window.
 // =====================================================================================
 function __fastlogs_capture_allowed(sig) {
     var st = __fastlogs_state();
     var now_us = get_timer();
-    var win = FASTLOGS_AUTOSEND_THROTTLE_SECONDS;   // окно дедупа захвата = троттл
-    // Тот же стек в пределах окна -> пропускаем повторный захват (дедуп захвата).
+    var win = FASTLOGS_AUTOSEND_THROTTLE_SECONDS;   // capture dedup window = throttle
+    // Same stack within window -> skip duplicate capture (capture dedup).
     if (FASTLOGS_AUTOSEND_DEDUP
         && is_string(st.capture_last_sig) && st.capture_last_sig != ""
         && st.capture_last_sig == sig
@@ -187,29 +187,29 @@ function __fastlogs_capture_allowed(sig) {
         && (now_us - st.capture_last_us) < win * 1000000) {
         return false;
     }
-    // Разрешаем захват -> фиксируем состояние ОТДЕЛЬНОГО дедупа захвата.
+    // Allow capture -> record state of SEPARATE capture dedup.
     st.capture_last_sig = sig;
     st.capture_last_us  = now_us;
     return true;
 }
 
 // =====================================================================================
-// Внутреннее: можно ли сейчас НЕМЕДЛЕННО авто-ОТПРАВИТЬ (доставить) этот краш? Применяет лимит
-//   сессии, троттл по времени и дедуп ДОСТАВКИ по сигнатуре. Возвращает { allowed, reason }. При
-//   allowed=true помечает сигнатуру как отправленную, инкрементит счётчик и обновляет метку
-//   времени (фиксация состояния доставки тут). НЕ влияет на захват - захват уже сделан выше.
+// Internal: can we immediately auto-SEND (deliver) this crash right now? Applies session limit,
+//   time throttle, and DELIVERY dedup by signature. Returns { allowed, reason }. When
+//   allowed=true marks the signature as sent, increments the counter, and updates the timestamp
+//   (delivery state is recorded here). Does NOT affect capture - capture is already done above.
 // =====================================================================================
 function __fastlogs_autosend_allowed(sig) {
     var st = __fastlogs_state();
     var now_us = get_timer();
 
-    // Лимит на сессию (канон Unity = 10, см. FASTLOGS_AUTOSEND_SESSION_LIMIT).
+    // Per-session limit (Unity canon = 10, see FASTLOGS_AUTOSEND_SESSION_LIMIT).
     if (st.autosend_count >= max(0, FASTLOGS_AUTOSEND_SESSION_LIMIT)) {
         return { allowed: false, reason: "session limit" };
     }
-    // ДЕДУП ДОСТАВКИ ОКОННЫЙ (FIX-3, паритет с Unity): подавляем тот же стек, только если его
-    //   последняя ДОСТАВКА была МЕНЕЕ окна minGap*2 назад. Раньше окна повтор подавлялся;
-    //   позже окна - доставляем снова (раньше было «навсегда за сессию» -> глушило до перезапуска).
+    // WINDOWED DELIVERY DEDUP (FIX-3, parity with Unity): suppress the same stack only if its
+    //   last DELIVERY was LESS than the minGap*2 window ago. Before the window repeat was suppressed;
+    //   after the window - deliver again (previously it was "forever per session" -> silenced until restart).
     if (FASTLOGS_AUTOSEND_DEDUP && is_struct(st.autosend_last_sent_us)
         && variable_struct_exists(st.autosend_last_sent_us, sig)) {
         var last_sent = variable_struct_get(st.autosend_last_sent_us, sig);
@@ -220,14 +220,14 @@ function __fastlogs_autosend_allowed(sig) {
             return { allowed: false, reason: "dedup (same stack within window)" };
         }
     }
-    // Троттл по времени (любой стек).
+    // Time throttle (any stack).
     var thr = FASTLOGS_AUTOSEND_THROTTLE_SECONDS;
     if (is_real(thr) && thr > 0 && st.autosend_last_us >= 0) {
         if ((now_us - st.autosend_last_us) < thr * 1000000) {
             return { allowed: false, reason: "throttled" };
         }
     }
-    // Разрешено -> зафиксировать состояние ОКОННОГО дедупа (метка времени доставки этого стека).
+    // Allowed -> record WINDOWED dedup state (delivery timestamp for this stack).
     if (FASTLOGS_AUTOSEND_DEDUP) variable_struct_set(st.autosend_last_sent_us, sig, now_us);
     st.autosend_last_us = now_us;
     st.autosend_count  += 1;
@@ -235,36 +235,36 @@ function __fastlogs_autosend_allowed(sig) {
 }
 
 // =====================================================================================
-// Внутреннее (FIX-2): МИНИМАЛЬНЫЙ фолбэк-захват краша, НЕ зависящий от fastlogs_build_payload.
-//   Зовётся в крэш-колбэке, ТОЛЬКО если основной билдер (fastlogs_build_payload_json) вернул ""
-//   (упал внутри сбора device/context/screenshot и т.п.). Собирает минимальное контрактное тело
-//   напрямую из доступного, чтобы краш НЕ терялся, даже когда билдер недоступен.
-//   Источники: appId/appVersion/platform/timestampUtc/counts/logText/logEncoding (+ title/comment/
-//   tester если есть). logText = накопленный текст recorder/кольца, если он есть; иначе -
-//   message+stacktrace самого исключения ex. Всё текстовое прогоняем через fastlogs_redact
-//   (как обычный путь). Если МИНИМУМА нет (пустой endpoint ИЛИ пустой appId - слать некуда/нечем
-//   идентифицировать) - честно возвращаем "" (ничего не пишем). best-effort, не кидаем наружу.
-//   GML-функции для сверки по Manual: json_stringify, get_timer/date_*, asset_get_index/script_exists.
+// Internal (FIX-2): MINIMAL fallback crash capture, NOT depending on fastlogs_build_payload.
+//   Called in the crash callback ONLY if the main builder (fastlogs_build_payload_json) returned ""
+//   (crashed internally while collecting device/context/screenshot etc.). Builds a minimal contract body
+//   directly from what is available, so the crash is NOT lost even when the builder is unavailable.
+//   Sources: appId/appVersion/platform/timestampUtc/counts/logText/logEncoding (+ title/comment/
+//   tester if present). logText = accumulated text from recorder/ring if available; otherwise -
+//   message+stacktrace of the exception itself. All text is run through fastlogs_redact
+//   (same as the normal path). If the minimum is absent (empty endpoint OR empty appId - nowhere to
+//   send / nothing to identify with) - honestly returns "" (nothing written). best-effort, does not throw.
+//   GML functions to verify against Manual: json_stringify, get_timer/date_*, asset_get_index/script_exists.
 // =====================================================================================
 function __fastlogs_build_fallback_crash_json(ex, opts = undefined) {
     if (!FASTLOGS_ENABLED) { return ""; }
     if (!is_struct(opts)) { opts = {}; }
 
-    // Гейт минимума: endpoint (куда слать) + appId (чем идентифицировать). Источник - макросы,
-    //   как у happy-path (fastlogs_build_payload + http-слой шлют на FASTLOGS_ENDPOINT/FASTLOGS_APP_ID),
-    //   чтобы гейт фолбэка совпадал с реальной отправкой (иначе мог бы пройти на cfg, а send упасть).
+    // Minimum gate: endpoint (where to send) + appId (how to identify). Source - macros,
+    //   same as the happy-path (fastlogs_build_payload + http layer send to FASTLOGS_ENDPOINT/FASTLOGS_APP_ID),
+    //   so the fallback gate matches the actual send (otherwise it could pass on cfg but fail on send).
     var endpoint = FASTLOGS_ENDPOINT;
     var app_id   = FASTLOGS_APP_ID;
-    if (!is_string(endpoint) || string_length(endpoint) == 0) { return ""; }   // некуда слать
-    if (!is_string(app_id)   || string_length(app_id)   == 0) { return ""; }   // нечем идентифицировать
+    if (!is_string(endpoint) || string_length(endpoint) == 0) { return ""; }   // nowhere to send
+    if (!is_string(app_id)   || string_length(app_id)   == 0) { return ""; }   // nothing to identify with
 
-    // appVersion: макрос -> GM_version (как в payload-билдере).
+    // appVersion: macro -> GM_version (same as in payload builder).
     var app_version = FASTLOGS_APP_VERSION;
     if (!is_string(app_version) || string_length(app_version) == 0) {
         app_version = string(GM_version);
     }
 
-    // platform: используем тот же маппер, что и билдер; если недоступен - безопасный "Other".
+    // platform: use the same mapper as the builder; if unavailable - safe "Other".
     var platform = "Other";
     try {
         if (script_exists(asset_get_index("fastlogs_platform_string"))) {
@@ -273,7 +273,7 @@ function __fastlogs_build_fallback_crash_json(ex, opts = undefined) {
     } catch (_ep) { platform = "Other"; }
     if (!is_string(platform) || string_length(platform) == 0) { platform = "Other"; }
 
-    // timestampUtc = сейчас (UTC ISO). __fastlogs_utc_iso - в recorder; фолбэк, если недоступен.
+    // timestampUtc = now (UTC ISO). __fastlogs_utc_iso - in recorder; fallback if unavailable.
     var ts_utc = "";
     try {
         if (script_exists(asset_get_index("__fastlogs_utc_iso"))) {
@@ -281,7 +281,7 @@ function __fastlogs_build_fallback_crash_json(ex, opts = undefined) {
         }
     } catch (_et) { ts_utc = ""; }
     if (!is_string(ts_utc) || string_length(ts_utc) == 0) {
-        // Грубый фолбэк формата UTC ISO без зависимостей recorder.
+        // Rough UTC ISO fallback without recorder dependencies.
         var prevtz = date_get_timezone();
         date_set_timezone(timezone_utc);
         var dt = date_current_datetime();
@@ -291,7 +291,7 @@ function __fastlogs_build_fallback_crash_json(ex, opts = undefined) {
         date_set_timezone(prevtz);
     }
 
-    // counts: то, что есть за сессию.
+    // counts: whatever is available for this session.
     var counts = { error: 0, warn: 0, log: 0 };
     try {
         var c = fastlogs_get_counts();
@@ -300,9 +300,9 @@ function __fastlogs_build_fallback_crash_json(ex, opts = undefined) {
             counts.warn  = is_real(c.warn)  ? c.warn  : 0;
             counts.log   = is_real(c.log)   ? c.log   : 0;
         }
-    } catch (_ecn) { /* нули */ }
+    } catch (_ecn) { /* zeros */ }
 
-    // logText: сырой текст recorder/кольца, если есть; иначе message+stacktrace исключения.
+    // logText: raw text from recorder/ring if available; otherwise message+stacktrace of the exception.
     var log_text = "";
     try {
         if (script_exists(asset_get_index("fastlogs_recorder_get_logtext"))) {
@@ -311,7 +311,7 @@ function __fastlogs_build_fallback_crash_json(ex, opts = undefined) {
     } catch (_elt) { log_text = ""; }
     if (!is_string(log_text)) { log_text = ""; }
     if (string_length(log_text) == 0) {
-        // Нет накопленного лога -> собираем минимум из самого исключения.
+        // No accumulated log -> build minimum from the exception itself.
         var em = "UNHANDLED EXCEPTION";
         try {
             if (is_struct(ex)) {
@@ -329,7 +329,7 @@ function __fastlogs_build_fallback_crash_json(ex, opts = undefined) {
         } catch (_eem) { em = "UNHANDLED EXCEPTION"; }
         log_text = em;
     }
-    // Усечение по лимиту (как в билдере), если хелпер доступен; иначе шлём как есть.
+    // Truncate to limit (same as in builder) if helper is available; otherwise send as-is.
     try {
         if (script_exists(asset_get_index("fastlogs_truncate_log"))) {
             var cut = fastlogs_truncate_log(log_text, FASTLOGS_MAX_LOG_BYTES);
@@ -340,16 +340,16 @@ function __fastlogs_build_fallback_crash_json(ex, opts = undefined) {
                 }
             }
         }
-    } catch (_ecut) { /* без усечения */ }
+    } catch (_ecut) { /* no truncation */ }
 
-    // REDACTION (как обычный путь): logText прогоняем через fastlogs_redact (сам гейтится по SCRUB_PII).
+    // REDACTION (same as normal path): run logText through fastlogs_redact (self-gated by SCRUB_PII).
     try {
         if (script_exists(asset_get_index("fastlogs_redact"))) {
             log_text = fastlogs_redact(log_text);
         }
-    } catch (_er) { /* оставляем как есть */ }
+    } catch (_er) { /* leave as-is */ }
 
-    // --- сборка минимального контрактного тела (порядок/поля как у билдера) ---
+    // --- build minimal contract body (field order/fields same as builder) ---
     var body = {};
     body.appId        = app_id;
     body.platform     = platform;
@@ -358,14 +358,14 @@ function __fastlogs_build_fallback_crash_json(ex, opts = undefined) {
     body.counts       = counts;
     body.logText      = log_text;
     body.logEncoding  = FASTLOGS_LOG_ENCODING;
-    // device ОБЯЗАТЕЛЕН по контракту (сервер: 400 bad_request "device must be an object",
-    //   см. server/src/routes/ingest.js). Полный сбор device мог упасть (это и привело в
-    //   фолбэк), поэтому шлём пустой объект {} - валиден по контракту (паритет с Unity, где
-    //   MiniJson.WriteDevice всегда пишет device:{}). Без этого поля фолбэк-файл получил бы
-    //   4xx -> poison-pill -> краш ПОТЕРЯН (то самое, что FIX-2 должен предотвратить).
+    // device is REQUIRED by contract (server: 400 bad_request "device must be an object",
+    //   see server/src/routes/ingest.js). Full device collection may have crashed (which is why
+    //   we are in the fallback), so we send an empty object {} - valid per contract (parity with Unity where
+    //   MiniJson.WriteDevice always writes device:{}). Without this field the fallback file would get
+    //   a 4xx -> poison-pill -> crash LOST (exactly what FIX-2 is meant to prevent).
     body.device       = {};
 
-    // title (опц., <=120) - из crash_opts.
+    // title (optional, <=120) - from crash_opts.
     if (variable_struct_exists(opts, "title")) {
         var t = opts.title;
         if (is_string(t) && string_length(t) > 0) {
@@ -374,7 +374,7 @@ function __fastlogs_build_fallback_crash_json(ex, opts = undefined) {
         }
     }
 
-    // comment (опц., <=4000) - из opts или runtime cfg; чистим redaction.
+    // comment (optional, <=4000) - from opts or runtime cfg; run through redaction.
     var comment = variable_struct_exists(opts, "comment") ? opts.comment : __fastlogs_cfg("comment", "");
     if (is_string(comment) && string_length(comment) > 0) {
         if (string_length(comment) > 4000) { comment = string_copy(comment, 1, 4000); }
@@ -382,7 +382,7 @@ function __fastlogs_build_fallback_crash_json(ex, opts = undefined) {
         if (is_string(comment) && string_length(comment) > 0) { body.comment = comment; }
     }
 
-    // tester (опц., <=120) - cfg -> макрос; чистим redaction (как защита, обычно имя).
+    // tester (optional, <=120) - cfg -> macro; run through redaction (as protection, usually a name).
     var tester = __fastlogs_cfg("tester", FASTLOGS_TESTER);
     if (is_string(tester) && string_length(tester) > 0) {
         if (string_length(tester) > 120) { tester = string_copy(tester, 1, 120); }
@@ -394,14 +394,14 @@ function __fastlogs_build_fallback_crash_json(ex, opts = undefined) {
 }
 
 // =====================================================================================
-// Внутреннее: колбэк необработанного исключения (фича AUTO-SEND, C).
-// Пишет ошибку в лог (с гарантированным флашем на диск через recorder), затем АВТО-отправка
-//   с дедупом по стеку + троттлингом + лимитом сессии (повторяющееся исключение не спамит).
-//   Async-отправка может не успеть до закрытия игры -> главное персист на диск, реальная
-//   отправка добьётся на следующем запуске (накопленный logText). Если игра жива - тост.
+// Internal: unhandled exception callback (feature AUTO-SEND, C).
+// Writes the error to the log (with guaranteed flush to disk via recorder), then AUTO-sends
+//   with stack dedup + throttling + session limit (a repeating exception does not spam).
+//   Async send may not complete before the game closes -> the main goal is disk persistence,
+//   the actual send will complete on the next launch (accumulated logText). If the game survives - toast.
 // =====================================================================================
 function __fastlogs_on_unhandled_exception(ex) {
-    // Не полагаемся на FASTLOGS_ENABLED тут - handler регистрируется только когда включено.
+    // Do not rely on FASTLOGS_ENABLED here - the handler is only registered when enabled.
     var msg = "UNHANDLED EXCEPTION";
     try {
         if (is_struct(ex)) {
@@ -409,7 +409,7 @@ function __fastlogs_on_unhandled_exception(ex) {
             if (m == "" && variable_struct_exists(ex, "message")) m = string(ex.message);
             var sc = variable_struct_exists(ex, "script") ? string(ex.script) : "";
             msg = "UNHANDLED EXCEPTION: " + m + (sc != "" ? (" @ " + sc) : "");
-            // Стектрейс - массив строк; добавим отдельными записями.
+            // Stacktrace - array of strings; append as separate entries.
             if (variable_struct_exists(ex, "stacktrace") && is_array(ex.stacktrace)) {
                 var stk = ex.stacktrace;
                 for (var i = 0; i < array_length(stk); i++) {
@@ -420,35 +420,34 @@ function __fastlogs_on_unhandled_exception(ex) {
             msg = "UNHANDLED EXCEPTION: " + string(ex);
         }
     } catch (_e) {
-        // Колбэк исключений не должен сам кидать - проглатываем.
+        // Exception callbacks must not throw themselves - swallow.
     }
 
-    // Запишем как error (инкремент счётчика + кольцо + флаш на диск, если запись включена).
+    // Write as error (session counter increment + ring + flush to disk if recording is on).
     flog(msg, FASTLOGS_LEVEL_ERROR);
 
-    // Принудительный флаш на диск даже если запись была выключена: при краше важно сохранить.
-    // Реализация в recorder - дозаписывает ВСЁ кольцо в персист-файл синхронно (включая батч).
+    // Force flush to disk even if recording was off: on crash, saving data is critical.
+    // Implementation in recorder - synchronously appends the FULL ring to the persist file (including batch).
     try {
         fastlogs_recorder_flush_crash();
-    } catch (_e2) { /* проглатываем */ }
+    } catch (_e2) { /* swallow */ }
 
     // -------------------------------------------------------------------------------------
-    // РАЗДЕЛЕНИЕ ЗАХВАТА И ДОСТАВКИ (решение "захватывать всегда").
+    // SEPARATION OF CAPTURE AND DELIVERY ("always capture" decision).
     // -------------------------------------------------------------------------------------
-    // Сигнатура стека нужна и для дедупа захвата, и для дедупа доставки.
+    // Stack signature is needed for both capture dedup and delivery dedup.
     var sig = "unknown";
     try { sig = __fastlogs_exception_signature(ex); } catch (_eg) { sig = "unknown"; }
 
-    // (1) ЗАХВАТ ВСЕГДА: СНАЧАЛА синхронно строим готовое тело отчёта и БЕЗУСЛОВНО (до любых
-    //   guard'ов троттл/кап/занято/дедуп-доставки) персистим его в дисковый outbox. Так
-    //   необработанный краш НЕ теряется НИКОГДА в enabled-билде - даже во время занятости,
-    //   сверх капа доставки или в окне троттла. Тело уже включает logText/срез/counts/comment/
-    //   tester/context/breadcrumbs и redaction (fastlogs_build_payload_json). Без скриншота
-    //   (для краша тяжело). best-effort, не кидаем из колбэка.
-    //   Дедуп ЗАХВАТА (ОТДЕЛЬНЫЙ от дедупа доставки): если ТОТ ЖЕ стек уже захвачен в окне
-    //   троттла - новый файл НЕ пишем (чтобы цикл крашей не заспамил outbox). Кап outbox
-    //   (FASTLOGS_PENDING_MAX + TrimToCap внутри fastlogs_pending_write) бьёт по числу файлов
-    //   в любом случае.
+    // (1) ALWAYS CAPTURE: FIRST synchronously build the full report body and UNCONDITIONALLY
+    //   (before any throttle/cap/busy/delivery-dedup guards) persist it to the disk outbox. This way
+    //   an unhandled crash is NEVER lost in an enabled build - even during busy state, beyond the
+    //   delivery cap, or within a throttle window. The body already includes logText/snapshot/counts/comment/
+    //   tester/context/breadcrumbs and redaction (fastlogs_build_payload_json). No screenshot
+    //   (heavy for a crash). best-effort, do not throw from callback.
+    //   CAPTURE DEDUP (SEPARATE from delivery dedup): if THE SAME stack was already captured within the
+    //   throttle window - a new file is NOT written (to prevent a crash loop from spamming the outbox). Cap of outbox
+    //   (FASTLOGS_PENDING_MAX + TrimToCap inside fastlogs_pending_write) limits file count in any case.
     var crash_opts = { title: "Unhandled exception", screenshot: false };
     var crash_body = "";
     try {
@@ -457,13 +456,13 @@ function __fastlogs_on_unhandled_exception(ex) {
         }
     } catch (_eb) { crash_body = ""; }
 
-    // (1a) ФОЛБЭК-ЗАХВАТ (FIX-2): билдер мог упасть/вернуть "" (например, исключение внутри
-    //   сбора device/context). РАНЬШЕ тогда fastlogs_pending_write НЕ звался и краш ТЕРЯЛСЯ.
-    //   Теперь строим МИНИМАЛЬНОЕ контрактное тело напрямую из доступного, НЕ полагаясь на
-    //   билдер: appId/appVersion/platform/timestampUtc/counts/logText/logEncoding (+ title/
-    //   comment/tester если есть). logText = сырой текст recorder/буфера если есть, иначе
-    //   message+stack самого исключения. Прогоняем через тот же fastlogs_redact. Если минимума
-    //   нет (нет endpoint/appId - слать некуда/нечем идентифицировать) - честно ничего ("").
+    // (1a) FALLBACK CAPTURE (FIX-2): the builder may have crashed/returned "" (e.g., exception inside
+    //   device/context collection). PREVIOUSLY fastlogs_pending_write was NOT called and the crash was LOST.
+    //   Now we build a MINIMAL contract body directly from what is available, NOT relying on the
+    //   builder: appId/appVersion/platform/timestampUtc/counts/logText/logEncoding (+ title/
+    //   comment/tester if present). logText = raw text from recorder/buffer if available, otherwise
+    //   message+stack of the exception itself. Run through the same fastlogs_redact. If minimum is
+    //   absent (no endpoint/appId - nowhere to send / nothing to identify with) - honestly return "".
     if (!is_string(crash_body) || string_length(crash_body) == 0) {
         try {
             crash_body = __fastlogs_build_fallback_crash_json(ex, crash_opts);
@@ -481,7 +480,7 @@ function __fastlogs_on_unhandled_exception(ex) {
         if (do_capture) {
             try {
                 if (script_exists(asset_get_index("fastlogs_pending_write"))) {
-                    pending_path = fastlogs_pending_write(crash_body);   // ВСЕГДА: СНАЧАЛА на диск
+                    pending_path = fastlogs_pending_write(crash_body);   // ALWAYS: disk first
                     captured = (is_string(pending_path) && string_length(pending_path) > 0);
                 }
             } catch (_ew) { pending_path = ""; }
@@ -490,10 +489,10 @@ function __fastlogs_on_unhandled_exception(ex) {
         }
     }
 
-    // (2) ДОСТАВКА (немедленная отправка + тост) гейтится троттл/кап/занято/дедуп-ДОСТАВКИ.
-    //   Это влияет ТОЛЬКО на немедленный аплоад, НЕ на захват выше. Захваченный файл в любом
-    //   случае доедет: либо этим немедленным аплоадом (удалит ИМЕННО свой файл на успехе),
-    //   либо дренажом при простое / досылом на следующем старте.
+    // (2) DELIVERY (immediate send + toast) is gated by throttle/cap/busy/delivery-DEDUP.
+    //   This affects ONLY the immediate upload, NOT the capture above. The captured file will
+    //   always be delivered: either by this immediate upload (will delete EXACTLY its own file on success),
+    //   or by drain during idle / resend on next startup.
     var do_send = true;
     var skip_reason = "";
     try {
@@ -501,27 +500,27 @@ function __fastlogs_on_unhandled_exception(ex) {
         do_send     = gate.allowed;
         skip_reason = gate.reason;
     } catch (_eg2) {
-        do_send = true;   // не смогли посчитать гейт - не блокируем отправку
+        do_send = true;   // could not evaluate gate - do not block send
     }
 
     if (do_send) {
-        // Попытка немедленной отправки (best-effort; может не успеть до закрытия игры).
-        //   СВЯЗКА ФАЙЛА: передаём pending_path только что захваченного файла, чтобы успешный
-        //   аплоад удалил ИМЕННО его (никаких удалений чужого/устаревшего; не оставляем файл-сироту).
-        //   Если захват не состоялся (дедуп/диск) и pending_path пуст - обычная отправка тела как есть.
+        // Attempt immediate send (best-effort; may not complete before game closes).
+        //   FILE BINDING: pass pending_path of the just-captured file so a successful
+        //   upload deletes EXACTLY that file (no deleting someone else's/stale file; no orphaned file left).
+        //   If capture did not happen (dedup/disk) and pending_path is empty - normal body send as-is.
         try {
             if (is_string(crash_body) && string_length(crash_body) > 0
                 && script_exists(asset_get_index("fastlogs_pending_send"))) {
-                // fastlogs_pending_send сам поднимет статус-тост; single-flight внутри.
+                // fastlogs_pending_send will raise a status toast itself; single-flight inside.
                 fastlogs_pending_send(crash_body, pending_path);
             } else {
-                // Фолбэк: тело не собралось/нет pending-слоя - обычная отправка.
+                // Fallback: body not built / no pending layer - normal send.
                 fastlogs_send(crash_opts);
             }
-        } catch (_e3) { /* проглатываем */ }
+        } catch (_e3) { /* swallow */ }
     } else {
-        // Доставка зарезана guard'ом, но КРАШ УЖЕ ЗАХВАЧЕН на диск (если не дедуп захвата) -
-        //   он доедет дренажом/на старте. Сообщаем тестеру, что не потеряли.
+        // Delivery blocked by guard, but CRASH IS ALREADY CAPTURED to disk (if not capture-deduped) -
+        //   it will be delivered by drain/on startup. Notify the tester that it was not lost.
         var note = captured ? "Краш записан (" + skip_reason + ", отправим позже)"
                             : "Краш записан (" + skip_reason + ")";
         show_debug_message("[FastLogs] autosend on crash deferred: " + skip_reason
@@ -530,16 +529,16 @@ function __fastlogs_on_unhandled_exception(ex) {
             if (script_exists(asset_get_index("fastlogs_status_toast"))) {
                 fastlogs_status_toast("info", note);
             }
-        } catch (_e4) { /* проглатываем */ }
+        } catch (_e4) { /* swallow */ }
     }
 
-    // Возвращать ничего полезного не нужно - игра закроется (если краш фатальный).
+    // Nothing useful to return - the game will close (if the crash is fatal).
 }
 
 // =====================================================================================
-// flog(message, [level]) - основная точка логирования (+ алиас fastlogs_log ниже).
-// В память (кольцо) пишет всегда при FASTLOGS_ENABLED; на диск - только если запись включена
-//   (это делает recorder в fastlogs_recorder_on_record). Инкрементит счётчик уровня за сессию.
+// flog(message, [level]) - primary logging entry point (+ alias fastlogs_log below).
+// Always writes to memory (ring) when FASTLOGS_ENABLED; to disk only if recording is on
+//   (the recorder does this in fastlogs_recorder_on_record). Increments the session level counter.
 // =====================================================================================
 function flog(message, level = FASTLOGS_LEVEL_LOG) {
     if (!FASTLOGS_ENABLED) return;
@@ -548,21 +547,21 @@ function flog(message, level = FASTLOGS_LEVEL_LOG) {
 
     var lvl = is_real(level) ? clamp(floor(level), FASTLOGS_LEVEL_LOG, FASTLOGS_LEVEL_ERROR)
                              : FASTLOGS_LEVEL_LOG;
-    var txt = string(message);   // приведение любого типа к строке
+    var txt = string(message);   // coerce any type to string
     var t   = date_current_datetime();
 
-    // Счётчики за сессию.
+    // Session counters.
     switch (lvl) {
         case FASTLOGS_LEVEL_ERROR: st.cnt_error++; break;
         case FASTLOGS_LEVEL_WARN:  st.cnt_warn++;  break;
         default:                   st.cnt_log++;   break;
     }
 
-    // Запись в кольцо. ПЕРФ (D): ПЕРЕИСПОЛЬЗУЕМ struct в слоте, если он уже создан (мутируем
-    //   поля вместо аллокации нового struct на каждый лог). Аллокация происходит только при
-    //   первом заполнении кольца; дальше - in-place перезапись. Это безопасно: recorder
-    //   синхронно потребляет rec тут же, а старый rec в слоте уже был отформатирован/слит
-    //   на прошлом обороте (snapshot/flush держат ссылки лишь во время синхронного потребления).
+    // Write to ring. PERF (D): REUSE the struct in the slot if it already exists (mutate
+    //   fields instead of allocating a new struct for each log entry). Allocation only happens during
+    //   the first fill of the ring; afterwards - in-place overwrite. This is safe: the recorder
+    //   synchronously consumes rec right here, and the old rec in the slot was already formatted/flushed
+    //   on the previous rotation (snapshot/flush hold references only during synchronous consumption).
     var rec = st.ring[st.head];
     if (is_struct(rec)) {
         rec.time  = t;
@@ -575,18 +574,18 @@ function flog(message, level = FASTLOGS_LEVEL_LOG) {
     st.head = (st.head + 1) mod st.ring_size;
     if (st.count < st.ring_size) st.count++;
 
-    // Персист на диск - только при активной записи. Делегируем recorder'у (он гейтит сам).
+    // Persist to disk - only when recording is active. Delegate to recorder (it gates itself).
     fastlogs_recorder_on_record(rec);
 }
 
-// Удобные обёртки с фиксированным уровнем (контракт PUBLIC-API).
+// Convenience wrappers with a fixed level (PUBLIC-API contract).
 function fastlogs_log(message)   { flog(message, FASTLOGS_LEVEL_LOG);   }
 function fastlogs_warn(message)  { flog(message, FASTLOGS_LEVEL_WARN);  }
 function fastlogs_error(message) { flog(message, FASTLOGS_LEVEL_ERROR); }
 
 // =====================================================================================
-// fastlogs_clear() - очистить кольцо в памяти и счётчики сессии.
-// Персист-файл на диске НЕ трогает (история между сессиями сохраняется).
+// fastlogs_clear() - clear the in-memory ring and session counters.
+// Does NOT touch the persist file on disk (cross-session history is preserved).
 // =====================================================================================
 function fastlogs_clear() {
     if (!FASTLOGS_ENABLED) return;
@@ -600,8 +599,8 @@ function fastlogs_clear() {
 }
 
 // =====================================================================================
-// fastlogs_get_counts() -> { error, warn, log } - счётчики ЗА СЕССИЮ (как payload counts).
-// При !FASTLOGS_ENABLED -> нули.
+// fastlogs_get_counts() -> { error, warn, log } - PER-SESSION counters (same as payload counts).
+// When !FASTLOGS_ENABLED -> zeros.
 // =====================================================================================
 function fastlogs_get_counts() {
     if (!FASTLOGS_ENABLED) return { error: 0, warn: 0, log: 0 };
@@ -610,9 +609,9 @@ function fastlogs_get_counts() {
 }
 
 // =====================================================================================
-// fastlogs_set_screenshot(enabled) - тоггл включения скриншота в следующий fastlogs_send.
-// Фактический захват кадра делает payload/http через util (screen_save -> buffer_load ->
-//   buffer_base64_encode), см. GM-NOTES 2.2.
+// fastlogs_set_screenshot(enabled) - toggle screenshot inclusion in the next fastlogs_send.
+// Actual frame capture is done by payload/http via util (screen_save -> buffer_load ->
+//   buffer_base64_encode), see GM-NOTES 2.2.
 // =====================================================================================
 function fastlogs_set_screenshot(enabled) {
     if (!FASTLOGS_ENABLED) return;
@@ -621,14 +620,14 @@ function fastlogs_set_screenshot(enabled) {
 }
 
 // =====================================================================================
-// Внутренние геттеры состояния для других модулей (recorder/payload/http/overlay).
-// Возвращают снимок кольца как массив записей в ХРОНОЛОГИЧЕСКОМ порядке (старые -> новые).
+// Internal state getters for other modules (recorder/payload/http/overlay).
+// Return a snapshot of the ring as an array of entries in CHRONOLOGICAL order (oldest -> newest).
 // =====================================================================================
 function fastlogs_ring_snapshot() {
     var st = __fastlogs_state();
     var out = [];
     if (st.count <= 0) return out;
-    // Старейший элемент: если кольцо заполнено - это head; иначе - 0.
+    // Oldest element: if ring is full - it is head; otherwise - 0.
     var start = (st.count >= st.ring_size) ? st.head : 0;
     for (var i = 0; i < st.count; i++) {
         var idx = (start + i) mod st.ring_size;

@@ -1,28 +1,28 @@
 /// @description scr_fastlogs_context
-// FastLogs GameMaker client - КОНТЕКСТ + BREADCRUMBS (фича #2).
-// Публичное API из кода игры:
-//   fastlogs_set_context(key, value)   - задать пару контекста (едет с КАЖДЫМ отчётом)
-//   fastlogs_clear_context()           - очистить весь контекст
-//   fastlogs_breadcrumb(msg, [level])  - добавить хлебную крошку (катящийся буфер последних N)
-// Внутренние снимки для payload:
-//   fastlogs_context_snapshot()        -> struct string->string (опц. пустой)
-//   fastlogs_breadcrumbs_snapshot()    -> array { t, m, lvl } в хронологическом порядке
+// FastLogs GameMaker client - CONTEXT + BREADCRUMBS (feature #2).
+// Public API for game code:
+//   fastlogs_set_context(key, value)   - set a context key-value pair (sent with EVERY report)
+//   fastlogs_clear_context()           - clear all context
+//   fastlogs_breadcrumb(msg, [level])  - add a breadcrumb (rolling buffer of the last N entries)
+// Internal snapshots for payload:
+//   fastlogs_context_snapshot()        -> struct string->string (optionally empty)
+//   fastlogs_breadcrumbs_snapshot()    -> array { t, m, lvl } in chronological order
 //
-// Хранилище в global.__fastlogs (core-state), чтобы API звался из любого контекста без
-//   with/instance_find (как остальное состояние клиента):
-//   - context     : struct (ключ->строка-значение)
-//   - bc_ring     : array кап FASTLOGS_BREADCRUMB_MAX (кольцо), bc_head/bc_count
-// ПЕРФ: контекст - словарь (правка O(1)); крошка - запись в кольцо O(1), БЕЗ аллокаций в кадре
-//   (struct-слот переиспользуется по обороту кольца, как в core ring). Redaction/сериализация
-//   делаются РАЗОВО при сборке payload, не на горячем пути.
+// Storage is in global.__fastlogs (core-state) so the API can be called from any context without
+//   with/instance_find (like the rest of the client state):
+//   - context     : struct (key->string value)
+//   - bc_ring     : array of FASTLOGS_BREADCRUMB_MAX capacity (ring), bc_head/bc_count
+// PERF: context is a dictionary (O(1) writes); breadcrumb is a ring write O(1), NO per-frame
+//   allocations (struct slot is reused on ring wrap, same as core ring). Redaction/serialization
+//   happen ONCE during payload assembly, not on the hot path.
 //
-// Все ПУБЛИЧНЫЕ точки входа: ранний выход при !FASTLOGS_ENABLED (геттеры -> безопасные дефолты).
-// level крошки in info|warn|error (контракт; иначе нормализуем к "info").
+// All PUBLIC entry points: early exit when !FASTLOGS_ENABLED (getters -> safe defaults).
+// Breadcrumb level in info|warn|error (contract; otherwise normalized to "info").
 
 // =====================================================================================
-// Внутреннее: лениво создать и вернуть подсостояние context внутри global.__fastlogs.
-//   Зависит от __fastlogs_state() (core). Если core ещё не подключён - вернёт undefined,
-//   и публичные функции деградируют в no-op (безопасно к порядку вызовов).
+// Internal: lazily create and return the context sub-state inside global.__fastlogs.
+//   Depends on __fastlogs_state() (core). If core is not yet connected - returns undefined,
+//   and public functions degrade to no-op (safe with respect to call order).
 // =====================================================================================
 function __fastlogs_ctx_state() {
     if (!script_exists(asset_get_index("__fastlogs_state"))) return undefined;
@@ -34,17 +34,17 @@ function __fastlogs_ctx_state() {
         var cap = max(1, FASTLOGS_BREADCRUMB_MAX);
         st.bc_ring  = array_create(cap, undefined);
         st.bc_cap   = cap;
-        st.bc_head  = 0;   // куда писать следующую
-        st.bc_count = 0;   // валидных записей (<= cap)
+        st.bc_head  = 0;   // next write position
+        st.bc_count = 0;   // number of valid entries (<= cap)
     }
     return st;
 }
 
 // =====================================================================================
-// fastlogs_set_context(key, value) - задать пару контекста.
-//   key/value приводятся к строке; усекаются по FASTLOGS_CONTEXT_KEY/VAL_MAX (мягкая защита,
-//   сервер тоже капает). Пустой ключ игнорируется. Значение храним сырым; redaction
-//   значений делается при сборке payload (не здесь - чтобы не редактировать дважды/раньше).
+// fastlogs_set_context(key, value) - set a context key-value pair.
+//   key/value are coerced to string; truncated to FASTLOGS_CONTEXT_KEY/VAL_MAX (soft guard,
+//   the server also caps). Empty key is ignored. Value is stored raw; redaction of
+//   values happens during payload assembly (not here - to avoid editing twice/too early).
 // =====================================================================================
 function fastlogs_set_context(key, value) {
     if (!FASTLOGS_ENABLED) return;
@@ -58,12 +58,12 @@ function fastlogs_set_context(key, value) {
     var v = string(value);
     if (string_length(v) > FASTLOGS_CONTEXT_VAL_MAX) v = string_copy(v, 1, FASTLOGS_CONTEXT_VAL_MAX);
 
-    // variable_struct_set безопасен для произвольных строковых ключей (в т.ч. с пробелами).
+    // variable_struct_set is safe for arbitrary string keys (including those with spaces).
     variable_struct_set(st.context, k, v);
 }
 
 // =====================================================================================
-// fastlogs_remove_context(key) - удалить одну пару контекста (если есть). Удобно точечно.
+// fastlogs_remove_context(key) - remove a single context pair (if present). Useful for targeted removal.
 // =====================================================================================
 function fastlogs_remove_context(key) {
     if (!FASTLOGS_ENABLED) return;
@@ -76,7 +76,7 @@ function fastlogs_remove_context(key) {
 }
 
 // =====================================================================================
-// fastlogs_clear_context() - очистить весь контекст.
+// fastlogs_clear_context() - clear all context.
 // =====================================================================================
 function fastlogs_clear_context() {
     if (!FASTLOGS_ENABLED) return;
@@ -86,8 +86,8 @@ function fastlogs_clear_context() {
 }
 
 // =====================================================================================
-// Внутреннее: нормализовать уровень крошки к info|warn|error. Принимает строку или
-//   FASTLOGS_LEVEL_* (real). Иначе -> "info".
+// Internal: normalize a breadcrumb level to info|warn|error. Accepts a string or
+//   FASTLOGS_LEVEL_* (real). Otherwise -> "info".
 // =====================================================================================
 function __fastlogs_bc_level_norm(level) {
     if (is_string(level)) {
@@ -108,11 +108,11 @@ function __fastlogs_bc_level_norm(level) {
 }
 
 // =====================================================================================
-// fastlogs_breadcrumb(msg, [level]) - добавить хлебную крошку в катящийся буфер.
-//   level (опц.): "info"|"warn"|"error" или FASTLOGS_LEVEL_* (деф. "info").
-//   t (время) фиксируем сразу как UTC ISO-8601 (через __fastlogs_utc_iso из recorder, если
-//   есть) - чтобы крошка несла момент СВОЕГО появления, а не момент отправки.
-//   ПЕРФ: запись в кольцо O(1), переиспользуем struct-слот по обороту (без аллокации на крошку).
+// fastlogs_breadcrumb(msg, [level]) - add a breadcrumb to the rolling buffer.
+//   level (opt.): "info"|"warn"|"error" or FASTLOGS_LEVEL_* (default "info").
+//   t (timestamp) is captured immediately as UTC ISO-8601 (via __fastlogs_utc_iso from recorder,
+//   if available) - so the breadcrumb carries the moment IT occurred, not the send time.
+//   PERF: ring write O(1), struct slot is reused on wrap (no allocation per breadcrumb).
 // =====================================================================================
 function fastlogs_breadcrumb(msg, level = "info") {
     if (!FASTLOGS_ENABLED) return;
@@ -123,13 +123,13 @@ function fastlogs_breadcrumb(msg, level = "info") {
     if (string_length(m) > FASTLOGS_BREADCRUMB_MSG_MAX) m = string_copy(m, 1, FASTLOGS_BREADCRUMB_MSG_MAX);
     var lvl = __fastlogs_bc_level_norm(level);
 
-    // Время крошки (UTC ISO-8601). Если recorder не подключён - оставим "" (payload опустит t).
+    // Breadcrumb timestamp (UTC ISO-8601). If recorder is not connected - leave "" (payload will omit t).
     var t = "";
     if (script_exists(asset_get_index("__fastlogs_utc_iso"))) {
         t = __fastlogs_utc_iso();
     }
 
-    // Запись в кольцо: переиспользуем существующий struct-слот, иначе создаём.
+    // Ring write: reuse existing struct slot, otherwise create one.
     var slot = st.bc_ring[st.bc_head];
     if (is_struct(slot)) {
         slot.t   = t;
@@ -144,7 +144,7 @@ function fastlogs_breadcrumb(msg, level = "info") {
 }
 
 // =====================================================================================
-// fastlogs_clear_breadcrumbs() - очистить буфер хлебных крошек.
+// fastlogs_clear_breadcrumbs() - clear the breadcrumb buffer.
 // =====================================================================================
 function fastlogs_clear_breadcrumbs() {
     if (!FASTLOGS_ENABLED) return;
@@ -156,9 +156,9 @@ function fastlogs_clear_breadcrumbs() {
 }
 
 // =====================================================================================
-// fastlogs_context_snapshot() -> struct (КОПИЯ контекста ключ->строка).
-//   Возвращает НОВЫЙ struct, чтобы payload мог его редактировать (redaction значений) и
-//   компактить, не трогая живое состояние. Пустой контекст -> {} (payload опустит).
+// fastlogs_context_snapshot() -> struct (COPY of context key->string).
+//   Returns a NEW struct so the payload can apply redaction and compact it
+//   without touching the live state. Empty context -> {} (payload will omit it).
 // =====================================================================================
 function fastlogs_context_snapshot() {
     if (!FASTLOGS_ENABLED) return {};
@@ -175,9 +175,9 @@ function fastlogs_context_snapshot() {
 }
 
 // =====================================================================================
-// fastlogs_breadcrumbs_snapshot() -> array { t, m, lvl } в ХРОНОЛОГИЧЕСКОМ порядке.
-//   Возвращает массив НОВЫХ структур-копий (payload редактирует m через redaction и
-//   компактит). Пустой буфер -> [] (payload опустит).
+// fastlogs_breadcrumbs_snapshot() -> array { t, m, lvl } in CHRONOLOGICAL order.
+//   Returns an array of NEW struct copies (payload applies redaction to m and compacts).
+//   Empty buffer -> [] (payload will omit it).
 // =====================================================================================
 function fastlogs_breadcrumbs_snapshot() {
     if (!FASTLOGS_ENABLED) return [];
@@ -185,7 +185,7 @@ function fastlogs_breadcrumbs_snapshot() {
     if (is_undefined(st)) return [];
     var out = [];
     if (st.bc_count <= 0) return out;
-    // Старейшая запись: при полном кольце - bc_head; иначе - 0.
+    // Oldest entry: when ring is full - bc_head; otherwise - 0.
     var start = (st.bc_count >= st.bc_cap) ? st.bc_head : 0;
     for (var i = 0; i < st.bc_count; i++) {
         var idx = (start + i) mod st.bc_cap;

@@ -1,16 +1,16 @@
 /// @description scr_fastlogs_clipboard
-// FastLogs GameMaker client - БУФЕР ОБМЕНА.
-// Обёртка clipboard_set_text + тост "скопировано" в оверлее.
-//   clipboard_set_text поддержан на Windows/Ubuntu/macOS/Android/iOS/HTML5/OperaGX,
-//   НЕ на консолях (PS/Switch/Xbox) - поэтому гейтим по платформе (fastlogs_clipboard_available).
-//   На консолях copy просто no-op + тост "недоступно".
+// FastLogs GameMaker client - CLIPBOARD.
+// Wrapper around clipboard_set_text + a "copied" toast in the overlay.
+//   clipboard_set_text is supported on Windows/Ubuntu/macOS/Android/iOS/HTML5/OperaGX,
+//   NOT on consoles (PS/Switch/Xbox) - so we gate by platform (fastlogs_clipboard_available).
+//   On consoles, copy is simply a no-op + an "unavailable" toast.
 //
-// Все точки входа: ранний выход при !FASTLOGS_ENABLED.
-// Сверка GML-API: GM-NOTES.md (clipboard_* подтверждены поиском, июнь 2026).
+// All entry points: early-out when !FASTLOGS_ENABLED.
+// GML-API reference: GM-NOTES.md (clipboard_* confirmed by search, June 2026).
 
-/// @returns {bool} доступен ли системный буфер обмена на текущей платформе
+/// @returns {bool} whether the system clipboard is available on the current platform
 function fastlogs_clipboard_available() {
-    // Консоли не поддерживают clipboard - исключаем их.
+    // Consoles do not support clipboard - exclude them.
     switch (os_type) {
         case os_ps4:
         case os_ps5:
@@ -19,20 +19,20 @@ function fastlogs_clipboard_available() {
         case os_xboxseriesxs:
             return false;
         default:
-            // На остальных (Windows/macOS/Linux/Android/iOS/HTML5) - поддержано.
+            // All others (Windows/macOS/Linux/Android/iOS/HTML5) - supported.
             return true;
     }
 }
 
-/// Копировать произвольный текст в буфер обмена + тост. no-op при !FASTLOGS_ENABLED.
-/// @param {string} text - что копировать
-/// @param {string} [toast] - текст тоста (по умолчанию "скопировано")
-/// @returns {bool} удалось ли скопировать
+/// Copy arbitrary text to the clipboard + show a toast. no-op when !FASTLOGS_ENABLED.
+/// @param {string} text - text to copy
+/// @param {string} [toast] - toast message (defaults to "copied" if omitted)
+/// @returns {bool} whether the copy succeeded
 function fastlogs_copy_text(text, toast) {
     if (!FASTLOGS_ENABLED) return false;
     var msg = (argument_count > 1) ? toast : "скопировано";
     if (!fastlogs_clipboard_available()) {
-        // Платформа без буфера обмена (консоль) - сообщаем в оверлее.
+        // Platform without clipboard support (console) - notify via overlay.
         if (script_exists(asset_get_index("fastlogs_ui_toast"))) fastlogs_ui_toast("буфер недоступен");
         return false;
     }
@@ -45,8 +45,8 @@ function fastlogs_copy_text(text, toast) {
     return true;
 }
 
-/// Копировать URL последнего лога (используется кнопкой "Копировать" в оверлее).
-/// @returns {bool} удалось ли
+/// Copy the URL of the last log (used by the "Copy" button in the overlay).
+/// @returns {bool} whether the copy succeeded
 function fastlogs_copy_url() {
     if (!FASTLOGS_ENABLED) return false;
     var url = "";

@@ -1,14 +1,14 @@
 /// @description FastLogs controller - Create
-// При !FASTLOGS_ENABLED контроллер не создаётся (instance_destroy сразу).
-// Инициализация состояния UI и подгрузка персиста настроек оверлея.
-// ПРИМЕЧАНИЕ: кольцо/счётчики/recording/exception handler инициализирует scr_fastlogs_core
-//   (его билд) - здесь только то, что относится к overlay/input/screenshot/clipboard.
+// When !FASTLOGS_ENABLED the controller is not created (instance_destroy immediately).
+// Initializes UI state and loads persisted overlay settings.
+// NOTE: ring buffer / counters / recording / exception handler are initialized by scr_fastlogs_core
+//   (its build) - only overlay/input/screenshot/clipboard concerns are handled here.
 if (!FASTLOGS_ENABLED) { instance_destroy(); exit; }
 
-// Ленивая инициализация UI-состояния (overlay/input) и подгрузка ini-настроек.
-//   fastlogs_ui_state создаёт global.__fastlogs_ui; settings_load применяет тоггл скриншота.
+// Lazy initialization of UI state (overlay/input) and loading ini settings.
+//   fastlogs_ui_state creates global.__fastlogs_ui; settings_load applies the screenshot toggle.
 if (script_exists(asset_get_index("fastlogs_ui_state")))         fastlogs_ui_state();
 if (script_exists(asset_get_index("fastlogs_ui_settings_load"))) fastlogs_ui_settings_load();
 
-// Инициализация состояния захвата скриншота (ленивое, но создадим заранее).
+// Initialize screenshot capture state (lazy, but created upfront).
 if (script_exists(asset_get_index("fastlogs_shot_state")))       fastlogs_shot_state();
