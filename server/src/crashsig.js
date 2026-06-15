@@ -29,9 +29,14 @@ const crypto = require('node:crypto');
 const TOP_K = 8;     // top stack frames folded into the signature
 const SIG_LEN = 12;  // sha1 hex truncated to this many chars
 
-// Matches the start of a formatted entry: "[E] +12.345 message". Captures the
-// level char (L|W|E) and the message (the rest of the line, tag and time gone).
-const ENTRY_RE = /^\[([LWE])\]\s+\+\d+(?:\.\d+)?\s?(.*)$/;
+// Matches the start of a formatted entry: "[E] +12.345 message" or, when the
+// client captured a frame number, "[E] +12.345 f5821 message". Captures the
+// level char (L|W|E) and the message (tag, time and the optional f<frame> token
+// gone). The optional frame group MUST mirror the viewer's header regex
+// (public/viewer.js) so the same crash hashes to the same signature whether or
+// not the line carries a frame token (otherwise crash grouping would fragment
+// across the format boundary).
+const ENTRY_RE = /^\[([LWE])\]\s+\+\d+(?:\.\d+)?(?:\s+f\d+)?\s?(.*)$/;
 // Session marker written by the recorder between runs (not part of any entry).
 const SESSION_RE = /^==== FastLogs session /;
 // Coalesced-duplicate marker that trails an entry's stack.

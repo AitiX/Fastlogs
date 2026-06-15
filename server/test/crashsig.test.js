@@ -29,6 +29,19 @@ const CRASH_A_REBUILD = [
   'Game.Combat:Resolve () [0x00abc] in <z9y8x7>:88',
 ].join('\n');
 
+// The SAME crash as CRASH_A, but the entry headers now carry a frame token
+// ("[E] +12.345 f5821 ...") as emitted once the client captures Time.frameCount.
+// crashsig must skip the optional f<frame> token so this hashes identically to
+// CRASH_A (otherwise crash grouping would fragment across the format boundary).
+const CRASH_A_WITHFRAME = [
+  '[L] +1.000 f10 [Loading] Begin: PlayerProfile.Load',
+  'Terraf.TerrafApp:LoadingStep(String)',
+  'InitialLoadingScene:Update()',
+  '[E] +12.345 f5821 NullReferenceException: Object reference not set to an instance of an object',
+  'Game.Player:TakeDamage (System.Int32 amount) [0x00012] in <a1b2c3>:0',
+  'Game.Combat:Resolve () [0x0007f] in <a1b2c3>:0',
+].join('\n');
+
 // A DIFFERENT crash: different exception type, different frames.
 const CRASH_B = [
   '[E] +3.100 IndexOutOfRangeException: Index was outside the bounds of the array.',
@@ -52,6 +65,10 @@ test('crash log yields a 12-char lowercase hex signature', () => {
 
 test('STABILITY: same crash across builds (offsets/lines/assembly differ) -> same signature', () => {
   assert.equal(crashsig.computeSignature(CRASH_A), crashsig.computeSignature(CRASH_A_REBUILD));
+});
+
+test('STABILITY: frame token in the header (new format) -> same signature as the frame-less format', () => {
+  assert.equal(crashsig.computeSignature(CRASH_A_WITHFRAME), crashsig.computeSignature(CRASH_A));
 });
 
 test('DISTINCTNESS: different exception type / frames -> different signature', () => {
