@@ -24,7 +24,7 @@ html, body {
   height: 100%;
   background: var(--bg);
   color: var(--text);
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  font-family: 'Atkinson Hyperlegible', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
   font-size: 14px;
   line-height: 1.5;
 }
@@ -369,14 +369,59 @@ a:hover { color: var(--accent-h); text-decoration: underline; }
 .log-level-w { color: var(--yellow); }
 .log-level-l { color: var(--text-dim); }
 
-/* Stack-trace folding */
+/* Compact gutter toggle (>/v) sitting between the line number and the text.
+   A single delegated click handler (viewer.js) flips its glyph and toggles the
+   paired .log-entry-detail block open. The spacer keeps text aligned on rows
+   that have no toggle. */
+.log-trace-toggle,
+.log-trace-spacer {
+  width: 14px; flex-shrink: 0; text-align: center;
+  font-size: 10px; line-height: inherit; user-select: none;
+}
 .log-trace-toggle {
-  cursor: pointer; color: var(--accent); font-size: 11.5px;
-  user-select: none; padding: 1px 0;
+  cursor: pointer; color: var(--text-dim);
+  transition: color 0.1s, transform 0.12s;
 }
 .log-trace-toggle:hover { color: var(--accent-h); }
-.log-trace-body { display: none; }
-.log-trace-body.open { display: block; }
+.log-trace-toggle.open { color: var(--accent); }
+
+/* Unified expand block: key/value metadata panel + folded stack trace.
+   Hidden until its toggle adds .open; .hidden mirrors a filtered-out row. */
+.log-entry-detail {
+  display: none;
+  margin: 2px 14px 6px;
+  padding: 8px 12px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-left: 2px solid var(--accent);
+  border-radius: var(--radius);
+}
+.log-entry-detail.open { display: block; }
+.log-entry-detail.hidden { display: none; }
+
+.log-detail-kv-list { display: flex; flex-direction: column; gap: 2px; }
+.log-detail-kv { display: flex; gap: 8px; font-size: 11.5px; }
+.log-detail-key {
+  color: var(--text-dim); min-width: 64px; flex-shrink: 0;
+  text-transform: uppercase; letter-spacing: 0.04em; font-size: 10.5px;
+}
+.log-detail-val { color: var(--text); word-break: break-word; font-family: var(--mono); }
+
+.log-detail-stack-head {
+  margin: 8px 0 4px; font-size: 10.5px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-dim);
+  border-top: 1px solid var(--border); padding-top: 6px;
+}
+.log-detail-stack .log-trace-frame { padding: 0; }
+.log-detail-stack .log-trace-frame .log-line-text { color: var(--text-dim); }
+
+/* A collapsed entry showing how many identical lines were folded together. */
+.log-repeat {
+  flex-shrink: 0; margin-left: 8px; align-self: center;
+  padding: 0 6px; border-radius: 9px;
+  background: var(--bg3); border: 1px solid var(--border);
+  color: var(--text-dim); font-size: 10.5px; font-family: var(--mono);
+}
 
 .log-no-results {
   padding: 24px 14px; text-align: center;

@@ -825,6 +825,63 @@
     return false;
   }
 
+  // Parse an entry-header line per the fixed line-format contract:
+  //   [L|W|E] +<sec.mmm>[ f<frame>] <message>
+  // The level marker (L/W/E) and the relative timestamp are always present in
+  // the new format; the frame group (f<n>) is OPTIONAL - the client does not
+  // emit it yet, and old logs predate it. Returns null for lines that do not
+  // match the header shape (free-form / legacy lines), so callers fall back to
+  // the heuristic detectLevel() and skip the rich metadata.
+  //   -> { level: 'error'|'warn'|'log', relSec: number, frame: number|null, message: string }
+  var HEADER_RE = /^\[([LWE])\]\s+\+([0-9.]+)(?:\s+f(\d+))?\s+(.*)$/;
+  var HEADER_LEVEL = { L: 'log', W: 'warn', E: 'error' };
+  function parseHeader(line) {
+    if (!line) return null;
+    var m = HEADER_RE.exec(line);
+    if (!m) return null;
+    var rel = parseFloat(m[2]);
+    if (isNaN(rel)) return null;
+    return {
+      level: HEADER_LEVEL[m[1]] || 'log',
+      relSec: rel,
+      frame: (m[3] !== undefined) ? parseInt(m[3], 10) : null,
+      message: m[4]
+    };
+  }
+
+  // Recognise a session marker emitted at the start of each launch:
+  //   ==== FastLogs session <guid> | <UTC> | ...
+  // The second pipe-delimited field is the launch wall-clock in UTC. We track
+  // the nearest preceding marker so each entry's relSec can be turned into an
+  // absolute time. Returns the parsed Date (or null when the field is missing
+  // or unparseable - then entries keep only their relative "+sec" time).
+  var SESSION_RE = /^=+\s*FastLogs session\b/;
+  function parseSessionStart(line) {
+    if (!line || !SESSION_RE.test(line)) return undefined; // not a marker
+    var parts = line.split('|');
+    if (parts.length < 2) return null;
+    var d = new Date(parts[1].trim());
+    return isNaN(d.getTime()) ? null : d;
+  }
+
+  // Format a relative offset (seconds since session start) as "+M:SS.mmm" for
+  // longer runs, or "+S.mmms" for short ones - compact but still precise.
+  function fmtRel(sec) {
+    if (sec === null || sec === undefined || isNaN(sec)) return '';
+    if (sec < 60) return '+' + sec.toFixed(3) + 's';
+    var m = Math.floor(sec / 60);
+    var s = sec - m * 60;
+    return '+' + m + ':' + (s < 10 ? '0' : '') + s.toFixed(3);
+  }
+
+  // Wall-clock for an entry: session-start UTC + relSec, shown in local time.
+  // Returns '' when there is no preceding session marker.
+  function fmtWall(sessionStart, relSec) {
+    if (!sessionStart || relSec === null || relSec === undefined || isNaN(relSec)) return '';
+    var t = new Date(sessionStart.getTime() + relSec * 1000);
+    try { return t.toLocaleString(); } catch (e) { return t.toISOString(); }
+  }
+
   // Build pretty rendered lines.
   var logPrettyEl = document.getElementById('log-pretty');
   var logRawEl = document.getElementById('log-raw');
@@ -832,92 +889,195 @@
   // Store metadata per DOM line for filtering.
   var lineNodes = []; // { el, level, text }
 
-  // Group consecutive trace lines after an error/warn for collapsing.
+  // Append a key/value row to a detail panel (used by the expand block).
+  function detailRow(panel, key, value) {
+    var row = document.createElement('div');
+    row.className = 'log-detail-kv';
+    var k = document.createElement('span');
+    k.className = 'log-detail-key';
+    k.textContent = key;
+    var v = document.createElement('span');
+    v.className = 'log-detail-val';
+    v.textContent = value;
+    row.appendChild(k);
+    row.appendChild(v);
+    panel.appendChild(row);
+  }
+
+  // Walk the lines once, grouping each entry-header with the trace frames that
+  // follow it (isTraceLine), collapsing consecutive identical entries into a
+  // single "xN" row, and tracking the nearest session marker for wall-clock.
+  //
+  // Each entry that carries metadata (a parsed [L|W|E] header) or stack frames
+  // gets a compact gutter toggle (>/v) by its line number. Clicking it expands
+  // ONE unified detail block below the row: a key/value panel (Level, Frame,
+  // Time, repeats) plus the full stack trace. Plain legacy lines with neither
+  // header nor frames render as a bare row (no toggle), keeping the view light.
+  //
+  // The toggle has NO per-element listener - a single delegated listener on the
+  // container (installed after this loop) drives every expand, so it survives
+  // any later re-render/filter that touches the DOM.
+  var expandSeq = 0;        // unique id pairing a toggle with its detail block
+  var sessionStart = null;  // Date of the nearest preceding session marker
   var i = 0;
   var lineNum = 1;
   while (i < logLines.length) {
     var line = logLines[i];
-    var level = detectLevel(line);
 
-    // Check if next lines are trace continuation.
+    // Session marker: remember its UTC for wall-clock, render it as a plain row.
+    var maybeSession = parseSessionStart(line);
+    if (maybeSession !== undefined) sessionStart = maybeSession; // null = unparseable
+
+    var header = parseHeader(line);
+    var level = header ? header.level : detectLevel(line);
+
+    // Collapse consecutive identical raw lines into one entry (repeats xN).
+    var repeats = 1;
+    while (i + repeats < logLines.length && logLines[i + repeats] === line) {
+      repeats++;
+    }
+
+    // Trace continuation lines belong to the LAST occurrence of the entry.
     var traceLines = [];
-    var j = i + 1;
+    var j = i + repeats;
     while (j < logLines.length && isTraceLine(logLines[j])) {
       traceLines.push(logLines[j]);
       j++;
     }
 
-    // Main log line row.
+    var entrySessionStart = sessionStart;
+    var relSec = header ? header.relSec : null;
+    var frame = header ? header.frame : null;
+    var wall = fmtWall(entrySessionStart, relSec);
+    var rel = fmtRel(relSec);
+
+    // Expandable when there is something extra to show below the line.
+    var expandable = (traceLines.length > 0) || (header !== null);
+
+    // Main entry row: line number, gutter toggle (or spacer), text.
     var row = document.createElement('div');
     row.className = 'log-line ' + level;
 
     var numEl = document.createElement('span');
     numEl.className = 'log-line-num';
     numEl.textContent = lineNum;
+    row.appendChild(numEl);
+
+    var detailId = '';
+    if (expandable) {
+      detailId = 'x' + (++expandSeq);
+      var toggle = document.createElement('span');
+      toggle.className = 'log-trace-toggle';
+      toggle.dataset.expand = detailId;
+      toggle.textContent = '▸'; // > (collapsed); flips to v when open
+      var frameNote = (traceLines.length > 0)
+        ? (traceLines.length + ' frame' + (traceLines.length !== 1 ? 's' : ''))
+        : 'details';
+      toggle.title = 'Expand ' + frameNote;
+      row.appendChild(toggle);
+    } else {
+      var spacer = document.createElement('span');
+      spacer.className = 'log-trace-spacer';
+      row.appendChild(spacer);
+    }
 
     var textEl = document.createElement('span');
     textEl.className = 'log-line-text log-level-' + (level === 'log' ? 'l' : level === 'warn' ? 'w' : 'e');
-    textEl.textContent = line;
-
-    row.appendChild(numEl);
+    // Show the header message when parsed (drops the redundant [L]/+time/f
+    // prefix), else the raw line for legacy formats.
+    textEl.textContent = header ? header.message : line;
     row.appendChild(textEl);
-    logPrettyEl.appendChild(row);
 
-    lineNodes.push({ el: row, level: level, text: line });
-    lineNum++;
-    i++;
-
-    // Attach trace block if present.
-    if (traceLines.length > 0) {
-      var traceToggle = document.createElement('div');
-      traceToggle.className = 'log-line log-trace-toggle';
-      var numEl2 = document.createElement('span');
-      numEl2.className = 'log-line-num';
-      numEl2.textContent = '';
-      var traceLabel = document.createElement('span');
-      traceLabel.className = 'log-line-text';
-      traceLabel.textContent = '  [+ ' + traceLines.length + ' stack frame' + (traceLines.length !== 1 ? 's' : '') + ' - click to expand]';
-      traceToggle.appendChild(numEl2);
-      traceToggle.appendChild(traceLabel);
-
-      var traceBody = document.createElement('div');
-      traceBody.className = 'log-trace-body';
-
-      traceLines.forEach(function (tl) {
-        var tr = document.createElement('div');
-        tr.className = 'log-line log-level-l';
-        var tn = document.createElement('span');
-        tn.className = 'log-line-num';
-        tn.textContent = lineNum;
-        var tt = document.createElement('span');
-        tt.className = 'log-line-text';
-        tt.style.color = 'var(--text-dim)';
-        tt.textContent = tl;
-        tr.appendChild(tn);
-        tr.appendChild(tt);
-        traceBody.appendChild(tr);
-        lineNodes.push({ el: tr, level: level, text: tl, traceEl: traceBody });
-        lineNum++;
-      });
-
-      traceToggle.addEventListener('click', function () {
-        traceBody.classList.toggle('open');
-        var open = traceBody.classList.contains('open');
-        traceLabel.textContent = open
-          ? '  [- collapse stack frames]'
-          : '  [+ ' + traceLines.length + ' stack frame' + (traceLines.length !== 1 ? 's' : '') + ' - click to expand]';
-      });
-
-      logPrettyEl.appendChild(traceToggle);
-      logPrettyEl.appendChild(traceBody);
-
-      i = j;
+    if (repeats > 1) {
+      var repeatEl = document.createElement('span');
+      repeatEl.className = 'log-repeat';
+      repeatEl.textContent = 'x' + repeats;
+      repeatEl.title = repeats + ' identical lines collapsed';
+      row.appendChild(repeatEl);
     }
+
+    // Hover tooltip on the row: Frame (only if present) + Time.
+    var tipParts = [];
+    if (frame !== null) tipParts.push('Frame ' + frame);
+    if (rel) tipParts.push('Time ' + rel + (wall ? ' (' + wall + ')' : ''));
+    if (tipParts.length) row.title = tipParts.join('  |  ');
+
+    logPrettyEl.appendChild(row);
+    var rowNode = { el: row, level: level, text: line };
+    lineNodes.push(rowNode);
+    lineNum++;
+
+    // Unified detail block: key/value panel + (optional) stack frames.
+    if (expandable) {
+      var detail = document.createElement('div');
+      detail.className = 'log-entry-detail';
+      detail.dataset.expandFor = detailId;
+      // Pair the row with its detail block so a filter that hides the row also
+      // hides the (possibly expanded) detail beneath it.
+      rowNode.detailEl = detail;
+
+      var kv = document.createElement('div');
+      kv.className = 'log-detail-kv-list';
+      detailRow(kv, 'Level', level.charAt(0).toUpperCase() + level.slice(1));
+      detailRow(kv, 'Frame', frame !== null ? String(frame) : '-');
+      var timeStr = rel ? (rel + (wall ? ' (' + wall + ')' : '')) : '-';
+      detailRow(kv, 'Time', timeStr);
+      if (repeats > 1) detailRow(kv, 'Repeats', 'x' + repeats);
+      detail.appendChild(kv);
+
+      if (traceLines.length > 0) {
+        var stackHead = document.createElement('div');
+        stackHead.className = 'log-detail-stack-head';
+        stackHead.textContent = 'Stack trace (' + traceLines.length + ')';
+        detail.appendChild(stackHead);
+
+        var stack = document.createElement('div');
+        stack.className = 'log-detail-stack';
+        traceLines.forEach(function (tl) {
+          var tr = document.createElement('div');
+          tr.className = 'log-line log-level-l log-trace-frame';
+          var tn = document.createElement('span');
+          tn.className = 'log-line-num';
+          tn.textContent = lineNum;
+          var tt = document.createElement('span');
+          tt.className = 'log-line-text';
+          tt.textContent = tl;
+          tr.appendChild(tn);
+          tr.appendChild(tt);
+          stack.appendChild(tr);
+          // traceEl points at the detail block so filtering skips folded frames.
+          lineNodes.push({ el: tr, level: level, text: tl, traceEl: detail });
+          lineNum++;
+        });
+        detail.appendChild(stack);
+      }
+
+      logPrettyEl.appendChild(detail);
+    }
+
+    i = j; // advance past the repeats and the trace block
   }
 
   if (logLines.length === 0) {
     logPrettyEl.innerHTML = '<div class="log-no-results">Log is empty.</div>';
   }
+
+  // Single delegated click handler for every gutter toggle. Robust against any
+  // later DOM rebuild/filter: it resolves target + detail block at click time
+  // instead of holding per-element listeners (the previous per-toggle approach
+  // lost its handlers whenever the list was re-rendered).
+  logPrettyEl.addEventListener('click', function (e) {
+    var toggle = e.target.closest('.log-trace-toggle');
+    if (!toggle || !logPrettyEl.contains(toggle)) return;
+    var id = toggle.dataset.expand;
+    if (!id) return;
+    var detail = logPrettyEl.querySelector('.log-entry-detail[data-expand-for="' + id + '"]');
+    if (!detail) return;
+    var open = detail.classList.toggle('open');
+    toggle.classList.toggle('open', open);
+    toggle.textContent = open ? '▾' : '▸'; // v / >
+    toggle.title = (open ? 'Collapse' : 'Expand') + ' details';
+  });
 
   // Raw view
   logRawEl.textContent = logText;
@@ -941,6 +1101,8 @@
       var textOk = !q || item.text.toLowerCase().indexOf(q) !== -1;
       var visible = levelOk && textOk;
       item.el.classList.toggle('hidden', !visible);
+      // Keep an entry's detail block in lockstep with its row.
+      if (item.detailEl) item.detailEl.classList.toggle('hidden', !visible);
       if (visible) matchCount++;
     });
 
