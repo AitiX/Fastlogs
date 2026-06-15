@@ -593,6 +593,117 @@ namespace PlayJoy.FastLogs
         }
 
         // ============================================================
+        // Snapshot (full game snapshot: a normal log report PLUS a snapshot.zip of
+        // the game's saves/data attached to the SAME record, kind="snapshot")
+        // ============================================================
+        // SendSnapshot builds the usual report (logs + context + breadcrumbs + device +
+        // optional screenshot + scene context) AND bundles the saves into one snapshot.zip
+        // attached to that record by logId. By default the whole saves folder
+        // (Application.persistentDataPath) is included, EXCLUDING FastLogs's own data dir
+        // (so the zip carries saves, NOT the logs that are already the report body).
+        // AddSnapshotSource / AddSnapshotData add MORE sources on top of that default.
+        // Like the rest of the package, the source-registry void methods are [Conditional]
+        // (stripped in retail/console) and SendSnapshot's awaitable returns a "disabled"
+        // result when stripped.
+
+        /// <summary>
+        /// Register an extra file or folder PATH to include in snapshot.zip, on top of the
+        /// default persistentDataPath source. A folder is added recursively. Idempotent on the
+        /// same path. No-op on WebGL (no file system). Stripped in retail/console.
+        /// </summary>
+        [Conditional("UNITY_EDITOR"), Conditional("DEVELOPMENT_BUILD"), Conditional("LOGSHARE_FORCE_ENABLED")]
+        public static void AddSnapshotSource(string path)
+        {
+#if FASTLOGS_ENABLED
+            if (_runtime != null) _runtime.AddSnapshotSource(path);
+#endif
+        }
+
+        /// <summary>
+        /// Register an in-memory data entry to include in snapshot.zip under the given name
+        /// (WebGL-safe; no file system needed), on top of the default source. Re-registering
+        /// the same name replaces it. Stripped in retail/console.
+        /// </summary>
+        [Conditional("UNITY_EDITOR"), Conditional("DEVELOPMENT_BUILD"), Conditional("LOGSHARE_FORCE_ENABLED")]
+        public static void AddSnapshotData(string name, byte[] data)
+        {
+#if FASTLOGS_ENABLED
+            if (_runtime != null) _runtime.AddSnapshotData(name, data);
+#endif
+        }
+
+        /// <summary>
+        /// Register an in-memory data entry produced lazily at send time by the given provider
+        /// (evaluated when SendSnapshot runs, so the bytes reflect the moment of the snapshot).
+        /// Re-registering the same name replaces it. Stripped in retail/console.
+        /// </summary>
+        [Conditional("UNITY_EDITOR"), Conditional("DEVELOPMENT_BUILD"), Conditional("LOGSHARE_FORCE_ENABLED")]
+        public static void AddSnapshotData(string name, Func<byte[]> provider)
+        {
+#if FASTLOGS_ENABLED
+            if (_runtime != null) _runtime.AddSnapshotData(name, provider);
+#endif
+        }
+
+        /// <summary>Unregister a path previously added with AddSnapshotSource. Stripped in retail/console.</summary>
+        [Conditional("UNITY_EDITOR"), Conditional("DEVELOPMENT_BUILD"), Conditional("LOGSHARE_FORCE_ENABLED")]
+        public static void RemoveSnapshotSource(string path)
+        {
+#if FASTLOGS_ENABLED
+            if (_runtime != null) _runtime.RemoveSnapshotSource(path);
+#endif
+        }
+
+        /// <summary>Drop all registered snapshot sources and data (the default persistentDataPath source still applies per config). Stripped in retail/console.</summary>
+        [Conditional("UNITY_EDITOR"), Conditional("DEVELOPMENT_BUILD"), Conditional("LOGSHARE_FORCE_ENABLED")]
+        public static void ClearSnapshotSources()
+        {
+#if FASTLOGS_ENABLED
+            if (_runtime != null) _runtime.ClearSnapshotSources();
+#endif
+        }
+
+        /// <summary>
+        /// Build and upload a normal report (logs + context + breadcrumbs + device + optional
+        /// screenshot + scene context) AND attach a snapshot.zip of the game's saves/data to the
+        /// SAME record (kind="snapshot", linked by logId). Returns the REPORT result. The zip
+        /// carries the saves (default = the whole persistentDataPath minus FastLogs's own data
+        /// dir, plus any registered sources/data), NOT the FastLogs logs (those are the report
+        /// body). Saves may contain PII - this is an explicit dev action. Awaitable on all Unity
+        /// versions. In stripped builds returns a completed "disabled" result immediately.
+        /// Value-returning: compiles everywhere.
+        /// </summary>
+        public static FlogTask<UploadResultDto> SendSnapshot(string title = null, bool includeScreenshot = true,
+            [System.Runtime.CompilerServices.CallerFilePath] string callerFile = null,
+            [System.Runtime.CompilerServices.CallerLineNumber] int callerLine = 0)
+        {
+#if FASTLOGS_ENABLED
+            if (_runtime == null)
+            {
+                return FlogTask.FromResult(UploadResultDto.Fail("FastLogs is not initialized."));
+            }
+            return _runtime.BeginSendSnapshotFromCode(title, includeScreenshot, new CallSite(callerFile, callerLine));
+#else
+            return FlogTask.FromResult(UploadResultDto.Disabled);
+#endif
+        }
+
+        /// <summary>
+        /// Fire-and-forget: send a full game snapshot (report + snapshot.zip); a status toast shows
+        /// the result. Stripped in retail/console (body and call sites removed). For an awaitable
+        /// result use <see cref="SendSnapshot(string, bool, string, int)"/>.
+        /// </summary>
+        [Conditional("UNITY_EDITOR"), Conditional("DEVELOPMENT_BUILD"), Conditional("LOGSHARE_FORCE_ENABLED")]
+        public static void SendSnapshot(string title, bool includeScreenshot, bool fireAndForget,
+            [System.Runtime.CompilerServices.CallerFilePath] string callerFile = null,
+            [System.Runtime.CompilerServices.CallerLineNumber] int callerLine = 0)
+        {
+#if FASTLOGS_ENABLED
+            if (_runtime != null) _runtime.BeginSendSnapshotFromCode(title, includeScreenshot, new CallSite(callerFile, callerLine));
+#endif
+        }
+
+        // ============================================================
         // Internals
         // ============================================================
 

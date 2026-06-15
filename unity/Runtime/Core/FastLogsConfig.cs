@@ -43,6 +43,9 @@ namespace PlayJoy.FastLogs
         [Header("Files")]
         [SerializeField] private FilesSection _files = new FilesSection();
 
+        [Header("Snapshot")]
+        [SerializeField] private SnapshotSection _snapshot = new SnapshotSection();
+
         [Header("Net")]
         [SerializeField] private NetSection _net = new NetSection();
 
@@ -68,6 +71,7 @@ namespace PlayJoy.FastLogs
         public DiagnosticsSection Diagnostics => _diagnostics;
         public TriggerConfig Trigger => _trigger;
         public FilesSection Files => _files;
+        public SnapshotSection Snapshot => _snapshot;
         public NetSection Net => _net;
         public RetrySection Retry => _retry;
         public LoopGuardSection LoopGuard => _loopGuard;
@@ -252,6 +256,48 @@ namespace PlayJoy.FastLogs
                 }
                 return serverEndpointUrl.Substring(0, idx) + "/api/files"
                     + serverEndpointUrl.Substring(idx + "/api/logs".Length);
+            }
+        }
+
+        [Serializable]
+        public sealed class SnapshotSection
+        {
+            [Tooltip("Include the WHOLE saves folder (Application.persistentDataPath) as the default snapshot source, EXCLUDING FastLogs's own on-disk data dir (see ExcludePaths). On by default so a snapshot works out of the box with no registration. Turn off to ship ONLY the sources registered via FastLogs.AddSnapshotSource / AddSnapshotData.")]
+            public bool IncludePersistentDataPath = true;
+
+            [Tooltip("Absolute paths (files or folders) excluded from the default persistentDataPath source. FastLogs's own data dir (persistentDataPath/FastLogs - the recorder store + pending crash outbox) is ALWAYS excluded automatically at Init so a snapshot never re-bundles our own logs/recordings (no recursion/dupe); add more here to skip extra subfolders. Matched as a path prefix, case-insensitively.")]
+            public string[] ExcludePaths = new string[0];
+
+            [Tooltip("Hard cap on the DECODED size in bytes of the built snapshot.zip, enforced on the client AFTER zipping (the server caps too). Default = the Files.MaxFileBytes cap (25 MB). 0 = no client cap.")]
+            [Min(0)]
+            public long MaxSnapshotBytes = 25L * 1024 * 1024; // 25 MB - mirrors FilesSection.MaxFileBytes
+
+            // Absolute path of FastLogs's own on-disk data dir, seeded into ExcludePaths
+            // once at Init (it depends on Application.persistentDataPath, a runtime value, so
+            // it cannot be a serialized constant). Idempotent: calling twice does not duplicate.
+            // Keeps the default "whole persistentDataPath" source from ever including the
+            // recorder store / pending crash outbox (which already are the report body).
+            public void EnsureDataDirExcluded(string fastLogsDataDir)
+            {
+                if (string.IsNullOrEmpty(fastLogsDataDir))
+                {
+                    return;
+                }
+                if (ExcludePaths == null)
+                {
+                    ExcludePaths = new string[0];
+                }
+                for (int i = 0; i < ExcludePaths.Length; i++)
+                {
+                    if (string.Equals(ExcludePaths[i], fastLogsDataDir, StringComparison.OrdinalIgnoreCase))
+                    {
+                        return; // already present
+                    }
+                }
+                var grown = new string[ExcludePaths.Length + 1];
+                Array.Copy(ExcludePaths, grown, ExcludePaths.Length);
+                grown[ExcludePaths.Length] = fastLogsDataDir;
+                ExcludePaths = grown;
             }
         }
 

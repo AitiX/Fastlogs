@@ -112,6 +112,38 @@ namespace PlayJoy.FastLogs
         private const int MaxQueuedAttachments = 8;
         private readonly List<string> _queuedAttachments = new List<string>();
 
+        // ---- Snapshot source registry (full game snapshot feature) ----
+        // Extra sources added ON TOP of the default persistentDataPath source: file/folder
+        // PATHS (AddSnapshotSource) and in-memory named DATA providers (AddSnapshotData).
+        // Collected at SendSnapshot time, zipped into snapshot.zip and attached to the report
+        // record (kind="snapshot"). The default source (whole persistentDataPath minus the
+        // FastLogs data dir + config ExcludePaths) is applied by SendSnapshotRoutine itself,
+        // NOT stored here. Data providers are evaluated lazily at send time. Insertion order
+        // is preserved (List for paths, name->provider map for data).
+        private readonly List<string> _snapshotSources = new List<string>();
+        private readonly Dictionary<string, Func<byte[]>> _snapshotData = new Dictionary<string, Func<byte[]>>(StringComparer.Ordinal);
+
+        // Absolute path of FastLogs's own on-disk data dir (persistentDataPath/FastLogs),
+        // resolved once at Init and seeded into Snapshot.ExcludePaths so the default source
+        // never re-bundles our own recorder store / pending crash outbox. Null off-disk.
+        private string _fastLogsDataDir;
+
+        // In-memory attachments (already-built bytes, e.g. snapshot.zip) queued to upload as
+        // attachments of the NEXT successful report (logId = that report's id), in parallel
+        // to the path-based _queuedAttachments. Each carries its own server kind (e.g.
+        // "snapshot"). Drained alongside the path queue by UploadQueuedAttachments and cleared
+        // on a successful send. Lets a built blob ride the report record without touching disk.
+        private readonly List<BlobAttachment> _queuedBlobAttachments = new List<BlobAttachment>();
+
+        // A pre-built in-memory attachment (bytes + name + mime + server kind) for the report.
+        private struct BlobAttachment
+        {
+            public byte[] Bytes;
+            public string FileName;
+            public string Mime;
+            public string Kind;
+        }
+
         // Scene-hierarchy snapshot captured via CaptureSceneContext(), queued for the next
         // send (like _queuedShots) and cleared once that send resolves. _sceneContextSentOnce
         // is the once-per-session loop guard for SendSceneContext() (bypassed with allowRepeat).
@@ -269,6 +301,17 @@ namespace PlayJoy.FastLogs
             // Auto-send (on exception and/or on pattern): hook the (main-thread) log
             // callback once.
             HookAutoSend();
+
+            // Snapshot default-exclude seeding: resolve FastLogs's own data dir
+            // (persistentDataPath/FastLogs - same FolderName the recorder + pending crash
+            // queue use) and add it to Snapshot.ExcludePaths so the default "whole
+            // persistentDataPath" snapshot source never re-bundles our own logs/recordings/
+            // outbox (no recursion/dupe). Idempotent (EnsureDataDirExcluded de-dups).
+            ResolveFastLogsDataDir();
+            if (_config != null && _config.Snapshot != null)
+            {
+                _config.Snapshot.EnsureDataDirExcluded(_fastLogsDataDir);
+            }
 
             FlogLog.Info("Runtime initialized.");
         }
@@ -639,7 +682,9 @@ namespace PlayJoy.FastLogs
             {
                 // Cancel: disable this exact site for the rest of the session.
                 _disabledSites.Add(key);
-                if (pending.Kind == PendingLoopConfirm.SendKind.BeginSend && pending.Task != null)
+                if ((pending.Kind == PendingLoopConfirm.SendKind.BeginSend
+                     || pending.Kind == PendingLoopConfirm.SendKind.Snapshot)
+                    && pending.Task != null)
                 {
                     pending.Task.SetResult(LoopDeclinedResult(key));
                 }
@@ -665,6 +710,10 @@ namespace PlayJoy.FastLogs
                         break;
                     case PendingLoopConfirm.SendKind.SceneContext:
                         SendSceneContext(pending.AllowRepeat, viaCode: true, site: pending.Site);
+                        break;
+                    case PendingLoopConfirm.SendKind.Snapshot:
+                        ForgetPendingCrashOwnership();
+                        StartSnapshotSend(pending.Title, pending.IncludeScreenshot, pending.Site, pending.Task);
                         break;
                 }
             }
@@ -739,7 +788,7 @@ namespace PlayJoy.FastLogs
         // Captures a deferred code send so a "Send" confirm answer can replay it exactly.
         private struct PendingLoopConfirm
         {
-            public enum SendKind { QuickSend, BeginSend, SceneContext }
+            public enum SendKind { QuickSend, BeginSend, SceneContext, Snapshot }
 
             public SendKind Kind;
             public string SiteKey;
@@ -779,6 +828,21 @@ namespace PlayJoy.FastLogs
             public static PendingLoopConfirm SceneContext(CallSite site, bool allowRepeat)
             {
                 return new PendingLoopConfirm { Kind = SendKind.SceneContext, SiteKey = site.Key, Site = site, AllowRepeat = allowRepeat };
+            }
+
+            // A deferred SendSnapshot: on confirm it rebuilds snapshot.zip and sends (Title +
+            // IncludeScreenshot reused from the BeginSend fields, the caller's awaited Task too).
+            public static PendingLoopConfirm Snapshot(CallSite site, string title, bool includeScreenshot, FlogTask<UploadResultDto> task)
+            {
+                return new PendingLoopConfirm
+                {
+                    Kind = SendKind.Snapshot,
+                    SiteKey = site.Key,
+                    Site = site,
+                    IncludeScreenshot = includeScreenshot,
+                    Title = title,
+                    Task = task
+                };
             }
         }
 
@@ -1821,18 +1885,24 @@ namespace PlayJoy.FastLogs
         // the queue is cleared. Best-effort: a failed attachment is logged and skipped.
         private void UploadQueuedAttachments(string logId)
         {
-            if (_fileUploader == null || _queuedAttachments.Count == 0 || string.IsNullOrEmpty(logId))
+            if (_fileUploader == null || string.IsNullOrEmpty(logId))
+            {
+                return;
+            }
+            if (_queuedAttachments.Count == 0 && _queuedBlobAttachments.Count == 0)
             {
                 return;
             }
             // Snapshot + clear up front so a re-entrant send does not double-upload.
             var paths = new List<string>(_queuedAttachments);
             _queuedAttachments.Clear();
-            try { StartCoroutine(UploadAttachmentsRoutine(paths, logId)); }
+            var blobs = new List<BlobAttachment>(_queuedBlobAttachments);
+            _queuedBlobAttachments.Clear();
+            try { StartCoroutine(UploadAttachmentsRoutine(paths, blobs, logId)); }
             catch (Exception e) { FlogLog.Exception(e); }
         }
 
-        private IEnumerator UploadAttachmentsRoutine(List<string> paths, string logId)
+        private IEnumerator UploadAttachmentsRoutine(List<string> paths, List<BlobAttachment> blobs, string logId)
         {
             for (int i = 0; i < paths.Count; i++)
             {
@@ -1907,6 +1977,51 @@ namespace PlayJoy.FastLogs
                     FlogLog.Warn("AttachFile: upload of " + req.FileName + " failed.");
                 }
             }
+
+            // In-memory blob attachments (e.g. snapshot.zip) uploaded with their own kind,
+            // linked to the same report via LogId. Bytes are already built; just enforce the
+            // size cap and upload one at a time (best-effort, like the path loop above).
+            for (int i = 0; blobs != null && i < blobs.Count; i++)
+            {
+                BlobAttachment blob = blobs[i];
+                if (blob.Bytes == null || blob.Bytes.Length == 0)
+                {
+                    continue;
+                }
+
+                int cap = _config != null && _config.Files != null ? _config.Files.MaxFileBytes : (25 * 1024 * 1024);
+                if (cap > 0 && blob.Bytes.Length > cap)
+                {
+                    FlogLog.Warn("Snapshot attachment " + blob.FileName + " exceeds the file size cap, skipped.");
+                    continue;
+                }
+
+                var blobReq = new FileUploadRequest
+                {
+                    Bytes = blob.Bytes,
+                    FileName = string.IsNullOrEmpty(blob.FileName) ? "attachment.bin" : blob.FileName,
+                    Mime = string.IsNullOrEmpty(blob.Mime) ? "application/octet-stream" : blob.Mime,
+                    Kind = string.IsNullOrEmpty(blob.Kind) ? "other" : blob.Kind,
+                    LogId = logId
+                };
+
+                FlogTask<FileUploadResultDto> blobUpload = null;
+                try { blobUpload = _fileUploader.UploadFileAsync(blobReq, _config); }
+                catch (Exception e) { FlogLog.Exception(e); }
+
+                if (blobUpload == null)
+                {
+                    continue;
+                }
+                while (!blobUpload.IsCompleted)
+                {
+                    yield return null;
+                }
+                if (blobUpload.IsFaulted || !blobUpload.Result.Success)
+                {
+                    FlogLog.Warn("Snapshot attachment upload of " + blobReq.FileName + " failed.");
+                }
+            }
         }
 
         // Archive name for a folder upload: "<folderName>.zip" (or "folder.zip" as a fallback).
@@ -1952,6 +2067,539 @@ namespace PlayJoy.FastLogs
                 case ".pdf": return "application/pdf";
                 default: return "application/octet-stream";
             }
+        }
+
+        // ============================================================
+        // Snapshot (full game snapshot: report + snapshot.zip on the SAME record)
+        // ============================================================
+        // SendSnapshot orchestrates two EXISTING pieces, reimplementing neither:
+        //   1) the normal report send (BeginSend -> SendRoutine -> BuildReport): logs +
+        //      context + breadcrumbs + device + optional screenshot + scene context. This is
+        //      the readable record body, sent UNCHANGED;
+        //   2) snapshot.zip - ONLY the saves/registered data - built in memory via the
+        //      existing FolderZipUtil and queued as an in-memory attachment (kind="snapshot")
+        //      that UploadQueuedAttachments uploads with logId = the report's id.
+        // The zip never contains the FastLogs logs (they are already the report body) nor the
+        // FastLogs data dir (recorder store / pending outbox), which is excluded by default.
+
+        /// <summary>Register an extra file/folder path to include in snapshot.zip. Idempotent on the same path.</summary>
+        public void AddSnapshotSource(string path)
+        {
+            if (string.IsNullOrEmpty(path))
+            {
+                return;
+            }
+#if UNITY_WEBGL && !UNITY_EDITOR
+            FlogLog.Warn("AddSnapshotSource is unavailable on WebGL (no file system); ignored. Use AddSnapshotData(name, bytes).");
+            return;
+#else
+            for (int i = 0; i < _snapshotSources.Count; i++)
+            {
+                if (string.Equals(_snapshotSources[i], path, StringComparison.OrdinalIgnoreCase))
+                {
+                    return; // already registered
+                }
+            }
+            _snapshotSources.Add(path);
+#endif
+        }
+
+        /// <summary>Register an in-memory data entry (name -> bytes) to include in snapshot.zip. Re-registering a name replaces it.</summary>
+        public void AddSnapshotData(string name, byte[] data)
+        {
+            if (string.IsNullOrEmpty(name) || data == null)
+            {
+                return;
+            }
+            byte[] copy = data; // captured by value; provider returns the same reference
+            _snapshotData[name] = () => copy;
+        }
+
+        /// <summary>Register an in-memory data entry produced lazily at send time. Re-registering a name replaces it.</summary>
+        public void AddSnapshotData(string name, Func<byte[]> provider)
+        {
+            if (string.IsNullOrEmpty(name) || provider == null)
+            {
+                return;
+            }
+            _snapshotData[name] = provider;
+        }
+
+        /// <summary>Unregister a path previously added with AddSnapshotSource.</summary>
+        public void RemoveSnapshotSource(string path)
+        {
+            if (string.IsNullOrEmpty(path))
+            {
+                return;
+            }
+            for (int i = _snapshotSources.Count - 1; i >= 0; i--)
+            {
+                if (string.Equals(_snapshotSources[i], path, StringComparison.OrdinalIgnoreCase))
+                {
+                    _snapshotSources.RemoveAt(i);
+                }
+            }
+        }
+
+        /// <summary>Drop all registered snapshot sources and data (the default persistentDataPath source still applies per config).</summary>
+        public void ClearSnapshotSources()
+        {
+            _snapshotSources.Clear();
+            _snapshotData.Clear();
+        }
+
+        // FastLogs.SendSnapshot() entry. Guards the call site (like SendAsync), then builds
+        // snapshot.zip + sends the report. On a deferred (UI-confirm) loop-guard hit the build
+        // is postponed to the confirm answer (no zip work / no queued blob unless confirmed).
+        public FlogTask<UploadResultDto> BeginSendSnapshotFromCode(string title, bool includeScreenshot, CallSite site)
+        {
+            var task = FlogTask.Create<UploadResultDto>();
+            switch (EvaluateLoopGuard(site, PendingLoopConfirm.Snapshot(site, title, includeScreenshot, task)))
+            {
+                case LoopGuardDecision.Proceed:
+                    // A fresh, code-initiated report: detach from any pending crash file.
+                    ForgetPendingCrashOwnership();
+                    StartSnapshotSend(title, includeScreenshot, site, task);
+                    return task;
+                case LoopGuardDecision.Dropped:
+                    task.SetResult(LoopDeclinedResult(site.Key));
+                    return task;
+                case LoopGuardDecision.Deferred:
+                    // Confirm shown: task stays pending, resolved later by OnLoopConfirmAnswered
+                    // (which calls StartSnapshotSend on "Send", or declines on "Cancel").
+                    return task;
+                default:
+                    task.SetResult(_lastResult);
+                    return task;
+            }
+        }
+
+        // Start the snapshot pipeline: build the zip + queue it, then send the report. Drives
+        // SendSnapshotRoutine, which forwards the report result onto the caller's task. Never
+        // throws; failures resolve the task.
+        private void StartSnapshotSend(string title, bool includeScreenshot, CallSite site, FlogTask<UploadResultDto> task)
+        {
+            // Block while a send is in flight or a retry is pending, mirroring BeginSend's
+            // guard (the report send underneath would refuse anyway; we stop before zipping).
+            if (_isBusy || _retryCoroutine != null)
+            {
+                ShowToast(ToastKind.Info,
+                    _retryCoroutine != null
+                        ? "FastLogs: waiting to retry the current send"
+                        : "FastLogs: a send is already in progress",
+                    null, 2.5f, false);
+                task.SetResult(_lastResult);
+                return;
+            }
+
+            try
+            {
+                StartCoroutine(SendSnapshotRoutine(title, includeScreenshot, site, task));
+            }
+            catch (Exception e)
+            {
+                FlogLog.Exception(e);
+                var fail = UploadResultDto.Fail("Failed to start snapshot send: " + e.Message);
+                ShowToast(ToastKind.Error, "FastLogs: " + fail.Error, null, 0f, false);
+                task.SetResult(fail);
+            }
+        }
+
+        // The snapshot coroutine: (1) capture scene context for the REPORT (queued like the
+        // overlay does), (2) build snapshot.zip in memory from the default + registered sources,
+        // (3) queue it as a kind="snapshot" attachment, (4) send the report via the existing
+        // BeginSend path and forward its result to the caller. The attachment uploads after the
+        // report succeeds (UploadQueuedAttachments, logId = result.Id). The report still sends
+        // even when the zip is empty/over-cap (the readable record is the primary value).
+        private IEnumerator SendSnapshotRoutine(string title, bool includeScreenshot, CallSite site, FlogTask<UploadResultDto> task)
+        {
+            // Scene context rides the REPORT (allowRepeat so a fresh hierarchy is captured each
+            // snapshot). Mirrors the overlay's "arm scene context, then send" flow.
+            CaptureSceneContext(true);
+
+            // Show progress immediately; the zip build below can take a frame for big saves.
+            ShowToast(ToastKind.Progress, "FastLogs: building snapshot...", null, 0f, false);
+            yield return null; // let the toast paint before the (synchronous) zip work
+
+            // Build snapshot.zip in memory. Never throws; null/empty means "nothing to bundle".
+            byte[] zip = null;
+            try { zip = BuildSnapshotZip(); }
+            catch (Exception e) { FlogLog.Exception(e); }
+
+            if (zip != null && zip.Length > 0)
+            {
+                // Enforce MaxSnapshotBytes AFTER zipping (it bounds the real payload). 0 = no cap.
+                long cap = _config != null && _config.Snapshot != null ? _config.Snapshot.MaxSnapshotBytes : (25L * 1024 * 1024);
+                if (cap > 0 && zip.Length > cap)
+                {
+                    FlogLog.Warn("Snapshot: snapshot.zip (" + (zip.Length / 1024) + " KB) exceeds MaxSnapshotBytes ("
+                        + (cap / 1024) + " KB); the report is still sent without it.");
+                    ShowToast(ToastKind.Info, "FastLogs: snapshot too large, sending report only", null, 4f, false);
+                }
+                else
+                {
+                    // Queue snapshot.zip as an in-memory attachment of the report being sent
+                    // next; UploadQueuedAttachments uploads it with logId = result.Id.
+                    _queuedBlobAttachments.Add(new BlobAttachment
+                    {
+                        Bytes = zip,
+                        FileName = "snapshot.zip",
+                        Mime = "application/zip",
+                        Kind = "snapshot"
+                    });
+                }
+            }
+            else
+            {
+                FlogLog.Info("Snapshot: no saves/data to bundle; sending the report only.");
+            }
+
+            // Send the report through the EXISTING path (attachQueuedShots true so the live/
+            // queued screenshots + scene context ride along; viaCode preserves the badge).
+            FlogTask<UploadResultDto> inner = BeginSend(includeScreenshot, title, null, attachQueuedShots: true, viaCode: true, site: site);
+
+            if (inner == null)
+            {
+                // Could not start (e.g. no uploader): drop the queued blob so it does not ride
+                // an unrelated later send, and resolve with the last known result.
+                _queuedBlobAttachments.Clear();
+                task.SetResult(_lastResult);
+                yield break;
+            }
+
+            while (!inner.IsCompleted)
+            {
+                yield return null;
+            }
+
+            UploadResultDto result;
+            try { result = inner.Result; }
+            catch (Exception e)
+            {
+                FlogLog.Exception(e);
+                result = UploadResultDto.Fail("Snapshot send faulted: " + e.Message);
+            }
+            task.SetResult(result);
+        }
+
+        // Build snapshot.zip in memory from: the default source (the WHOLE persistentDataPath
+        // minus Snapshot.ExcludePaths, when IncludePersistentDataPath) + registered source
+        // paths (files/folders) + registered in-memory data. Returns the zip bytes, or null
+        // when there is nothing to bundle. Never throws.
+        //
+        // Reuse note: the existing FolderZipUtil exposes only ZipFolder(root) (single tree,
+        // no excludes) and ZipFiles(paths) (flat names). To compose multiple roots WITH
+        // exclusions AND in-memory data into one tree-preserving archive without duplicating
+        // the zip mechanics (and without editing the Net assembly), we STAGE the selected
+        // content into one temp directory under Application.temporaryCachePath - never inside
+        // persistentDataPath - and call FolderZipUtil.ZipFolder once on it, then delete the
+        // staging dir. This keeps all zip mechanics in the shared util. (A future composing
+        // overload on FolderZipUtil would let this stream straight from the sources.)
+        private byte[] BuildSnapshotZip()
+        {
+            // Staging-then-zip uses the file system. On WebGL the player has no real writable
+            // disk for Directory/File ops the way desktop/mobile do; persistentDataPath is
+            // IDBFS and temporaryCachePath staging is unreliable, so a snapshot there is
+            // effectively a no-op (build returns null and only the report is sent). Snapshots
+            // are a dev action and primarily target editor/standalone/mobile dev builds.
+            string staging = null;
+            try
+            {
+                string tempRoot;
+                try { tempRoot = Application.temporaryCachePath; }
+                catch { tempRoot = null; }
+                if (string.IsNullOrEmpty(tempRoot))
+                {
+                    tempRoot = System.IO.Path.GetTempPath();
+                }
+
+                staging = System.IO.Path.Combine(tempRoot, "FastLogsSnapshot_" + Guid.NewGuid().ToString("N"));
+                System.IO.Directory.CreateDirectory(staging);
+
+                int staged = 0;
+
+                // 1) Default source: the whole persistentDataPath, minus the exclude prefixes
+                //    (which always include the FastLogs data dir, seeded at Init).
+                if (_config == null || _config.Snapshot == null || _config.Snapshot.IncludePersistentDataPath)
+                {
+                    string saves = null;
+                    try { saves = Application.persistentDataPath; }
+                    catch { saves = null; }
+                    if (!string.IsNullOrEmpty(saves) && System.IO.Directory.Exists(saves))
+                    {
+                        staged += StageDirectory(saves, System.IO.Path.Combine(staging, "persistentData"), GetExcludePaths());
+                    }
+                }
+
+                // 2) Registered extra source paths (files or folders), each under sources/<leaf>.
+                var usedSourceNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                for (int i = 0; i < _snapshotSources.Count; i++)
+                {
+                    string src = _snapshotSources[i];
+                    if (string.IsNullOrEmpty(src))
+                    {
+                        continue;
+                    }
+                    try
+                    {
+                        if (System.IO.Directory.Exists(src))
+                        {
+                            string leaf = UniqueStagingName(usedSourceNames, SafeLeafName(src));
+                            staged += StageDirectory(src, System.IO.Path.Combine(staging, "sources", leaf), GetExcludePaths());
+                        }
+                        else if (System.IO.File.Exists(src))
+                        {
+                            string leaf = UniqueStagingName(usedSourceNames, SafeLeafName(src));
+                            string destDir = System.IO.Path.Combine(staging, "sources");
+                            System.IO.Directory.CreateDirectory(destDir);
+                            System.IO.File.Copy(src, System.IO.Path.Combine(destDir, leaf), true);
+                            staged++;
+                        }
+                        else
+                        {
+                            FlogLog.Warn("Snapshot source no longer exists, skipped: " + src);
+                        }
+                    }
+                    catch (Exception e) { FlogLog.Exception(e); }
+                }
+
+                // 3) Registered in-memory data, written under data/<name> (provider evaluated now).
+                if (_snapshotData.Count > 0)
+                {
+                    string dataDir = System.IO.Path.Combine(staging, "data");
+                    var usedDataNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    foreach (var kv in _snapshotData)
+                    {
+                        byte[] bytes = null;
+                        try { bytes = kv.Value != null ? kv.Value() : null; }
+                        catch (Exception e) { FlogLog.Exception(e); }
+                        if (bytes == null)
+                        {
+                            continue;
+                        }
+                        try
+                        {
+                            System.IO.Directory.CreateDirectory(dataDir);
+                            string fileName = UniqueStagingName(usedDataNames, SanitizeEntryName(kv.Key));
+                            System.IO.File.WriteAllBytes(System.IO.Path.Combine(dataDir, fileName), bytes);
+                            staged++;
+                        }
+                        catch (Exception e) { FlogLog.Exception(e); }
+                    }
+                }
+
+                if (staged == 0)
+                {
+                    return null; // nothing selected -> no snapshot.zip
+                }
+
+                // One reuse of the shared zip util on the composed tree.
+                return FolderZipUtil.ZipFolder(staging);
+            }
+            catch (Exception e)
+            {
+                FlogLog.Exception(e);
+                return null;
+            }
+            finally
+            {
+                if (!string.IsNullOrEmpty(staging))
+                {
+                    try
+                    {
+                        if (System.IO.Directory.Exists(staging))
+                        {
+                            System.IO.Directory.Delete(staging, true);
+                        }
+                    }
+                    catch (Exception e) { FlogLog.Exception(e); }
+                }
+            }
+        }
+
+        // Copy every file under sourceDir into destDir, preserving the relative tree, skipping
+        // any file whose full path starts with one of the exclude prefixes (case-insensitive).
+        // Returns the number of files staged. Best-effort: an unreadable file is skipped.
+        private static int StageDirectory(string sourceDir, string destDir, string[] excludePrefixes)
+        {
+            int count = 0;
+            string sourceFull;
+            try { sourceFull = System.IO.Path.GetFullPath(sourceDir); }
+            catch { return 0; }
+
+            string[] files;
+            try { files = System.IO.Directory.GetFiles(sourceFull, "*", System.IO.SearchOption.AllDirectories); }
+            catch (Exception e) { FlogLog.Exception(e); return 0; }
+
+            string baseDir = sourceFull.EndsWith(System.IO.Path.DirectorySeparatorChar.ToString(), StringComparison.Ordinal)
+                ? sourceFull
+                : sourceFull + System.IO.Path.DirectorySeparatorChar;
+
+            for (int i = 0; i < files.Length; i++)
+            {
+                string file = files[i];
+                if (IsExcluded(file, excludePrefixes))
+                {
+                    continue;
+                }
+                try
+                {
+                    string rel = file.StartsWith(baseDir, StringComparison.OrdinalIgnoreCase)
+                        ? file.Substring(baseDir.Length)
+                        : System.IO.Path.GetFileName(file);
+                    string dest = System.IO.Path.Combine(destDir, rel);
+                    string destParent = System.IO.Path.GetDirectoryName(dest);
+                    if (!string.IsNullOrEmpty(destParent))
+                    {
+                        System.IO.Directory.CreateDirectory(destParent);
+                    }
+                    System.IO.File.Copy(file, dest, true);
+                    count++;
+                }
+                catch (Exception e) { FlogLog.Exception(e); }
+            }
+            return count;
+        }
+
+        // True when fullPath sits under (or equals) any exclude prefix. Both sides are
+        // normalized to full paths so the FastLogs data dir prefix matches its files.
+        private static bool IsExcluded(string fullPath, string[] excludePrefixes)
+        {
+            if (excludePrefixes == null || excludePrefixes.Length == 0)
+            {
+                return false;
+            }
+            string norm;
+            try { norm = System.IO.Path.GetFullPath(fullPath); }
+            catch { norm = fullPath; }
+
+            for (int i = 0; i < excludePrefixes.Length; i++)
+            {
+                string ex = excludePrefixes[i];
+                if (string.IsNullOrEmpty(ex))
+                {
+                    continue;
+                }
+                string exNorm;
+                try { exNorm = System.IO.Path.GetFullPath(ex); }
+                catch { exNorm = ex; }
+
+                if (norm.StartsWith(exNorm, StringComparison.OrdinalIgnoreCase))
+                {
+                    // Guard against a partial-segment match ("/save" matching "/saves"):
+                    // accept only an exact match or a real subpath (next char is a separator).
+                    if (norm.Length == exNorm.Length)
+                    {
+                        return true;
+                    }
+                    char next = norm[exNorm.Length];
+                    char trailing = exNorm.Length > 0 ? exNorm[exNorm.Length - 1] : '\0';
+                    if (next == System.IO.Path.DirectorySeparatorChar || next == System.IO.Path.AltDirectorySeparatorChar
+                        || trailing == System.IO.Path.DirectorySeparatorChar || trailing == System.IO.Path.AltDirectorySeparatorChar)
+                    {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
+
+        // The effective exclude prefix list for the default source: the config ExcludePaths
+        // (already seeded with the FastLogs data dir at Init). Returns an empty array, never null.
+        private string[] GetExcludePaths()
+        {
+            string[] cfg = _config != null && _config.Snapshot != null ? _config.Snapshot.ExcludePaths : null;
+            if (cfg != null && cfg.Length > 0)
+            {
+                return cfg;
+            }
+            // Defensive: if the config seed was somehow missed, still exclude our own data dir.
+            return string.IsNullOrEmpty(_fastLogsDataDir) ? new string[0] : new[] { _fastLogsDataDir };
+        }
+
+        // Resolve FastLogs's own on-disk data dir (Application.persistentDataPath/FastLogs - the
+        // same FolderName the LogRecorder store and PendingCrashQueue outbox live under), to be
+        // excluded by default. Null when persistentDataPath is unavailable.
+        private void ResolveFastLogsDataDir()
+        {
+            string root = null;
+            try { root = Application.persistentDataPath; }
+            catch { root = null; }
+            _fastLogsDataDir = string.IsNullOrEmpty(root) ? null : System.IO.Path.Combine(root, "FastLogs");
+        }
+
+        // Leaf folder/file name of a source path, for the staging subfolder. Falls back to a
+        // generic name when the path has no usable leaf.
+        private static string SafeLeafName(string path)
+        {
+            try
+            {
+                string trimmed = path.TrimEnd('/', '\\');
+                string leaf = System.IO.Path.GetFileName(trimmed);
+                return string.IsNullOrEmpty(leaf) ? "source" : SanitizeEntryName(leaf);
+            }
+            catch
+            {
+                return "source";
+            }
+        }
+
+        // Replace path separators / invalid file chars in a registered data name so it is a
+        // single safe file name inside the staging "data" folder.
+        private static string SanitizeEntryName(string name)
+        {
+            if (string.IsNullOrEmpty(name))
+            {
+                return "entry";
+            }
+            var sb = new System.Text.StringBuilder(name.Length);
+            char[] invalid = System.IO.Path.GetInvalidFileNameChars();
+            for (int i = 0; i < name.Length; i++)
+            {
+                char c = name[i];
+                bool bad = c == '/' || c == '\\';
+                if (!bad)
+                {
+                    for (int j = 0; j < invalid.Length; j++)
+                    {
+                        if (invalid[j] == c) { bad = true; break; }
+                    }
+                }
+                sb.Append(bad ? '_' : c);
+            }
+            string result = sb.ToString();
+            return string.IsNullOrEmpty(result) ? "entry" : result;
+        }
+
+        // Ensure a staging name is unique within its folder ("save", "save (1)", ...).
+        private static string UniqueStagingName(HashSet<string> used, string name)
+        {
+            if (used.Add(name))
+            {
+                return name;
+            }
+            string stem;
+            string ext;
+            int dot = name.LastIndexOf('.');
+            if (dot > 0)
+            {
+                stem = name.Substring(0, dot);
+                ext = name.Substring(dot);
+            }
+            else
+            {
+                stem = name;
+                ext = string.Empty;
+            }
+            for (int n = 1; n < 10000; n++)
+            {
+                string candidate = stem + " (" + n + ")" + ext;
+                if (used.Add(candidate))
+                {
+                    return candidate;
+                }
+            }
+            return name;
         }
 
         // ---- Send pipeline ----
@@ -2206,6 +2854,12 @@ namespace PlayJoy.FastLogs
                 // (this send is done; kept only across transient retries, handled above).
                 if (_lastSendAttachQueued) _queuedShots.Clear();
                 if (_lastSendHadSceneContext) _queuedSceneContext = null;
+
+                // Drop any queued in-memory attachment (e.g. snapshot.zip) too: it was built
+                // for THIS report; a terminal failure means it never rode a record, so it must
+                // not linger and attach to a later unrelated send. Survives transient retries
+                // (only this terminal branch clears it; success clears it in UploadQueuedAttachments).
+                _queuedBlobAttachments.Clear();
 
                 ShowToast(ToastKind.Error, "FastLogs error: " + result.Error, null, 0f, true);
 
