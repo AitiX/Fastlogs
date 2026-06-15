@@ -142,7 +142,7 @@ http://localhost:8787
   "name": "save_slot_3.zip",       // ОБЯЗ. имя файла (сервер берёт только basename; путь обрезается)
   "mime": "application/zip",       // ОПЦ. MIME-тип; по умолчанию отдаётся application/octet-stream
   "fileBase64": "UEsDBBQ...",      // ОБЯЗ. содержимое файла в base64 (БЕЗ префикса "data:")
-  "kind": "save",                  // ОПЦ. file|folder|save|screenshot|archive|other (иное -> null)
+  "kind": "save",                  // ОПЦ. file|folder|save|snapshot|screenshot|archive|other (иное -> null)
   "logId": "a7Bk9Q",               // ОПЦ. привязка к логу: файл появится в attachments[] этого лога
   "groupId": "session-42",         // ОПЦ. групповая метка (несколько файлов одной операции)
   "title": "Save before crash",    // ОПЦ. <=120 символов
@@ -170,6 +170,8 @@ http://localhost:8787
 | `GET /files/<id>/download` | сам блоб; `Content-Disposition: attachment` с корректным именем, `Content-Type` из `mime` |
 
 Файл, привязанный по `logId`, дополнительно появляется в `attachments[]` ответа `GET /api/logs/<id>` и в панели **Attachments** вьюера лога (`downloadUrl` - относительный).
+
+**`kind: "snapshot"` - полный снимок состояния игры (saves + data).** Это обычное вложение `/api/files` (тот же транспорт, хранение, ретеншн, кап `MAX_FILE_BYTES`), просто с особым `kind`. Архив `snapshot.zip` собирает клиент через `SendSnapshot`: туда кладутся **сейвы + зарегистрированные данные** (по умолчанию весь каталог сейвов, кроме собственного data-каталога FastLogs), но **НЕ** логи самого отчёта - логи уже являются телом записи лога (включение их в архив дублировало бы/рекурсировало отчёт). `SendSnapshot` шлёт обычный лог-отчёт (логи + context + breadcrumbs + срез устройства + опц. скриншот + scene-context) **и** прикрепляет `snapshot.zip` к той же записи через `logId`. Итог: одна запись лога = читаемый отчёт + вложение **Snapshot (saves + data)**. Во вьюере снимок показывается в панели **Saves / Data** первым, как основная загрузка состояния игры; `kind: "save"` подписывается как **Save**.
 
 **Коды ошибок** - те же, что у `/api/logs`:
 

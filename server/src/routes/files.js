@@ -37,8 +37,10 @@ const VALID_PLATFORMS = new Set([
 ]);
 
 // Allowed `kind` hints (free-form classification for the viewer; anything else
-// collapses to null so a bogus value can never break rendering).
-const VALID_KINDS = new Set(['file', 'folder', 'save', 'screenshot', 'archive', 'other']);
+// collapses to null so a bogus value can never break rendering). `snapshot` is
+// the full-game-state archive (saves + registered data) produced by
+// SendSnapshot and attached to a log via logId - just another attachment kind.
+const VALID_KINDS = new Set(['file', 'folder', 'save', 'snapshot', 'screenshot', 'archive', 'other']);
 
 // Rate-limit windows/limits. Files are heavier than logs, so the per-minute
 // allowance is lower than ingest's.

@@ -294,3 +294,11 @@ no new deps).
 - Retention: route layer clamps `retentionDays` to `[1, app.max_retention_days]`
   and computes `expires_at = created_at + days` (ISO). Pinned logs use
   `expires_at = null`.
+- `POST /api/files` (`src/routes/files.js`) classifies the optional `kind` hint
+  against `VALID_KINDS = { file, folder, save, snapshot, screenshot, archive,
+  other }`; any other value collapses to `null` so a bogus hint can never break
+  the viewer. `kind: "snapshot"` is the full game-state archive (`snapshot.zip` =
+  saves + registered data, NOT the log itself) attached to a log via `logId`,
+  produced by the client's `SendSnapshot`. It is stored/served like any other
+  attachment (same blob/row path, retention, `MAX_FILE_BYTES` cap); the viewer's
+  Saves / Data panel labels it "Snapshot (saves + data)" and lists it first.

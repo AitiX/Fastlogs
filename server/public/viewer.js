@@ -814,22 +814,49 @@
     var attBody = document.getElementById('attachments-body');
     document.getElementById('attachments-count').textContent = '(' + attachments.length + ')';
 
-    attachments.forEach(function (att) {
+    // Friendly labels for the known attachment kinds. A snapshot (full game
+    // state: saves + registered data, built by SendSnapshot) is the headline
+    // download here, so it gets a descriptive name and is pinned to the top.
+    // Unknown / null kinds fall through to the raw name + raw kind text, so the
+    // existing file/folder display never regresses.
+    var KIND_LABEL = {
+      snapshot: 'Snapshot (saves + data)',
+      save: 'Save',
+      folder: 'Folder',
+      file: 'File',
+    };
+
+    // Surface snapshots first - they are the game-state download.
+    var ordered = attachments.slice().sort(function (a, b) {
+      var as = a && a.kind === 'snapshot' ? 0 : 1;
+      var bs = b && b.kind === 'snapshot' ? 0 : 1;
+      return as - bs;
+    });
+
+    ordered.forEach(function (att) {
       if (!att || !att.downloadUrl) return;
       var row = document.createElement('div');
       row.className = 'att-row';
+      if (att.kind === 'snapshot') row.className += ' att-row-snapshot';
 
       var info = document.createElement('div');
       info.className = 'att-info';
 
       var nameEl = document.createElement('span');
       nameEl.className = 'att-name';
-      nameEl.textContent = att.name || att.id;
+      // For a snapshot, lead with the descriptive label and demote the raw
+      // file name to the meta line; for everything else keep the file name.
+      nameEl.textContent = att.kind === 'snapshot'
+        ? KIND_LABEL.snapshot
+        : (att.name || att.id);
       info.appendChild(nameEl);
 
       var metaParts = [];
+      if (att.kind === 'snapshot' && att.name) metaParts.push(att.name);
       if (att.size !== null && att.size !== undefined && !isNaN(att.size)) metaParts.push(fmtBytes(att.size));
-      if (att.kind) metaParts.push(att.kind);
+      // Drop the raw kind for a snapshot (already in the label); for the rest
+      // show a friendly label when known, else the raw kind text.
+      if (att.kind && att.kind !== 'snapshot') metaParts.push(KIND_LABEL[att.kind] || att.kind);
       if (metaParts.length > 0) {
         var metaEl = document.createElement('span');
         metaEl.className = 'att-meta';

@@ -283,6 +283,11 @@ a:hover { color: var(--accent-h); text-decoration: underline; }
   padding: 6px 0; border-bottom: 1px solid var(--border);
 }
 .att-row:last-child { border-bottom: none; }
+/* Snapshot (full game state) is the headline download - accent its name. */
+.att-row-snapshot .att-name {
+  font-family: var(--sans, inherit); font-weight: 600; color: var(--accent, var(--text));
+  word-break: normal;
+}
 .att-info { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .att-name {
   color: var(--text); font-family: var(--mono); font-size: 12px;

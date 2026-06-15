@@ -213,3 +213,41 @@ test('pinned file survives an expired-in-the-past timestamp and the sweep', asyn
   assert.equal((await req(ctx.baseUrl, '/files/' + id)).status, 200);
   assert.ok(ctx.db.getFile(id), 'pinned file row remains');
 });
+
+test('kind="snapshot" linked by logId is accepted and listed as a snapshot attachment', async () => {
+  const ing = await ingest({});
+  assert.equal(ing.status, 201);
+  const logId = ing.body.id;
+
+  // The full-game-state archive: kind is accepted (not coerced to null) and the
+  // upload is stored + linked just like any other attachment kind.
+  const up = await upload({
+    name: 'snapshot.zip', mime: 'application/zip', kind: 'snapshot',
+    logId, fileBase64: b64('PK-snapshot-bytes'),
+  });
+  assert.equal(up.status, 201, JSON.stringify(up.body));
+
+  // The stored row keeps the snapshot kind (not nulled).
+  assert.equal(ctx.db.getFile(up.body.id).kind, 'snapshot');
+
+  // It surfaces in the log's attachments[] with kind="snapshot".
+  const meta = await req(ctx.baseUrl, '/api/logs/' + logId);
+  assert.equal(meta.status, 200);
+  assert.equal(meta.body.attachments.length, 1);
+  const att = meta.body.attachments[0];
+  assert.equal(att.id, up.body.id);
+  assert.equal(att.kind, 'snapshot');
+  assert.equal(att.name, 'snapshot.zip');
+  assert.equal(att.downloadUrl, '/files/' + up.body.id + '/download');
+
+  // And the snapshot archive is downloadable verbatim.
+  const dl = await req(ctx.baseUrl, att.downloadUrl);
+  assert.equal(dl.status, 200);
+  assert.equal(dl.body, 'PK-snapshot-bytes');
+});
+
+test('an unknown kind still coerces to null (existing behavior preserved)', async () => {
+  const up = await upload({ name: 'mystery.bin', kind: 'totally-bogus-kind' });
+  assert.equal(up.status, 201);
+  assert.equal(ctx.db.getFile(up.body.id).kind, null);
+});
