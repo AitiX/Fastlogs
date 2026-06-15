@@ -45,6 +45,15 @@
   var searchQuery = (appId && !version && !isCrashes) ? (searchParams.get('q') || '') : '';
   var sessionId = (appId && !version && !isCrashes) ? (searchParams.get('session') || '') : '';
 
+  // Persist the viewer token. The catalog is server-gated, so this page always
+  // arrives with ?token=...; storing it lets a later token-less log link (the
+  // viewer reads the same fallback) still reach the team-gated catalog via the
+  // FastLogs logo. localStorage may be unavailable (private mode) - tolerate.
+  try {
+    var __catalogToken = searchParams.get('token');
+    if (__catalogToken) localStorage.setItem('fastlogs_token', __catalogToken);
+  } catch (e) { /* storage blocked - no persistence */ }
+
   // The FastLogs logo returns to the projects home, carrying the token so the
   // catalog stays authorized (a bare /browse would 401).
   var logoEl = document.querySelector('.topbar-logo');
@@ -428,7 +437,7 @@
     });
     if (hasRoot) {
       var rootOpt = document.createElement('option');
-      rootOpt.value = ' root'; rootOpt.textContent = '(root)';
+      rootOpt.value = ' root'; rootOpt.textContent = '(root)';
       folderSelect.appendChild(rootOpt);
     }
     Object.keys(folderSet).sort().forEach(function (f) {

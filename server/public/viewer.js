@@ -60,14 +60,30 @@
     toastTimer = setTimeout(function () { el.classList.remove('show'); }, durationMs || 2000);
   }
 
+  // ---- Token ----
+
+  // Resolve the viewer token: prefer one in the current URL, otherwise fall back
+  // to a previously stored one. When a URL token is present we persist it, so a
+  // later visit to a token-less log link (e.g. a short link pasted in chat) can
+  // still reach the team-gated catalog. localStorage may be unavailable (private
+  // mode / file://) - tolerate and degrade to URL-only.
+  function viewerToken() {
+    var t = new URLSearchParams(window.location.search).get('token');
+    try {
+      if (t) localStorage.setItem('fastlogs_token', t);
+      else t = localStorage.getItem('fastlogs_token') || '';
+    } catch (e) { /* storage blocked - URL token only */ }
+    return t || '';
+  }
+
   // ---- Mutation URL builder ----
 
-  // Build an /api/logs/:id/<action> URL, forwarding a ?token= from the current
-  // location when present. The token is harmless on the open-by-link endpoints
-  // (status/tags) and required by the viewer-gated one (redmine).
+  // Build an /api/logs/:id/<action> URL, forwarding the viewer token when known.
+  // The token is harmless on the open-by-link endpoints (status/tags) and
+  // required by the viewer-gated one (redmine).
   function apiUrl(id, action) {
     var url = '/api/logs/' + encodeURIComponent(id) + '/' + action;
-    var token = new URLSearchParams(window.location.search).get('token');
+    var token = viewerToken();
     if (token) url += '?token=' + encodeURIComponent(token);
     return url;
   }
@@ -111,7 +127,7 @@
   // one so the catalog stays authorized; a bare /browse would 401.
   var logoEl = document.getElementById('topbar-logo');
   if (logoEl) {
-    var logoToken = new URLSearchParams(window.location.search).get('token');
+    var logoToken = viewerToken();
     logoEl.href = '/browse' + (logoToken ? '?token=' + encodeURIComponent(logoToken) : '');
   }
 
@@ -342,7 +358,7 @@
   // authorized; without a token the link still works for token-less viewer
   // setups and otherwise lands on the catalog auth prompt.
   if (data.sessionId && data.appId) {
-    var sToken = new URLSearchParams(window.location.search).get('token');
+    var sToken = viewerToken();
     var sHref = '/browse/' + encodeURIComponent(data.appId) +
       (sToken ? '?token=' + encodeURIComponent(sToken) + '&' : '?') +
       'session=' + encodeURIComponent(data.sessionId);
