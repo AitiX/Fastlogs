@@ -175,6 +175,29 @@ function browseVersion(req, res, params, query) {
   });
 }
 
+// GET /browse/:appId/pinned -> pinned logs (JSON) or the catalog UI (HTML).
+// One place to browse ALL of an app's pinned logs across every version, newest
+// first: the auto-pinned (a log that spawned a Redmine task is pinned) plus any
+// manually pinned logs, which are otherwise scattered version-by-version. Same
+// catalog-row shape as the version view, so the client renders it identically.
+function browsePinned(req, res, params, query) {
+  if (!authorizeViewer(req, query)) {
+    return sendError(res, 401, 'unauthorized', 'Viewer token required');
+  }
+  if (wantsHtml(req, query)) return serveBrowseHtml(res);
+  const canonicalId = db.resolveAppId(params.appId);
+  const app = canonicalId ? db.getApp(canonicalId) : undefined;
+  if (!app) {
+    return sendError(res, 404, 'not_found', 'Unknown appId');
+  }
+  const logs = db.listPinnedLogs(app.app_id, nowUtcIso()).map(catalogRowFromLog);
+  sendJson(res, 200, {
+    appId: app.app_id,
+    name: app.name,
+    logs,
+  });
+}
+
 // The distinct app version immediately below `latest` (by version order), or
 // null if `latest` is the only/lowest version. Used to detect a regression
 // (a crash absent from the preceding version but back in the latest one).
@@ -305,4 +328,4 @@ async function browseCrashes(req, res, params, query) {
   sendJson(res, 200, { appId: app.app_id, name: app.name, latestVersion, crashes });
 }
 
-module.exports = { browseRoot, browseApp, browseVersion, browseCrashes };
+module.exports = { browseRoot, browseApp, browseVersion, browseCrashes, browsePinned };

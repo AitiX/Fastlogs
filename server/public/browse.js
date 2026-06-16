@@ -8,6 +8,7 @@
 //   /browse                     - list all projects
 //   /browse/:appId              - list versions of one project
 //   /browse/:appId/crashes      - crash groups for one project (by signature)
+//   /browse/:appId/pinned       - pinned logs of one project (across versions)
 //   /browse/:appId/:version     - list logs of one app+version
 //
 // It fetches the JSON form of the SAME endpoints (with ?format=json so the
@@ -16,6 +17,7 @@
 //   GET /browse?format=json                    -> { projects: [{ appId, name, enabled, engine, totalBytes, logCount, pinnedCount }], totals }
 //   GET /browse/:appId?format=json             -> { appId, name, versions: [{ version, count, logCount, totalBytes, pinnedCount, lastAt }], totals, largestLogs }
 //   GET /browse/:appId/crashes?format=json     -> { appId, name, latestVersion, crashes: [{ sig, signature, title, platform, count, testers, versions, firstSeenVersion, lastSeenVersion, isNew, kind, sampleLogId }] }
+//   GET /browse/:appId/pinned?format=json      -> { appId, name, logs: [{ id, title, time, createdAt, platform, counts:{error,warn,log}, logBytes, hasScreenshot, pinned, status, tags, engine, version, expiresAt }] }
 //   GET /browse/:appId/:version?format=json    -> { appId, name, version, logs: [{ id, title, time, createdAt, platform, counts:{error,warn,log}, logBytes, hasScreenshot, pinned, status, tags, engine, expiresAt }] }
 //
 // Catalog access is team-gated. The viewer token is supplied as ?token=... in
@@ -31,9 +33,12 @@
   var appId = parts[0] ? decodeURIComponent(parts[0]) : null;
   // The crashes view is the special path [appId, 'crashes'] (exactly two parts).
   var isCrashes = parts.length === 2 && parts[1] === 'crashes';
+  // The pinned view is the special path [appId, 'pinned'] (exactly two parts):
+  // all pinned logs of the app across every version, in one place.
+  var isPinned = parts.length === 2 && parts[1] === 'pinned';
   // Version may itself contain encoded slashes; join the remaining parts.
-  // (Never treated as a version when this is the crashes view.)
-  var version = (!isCrashes && parts.length > 1) ? decodeURIComponent(parts.slice(1).join('/')) : null;
+  // (Never treated as a version when this is the crashes or pinned view.)
+  var version = (!isCrashes && !isPinned && parts.length > 1) ? decodeURIComponent(parts.slice(1).join('/')) : null;
 
   // Preserve the query string for auth token forwarding (e.g. "?token=xyz").
   var qs = window.location.search;
@@ -42,8 +47,8 @@
   // search query (?q=) and a session filter (?session=). These pick a special
   // view of one app without a new path segment.
   var searchParams = new URLSearchParams(window.location.search);
-  var searchQuery = (appId && !version && !isCrashes) ? (searchParams.get('q') || '') : '';
-  var sessionId = (appId && !version && !isCrashes) ? (searchParams.get('session') || '') : '';
+  var searchQuery = (appId && !version && !isCrashes && !isPinned) ? (searchParams.get('q') || '') : '';
+  var sessionId = (appId && !version && !isCrashes && !isPinned) ? (searchParams.get('session') || '') : '';
 
   // Persist the viewer token. The catalog is server-gated, so this page always
   // arrives with ?token=...; storing it lets a later token-less log link (the
@@ -180,7 +185,7 @@
 
   // ---- Breadcrumbs ----
 
-  function renderBreadcrumbs(appId, version, isCrashes) {
+  function renderBreadcrumbs(appId, version, isCrashes, isPinned) {
     var bc = document.getElementById('breadcrumbs');
     var catalog = '<span class="crumb"><a href="' + withQs('/browse') + '">Catalog</a></span>';
     var sep = '<span class="crumb-sep">/</span>';
@@ -191,6 +196,10 @@
       html = catalog + sep +
         '<span class="crumb"><a href="' + appHomeHref(appId) + '">' + esc(appId) + '</a></span>' +
         sep + '<span class="crumb">Crashes</span>';
+    } else if (isPinned) {
+      html = catalog + sep +
+        '<span class="crumb"><a href="' + appHomeHref(appId) + '">' + esc(appId) + '</a></span>' +
+        sep + '<span class="crumb">Pinned</span>';
     } else if (searchQuery) {
       html = catalog + sep +
         '<span class="crumb"><a href="' + appHomeHref(appId) + '">' + esc(appId) + '</a></span>' +
@@ -321,6 +330,17 @@
     crashesLink.href = withQs('/browse/' + encodeURIComponent(appId) + '/crashes');
     crashesLink.textContent = 'View crashes (grouped)';
     contentEl.appendChild(crashesLink);
+
+    // One link to the pinned view for this app: all pinned logs (auto-pinned by a
+    // Redmine task + any manually pinned) gathered across versions. The count is
+    // the app-level pinned total (totals.pinnedCount), so the link advertises how
+    // many there are before the click. Carries the token like every catalog link.
+    var pinnedTotal = (totals && totals.pinnedCount) || 0;
+    var pinnedLink = document.createElement('a');
+    pinnedLink.className = 'crashes-link';
+    pinnedLink.href = withQs('/browse/' + encodeURIComponent(appId) + '/pinned');
+    pinnedLink.textContent = 'Pinned (' + pinnedTotal + ')';
+    contentEl.appendChild(pinnedLink);
 
     // App-wide totals rollup.
     if (totals) {
@@ -789,6 +809,166 @@
     });
   }
 
+  // ---- View: Pinned logs (GET /browse/:appId/pinned) ----
+
+  // All pinned logs of one app across every version, newest first: the auto-
+  // pinned (a log that spawned a Redmine task is pinned) plus any manually
+  // pinned logs, gathered into one place. Mirrors the version-view log rows
+  // (renderLogs): the same id/title/platform/counts/size/status/time/pin cells,
+  // each opening the log in a new tab, with the same title/platform/level/status
+  // filters + sort. Cross-version, so it shows a Version column in place of the
+  // version view's Folder column and drops the folder Move toolbar (no folder
+  // context here).
+  function renderPinned(appId, logs) {
+    var filterInput = document.getElementById('filter-input');
+    filterInput.placeholder = 'Search by title...';
+
+    var platformSelect = document.getElementById('platform-select');
+    var levelSelect = document.getElementById('level-select');
+    var statusSelect = document.getElementById('status-select');
+    var sortSelect = document.getElementById('sort-select');
+
+    // Reset the shared controls to defaults on entry (the shell is shared across
+    // views, so a value could linger from a back/forward).
+    statusSelect.value = '';
+    sortSelect.value = 'newest';
+
+    if (!logs || logs.length === 0) {
+      showEmpty('No pinned logs for ' + appId + '.');
+      return;
+    }
+
+    // Reveal the filter/sort controls only when there is something to act on.
+    platformSelect.style.display = '';
+    levelSelect.style.display = '';
+    statusSelect.style.display = '';
+    sortSelect.style.display = '';
+
+    // Collect unique platforms.
+    var platforms = {};
+    logs.forEach(function (log) { if (log.platform) platforms[log.platform] = true; });
+    Object.keys(platforms).sort().forEach(function (p) {
+      var opt = document.createElement('option');
+      opt.value = p; opt.textContent = p;
+      platformSelect.appendChild(opt);
+    });
+
+    var wrap = document.createElement('div');
+    wrap.className = 'logs-table-wrap';
+
+    var table = document.createElement('table');
+    table.className = 'logs-table';
+    table.innerHTML =
+      '<thead><tr>' +
+      '<th>ID</th>' +
+      '<th>Title</th>' +
+      '<th>Version</th>' +
+      '<th>Platform</th>' +
+      '<th>E / W / L</th>' +
+      '<th>Size</th>' +
+      '<th>Status</th>' +
+      '<th>Time</th>' +
+      '<th>Pin</th>' +
+      '</tr></thead>';
+
+    var tbody = document.createElement('tbody');
+
+    logs.forEach(function (log) {
+      var id = log.id || '';
+      var counts = log.counts || {};
+      var cntE = counts.error != null ? counts.error : 0;
+      var cntW = counts.warn != null ? counts.warn : 0;
+      var cntL = counts.log != null ? counts.log : 0;
+      var status = log.status || 'new';
+
+      // Epoch ms for sorting (newest/oldest). Fall back to 0 if unparseable.
+      var timeStr = log.time || log.createdAt;
+      var timeMs = timeStr ? Date.parse(timeStr) : NaN;
+      if (isNaN(timeMs)) timeMs = 0;
+      var bytes = (log.logBytes != null && !isNaN(log.logBytes)) ? log.logBytes : 0;
+
+      var engineHtml = log.engine ? ' <span class="engine-badge">' + esc(log.engine) + '</span>' : '';
+
+      var tr = document.createElement('tr');
+      tr.dataset.platform = log.platform || '';
+      tr.dataset.error = cntE;
+      tr.dataset.warn = cntW;
+      tr.dataset.title = (log.title || '').toLowerCase();
+      tr.dataset.status = status;
+      tr.dataset.timeMs = timeMs;
+      tr.dataset.logBytes = bytes;
+      tr.dataset.id = id;
+
+      tr.innerHTML =
+        '<td class="td-id"><a href="' + withQs('/' + encodeURIComponent(id)) + '" target="_blank">' + esc(id) + '</a></td>' +
+        '<td class="td-title"><span class="td-title-text" title="' + esc(log.title || '') + '">' + esc(log.title || '(no title)') + '</span></td>' +
+        '<td class="td-platform">' + esc(log.version || '') + '</td>' +
+        '<td class="td-platform">' + esc(log.platform || '') + engineHtml + '</td>' +
+        '<td class="td-counts"><span class="count-e">' + cntE + '</span> / <span class="count-w">' + cntW + '</span> / <span class="count-l">' + cntL + '</span></td>' +
+        '<td class="td-size">' + esc(fmtBytes(log.logBytes)) + '</td>' +
+        '<td class="td-status">' + statusBadge(status) + '</td>' +
+        '<td class="td-time">' + esc(fmtDate(log.time || log.createdAt)) + '</td>' +
+        '<td class="td-pin">' + (log.pinned ? '<span class="badge-pin">pinned</span>' : '') + '</td>';
+
+      tr.addEventListener('click', function (e) {
+        if (e.target.tagName === 'A') return;
+        window.open(withQs('/' + encodeURIComponent(id)), '_blank');
+      });
+
+      tbody.appendChild(tr);
+    });
+
+    table.appendChild(tbody);
+    wrap.appendChild(table);
+    contentEl.innerHTML = '';
+    contentEl.appendChild(wrap);
+
+    // One merged filter + sort pass (mirrors renderLogs, minus the folder filter
+    // and the selection sync, neither of which applies to the pinned overview).
+    function applyFilters() {
+      var q = filterInput.value.toLowerCase();
+      var pf = platformSelect.value;
+      var lv = levelSelect.value;
+      var st = statusSelect.value;
+      var sortBy = sortSelect.value;
+
+      var rows = Array.prototype.slice.call(tbody.querySelectorAll('tr'));
+
+      rows.forEach(function (tr) {
+        var errCount = parseInt(tr.dataset.error, 10) || 0;
+        var titleOk = !q || tr.dataset.title.indexOf(q) !== -1;
+        var pfOk = !pf || tr.dataset.platform === pf;
+        var lvOk = true;
+        if (lv === 'error') lvOk = errCount > 0;
+        else if (lv === 'warn') lvOk = (parseInt(tr.dataset.warn, 10) || 0) > 0;
+        var stOk = !st || tr.dataset.status === st;
+        tr.classList.toggle('hidden', !(titleOk && pfOk && lvOk && stOk));
+      });
+
+      var visible = rows.filter(function (tr) { return !tr.classList.contains('hidden'); });
+      visible.sort(function (a, b) {
+        if (sortBy === 'oldest') {
+          return (parseFloat(a.dataset.timeMs) || 0) - (parseFloat(b.dataset.timeMs) || 0);
+        }
+        if (sortBy === 'errors') {
+          return (parseInt(b.dataset.error, 10) || 0) - (parseInt(a.dataset.error, 10) || 0);
+        }
+        if (sortBy === 'largest') {
+          return (parseFloat(b.dataset.logBytes) || 0) - (parseFloat(a.dataset.logBytes) || 0);
+        }
+        // Default: newest first.
+        return (parseFloat(b.dataset.timeMs) || 0) - (parseFloat(a.dataset.timeMs) || 0);
+      });
+      visible.forEach(function (tr) { tbody.appendChild(tr); });
+    }
+
+    filterInput.addEventListener('input', applyFilters);
+    platformSelect.addEventListener('change', applyFilters);
+    levelSelect.addEventListener('change', applyFilters);
+    statusSelect.addEventListener('change', applyFilters);
+    sortSelect.addEventListener('change', applyFilters);
+  }
+
   // ---- Shared: a catalog log-record table for the search + session views ----
 
   // Build a "link to all logs of this session" anchor for a row, or '' when the
@@ -909,7 +1089,7 @@
 
   // ---- Main: route and fetch ----
 
-  renderBreadcrumbs(appId, version, isCrashes);
+  renderBreadcrumbs(appId, version, isCrashes, isPinned);
 
   if (!appId) {
     // Root: list projects.
@@ -929,6 +1109,16 @@
       .catch(function (err) {
         if (err.message === 'auth_required') showError('Authentication required. Pass ?token= in the URL.');
         else showError('Failed to load crashes: ' + err.message);
+      });
+
+  } else if (isPinned) {
+    // Pinned logs for one app (across all versions).
+    document.title = 'FastLogs - ' + appId + ' / Pinned';
+    fetchJson('/browse/' + encodeURIComponent(appId) + '/pinned')
+      .then(function (data) { renderPinned(appId, (data && data.logs) || []); })
+      .catch(function (err) {
+        if (err.message === 'auth_required') showError('Authentication required. Pass ?token= in the URL.');
+        else showError('Failed to load pinned logs: ' + err.message);
       });
 
   } else if (searchQuery) {

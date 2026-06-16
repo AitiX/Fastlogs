@@ -33,7 +33,7 @@ const { pin } = require('./routes/pin');
 const { setStatus, setTags } = require('./routes/triage');
 const { createRedmineIssue } = require('./routes/redmine');
 const { awaitByCode } = require('./routes/await');
-const { browseRoot, browseApp, browseVersion, browseCrashes } = require('./routes/browse');
+const { browseRoot, browseApp, browseVersion, browseCrashes, browsePinned } = require('./routes/browse');
 const { search } = require('./routes/search');
 const folders = require('./routes/folders');
 const { handleFileUpload, fileDownload, fileViewer } = require('./routes/files');
@@ -73,13 +73,15 @@ router.get('/api/search', search);
 router.get('/api/folders', folders.listFolders);
 router.post('/api/folders/move', folders.moveToFolder);
 
-// Catalog (viewer-token gated). The literal "crashes" route MUST precede the
-// "/:version" catch-all: both are 3-segment GET patterns and the router is
-// first-fit by segment count, so "/browse/:appId/:version" would otherwise
-// swallow "crashes" as a version (locked by crashes-route-order.test.js).
+// Catalog (viewer-token gated). The literal "crashes" / "pinned" routes MUST
+// precede the "/:version" catch-all: all three are 3-segment GET patterns and
+// the router is first-fit by segment count, so "/browse/:appId/:version" would
+// otherwise swallow "crashes"/"pinned" as a version (locked by
+// crashes-route-order.test.js).
 router.get('/browse', browseRoot);
 router.get('/browse/:appId', browseApp);
 router.get('/browse/:appId/crashes', browseCrashes);
+router.get('/browse/:appId/pinned', browsePinned);
 router.get('/browse/:appId/:version', browseVersion);
 
 // Static viewer + catalog assets (explicit allowlist; handled by the static

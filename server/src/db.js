@@ -388,6 +388,22 @@ const stmts = {
     ORDER BY created_at DESC
   `),
 
+  // Pinned logs of one app across ALL versions, newest first. Pinned rows never
+  // expire (pin sets expires_at NULL), so no liveness filter is needed - a
+  // pinned row is live by definition. Shaped like listLogsBySession (catalog row
+  // columns plus app_version) so the catalog renders them with the same mapper.
+  // Backs the per-app "Pinned" view, which gathers the auto-pinned (Redmine) and
+  // manually pinned logs scattered across versions into one place.
+  listPinnedLogs: db.prepare(`
+    SELECT id, title, ts_utc, platform, cnt_error, cnt_warn, cnt_log,
+           log_bytes, has_shot, pinned, status, tags, crash_sig, engine,
+           app_version, session_id, folder, created_at, expires_at
+    FROM logs
+    WHERE app_id = @app_id AND pinned = 1
+    ORDER BY created_at DESC
+    LIMIT @limit
+  `),
+
   // Live logs of one app (catalog columns) for the full-text search join. The
   // FTS index is contentless and app-agnostic, so search matches by rowid are
   // intersected with this set in JS (see searchLogs). Liveness mirrors
@@ -782,6 +798,17 @@ function listLogsBySession(appId, sessionId, now) {
   return stmts.listLogsBySession.all({ app_id: appId, session_id: sessionId, now });
 }
 
+// Pinned logs of one app across ALL versions, newest first. `now` is accepted
+// for signature parity with the other browse paths but unused for liveness: a
+// pinned row has expires_at NULL, so it is live by definition (the sweeper skips
+// pinned rows). `limit` caps the result (defaults to config.pinnedListLimit).
+// Rows are shaped like listLogsBySession (plus app_version), so the catalog
+// route can render them with the same catalogRowFromLog mapper.
+function listPinnedLogs(appId, now, limit) {
+  const n = Number.isFinite(limit) ? limit : config.pinnedListLimit;
+  return stmts.listPinnedLogs.all({ app_id: appId, limit: n });
+}
+
 // Live crash rows for an app (`now` is an ISO-8601 UTC string for the liveness
 // filter). Returns raw rows; the route groups them by crash_sig.
 function listCrashRows(appId, now) {
@@ -1000,6 +1027,7 @@ module.exports = {
   largestLogs,
   listLogs,
   listLogsBySession,
+  listPinnedLogs,
   listCrashRows,
   listLogsMissingSig,
   getLatestByCode,

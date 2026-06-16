@@ -153,6 +153,12 @@ const config = Object.freeze({
   // Storage dashboard: how many of the largest logs to list per app.
   statsTopN: envInt('STATS_TOP_N', 5),
 
+  // Per-app "Pinned" catalog view: max pinned logs returned in one
+  // GET /browse/:appId/pinned (newest first). Pinned rows are the auto-pinned
+  // (Redmine task) plus manually pinned logs of an app; this caps the gathered
+  // list so the view stays bounded on an app with many pins.
+  pinnedListLimit: envInt('PINNED_LIST_LIMIT', 500),
+
   // Log folders (manual catalog organisation). folderMaxLen bounds the whole
   // normalized path; folderMaxDepth bounds how many "/"-separated segments a
   // path may have; folderSegmentMaxLen bounds one segment. A path that violates

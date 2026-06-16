@@ -38,6 +38,7 @@ Frozen config object (singleton). `require('./config')` returns:
 | `triageRequiresAdmin` | boolean | Status/tags require the admin token when true (else open by link) |
 | `triageTagMaxLen` / `triageTagMaxCount` | number | Per-tag length cap (32) / tags-per-log cap (20) |
 | `statsTopN` | number | Largest-logs count for the dashboard (5) |
+| `pinnedListLimit` | number | Max pinned logs returned by `GET /browse/:appId/pinned` (500) |
 | `folderMaxLen` / `folderMaxDepth` / `folderSegmentMaxLen` | number | Folder path validation: whole-path length (200) / depth in `/`-segments (8) / one segment (60) |
 | `folderMoveMaxIds` | number | Max log ids accepted in one `POST /api/folders/move` (500) |
 | `crashSigTopK` / `crashRecomputeBatch` | number | Crash signature frame count (8) / lazy-backfill batch (200) |
@@ -102,6 +103,11 @@ on load. Exports:
   restricted to one folder. `folder` is the exact path string, or null for the
   ROOT (folder NULL). Same row shape (incl. the `folder` column).
 - `listLogsBySession(appId, sessionId, now): Row[]` - live logs of one session, newest first (same columns plus `app_version`).
+- `listPinnedLogs(appId, now[, limit]): Row[]` - pinned (`pinned = 1`) logs of one
+  app across ALL versions, newest first (same columns plus `app_version`). Backs
+  the per-app "Pinned" view (`GET /browse/:appId/pinned`). `now` is accepted for
+  signature parity but unused: a pinned row has `expires_at` NULL, so it is live
+  by definition. `limit` caps the result (defaults to `config.pinnedListLimit`).
 - `setLogFolder(id, appId, folder): RunResult` - assign a log to a folder (or
   clear it; `folder` null = root). Scoped by `app_id` (the move stays in the
   project); `.changes` is 1 when the log existed in that app.
